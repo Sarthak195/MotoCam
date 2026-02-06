@@ -7,6 +7,8 @@ import android.location.Location
 import android.location.LocationListener
 import android.location.LocationManager
 import android.os.Bundle
+import android.view.View
+import android.widget.FrameLayout
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -29,6 +31,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalInspectionMode
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -157,43 +160,54 @@ fun CameraScreen(
 
 ) {
     val context = LocalContext.current
+    // Check if we are in a preview environment
+    val isInPreview = LocalInspectionMode.current
 
     Box(modifier = Modifier.fillMaxSize()) {
 
         AndroidView(
             modifier = Modifier.fillMaxSize(),
             factory = { ctx ->
-                val previewView = PreviewView(ctx)
+                if (isInPreview) {
+                    // In preview mode, return a simple placeholder View
+                    FrameLayout(ctx).apply {
+                        // Optionally, add a Text or other composable here to indicate it's a preview
+                        // For instance: addView(TextView(ctx).apply { text = "Camera Preview Placeholder" })
+                    }
+                } else {
+                    // In actual runtime, initialize CameraX
+                    val previewView = PreviewView(ctx)
 
-                val cameraProviderFuture =
-                    ProcessCameraProvider.getInstance(ctx)
+                    val cameraProviderFuture =
+                        ProcessCameraProvider.getInstance(ctx)
 
-                cameraProviderFuture.addListener({
-                    val cameraProvider = cameraProviderFuture.get()
+                    cameraProviderFuture.addListener({
+                        val cameraProvider = cameraProviderFuture.get()
 
-                    val preview = Preview.Builder().build()
-                    preview.setSurfaceProvider(previewView.surfaceProvider)
+                        val preview = Preview.Builder().build()
+                        preview.setSurfaceProvider(previewView.surfaceProvider)
 
-                    val recorder = Recorder.Builder()
-                        .setQualitySelector(
-                            QualitySelector.from(Quality.HD)
+                        val recorder = Recorder.Builder()
+                            .setQualitySelector(
+                                QualitySelector.from(Quality.HD)
+                            )
+                            .build()
+
+                        val capture = VideoCapture.withOutput(recorder)
+
+                        onVideoCaptureReady(capture)
+
+                        cameraProvider.unbindAll()
+                        cameraProvider.bindToLifecycle(
+                            context as ComponentActivity,
+                            CameraSelector.DEFAULT_BACK_CAMERA,
+                            preview,
+                            capture
                         )
-                        .build()
+                    }, ContextCompat.getMainExecutor(ctx))
 
-                    val capture = VideoCapture.withOutput(recorder)
-
-                    onVideoCaptureReady(capture)
-
-                    cameraProvider.unbindAll()
-                    cameraProvider.bindToLifecycle(
-                        context as ComponentActivity,
-                        CameraSelector.DEFAULT_BACK_CAMERA,
-                        preview,
-                        capture
-                    )
-                }, ContextCompat.getMainExecutor(ctx))
-
-                previewView
+                    previewView
+                }
             }
         )
 
