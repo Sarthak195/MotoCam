@@ -42,7 +42,7 @@ class MainActivity : ComponentActivity(), LocationListener {
 
     private lateinit var locationManager: LocationManager
     private var isRecording = false
-    private val speedLimit = 5.0
+    private val speedLimit = 1.0
     private var isRecordingState by mutableStateOf(false)
 
 
