@@ -1,0 +1,19 @@
+<!-- ios/Runner/Info.plist -->
+
+<key>NSCameraUsageDescription</key>
+<string>MotoCam needs camera access to record your rides</string>
+
+<key>NSMicrophoneUsageDescription</key>
+<string>MotoCam needs microphone access to record audio</string>
+
+<key>NSLocationWhenInUseUsageDescription</key>
+<string>MotoCam needs your location to track your route</string>
+
+<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+<string>MotoCam needs your location to track your route even when in background</string>
+
+<key>UIBackgroundModes</key>
+<array>
+    <string>location</string>
+    <string>audio</string>
+</array>
