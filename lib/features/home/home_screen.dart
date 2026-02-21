@@ -42,10 +42,10 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
 
           // 📷 Camera PiP (top-right corner)
-          const Positioned(
+          Positioned(
             top: 60,
             right: 16,
-            child: CameraPreviewPip(),
+            child: CameraPreviewPip(),  // REMOVE const here
           ),
 
           // 🏃 Speed overlay (top-center)

@@ -1,103 +1,107 @@
 // lib/features/map/widgets/map_view.dart
 
 import 'package:flutter/material.dart';
-import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:provider/provider.dart';
-import '../../../core/services/location_service.dart';
+import '../../telemetry/providers/telemetry_provider.dart';
 
-class MapView extends StatefulWidget {
+class MapView extends StatelessWidget {
   const MapView({Key? key}) : super(key: key);
 
   @override
-  State<MapView> createState() => _MapViewState();
-}
-
-class _MapViewState extends State<MapView> {
-  GoogleMapController? _mapController;
-  final LocationService _locationService = LocationService();
-  
-  LatLng _currentPosition = const LatLng(0, 0);
-  Set<Marker> _markers = {};
-  Set<Polyline> _polylines = {};
-
-  @override
-  void initState() {
-    super.initState();
-    _initializeLocation();
-  }
-
-  Future<void> _initializeLocation() async {
-    final position = await _locationService.getCurrentLocation();
-    if (position != null) {
-      setState(() {
-        _currentPosition = LatLng(position.latitude, position.longitude);
-        _markers.add(
-          Marker(
-            markerId: const MarkerId('current'),
-            position: _currentPosition,
-            icon: BitmapDescriptor.defaultMarkerWithHue(
-              BitmapDescriptor.hueBlue,
+  Widget build(BuildContext context) {
+    return Consumer<TelemetryProvider>(
+      builder: (context, telemetry, _) {
+        final data = telemetry.currentData;
+        
+        return Container(
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.topCenter,
+              end: Alignment.bottomCenter,
+              colors: [
+                Colors.grey[900]!,
+                Colors.black,
+              ],
+            ),
+          ),
+          child: Center(
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(
+                  Icons.map_outlined,
+                  size: 100,
+                  color: Colors.blue.withOpacity(0.3),
+                ),
+                const SizedBox(height: 24),
+                Text(
+                  'Map View',
+                  style: TextStyle(
+                    color: Colors.grey[400],
+                    fontSize: 28,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(height: 16),
+                Container(
+                  padding: const EdgeInsets.all(16),
+                  margin: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: Colors.white.withOpacity(0.05),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(
+                      color: Colors.white.withOpacity(0.1),
+                    ),
+                  ),
+                  child: Column(
+                    children: [
+                      _buildInfoRow('Latitude', data.latitude.toStringAsFixed(6)),
+                      const SizedBox(height: 8),
+                      _buildInfoRow('Longitude', data.longitude.toStringAsFixed(6)),
+                      const SizedBox(height: 8),
+                      _buildInfoRow('Bearing', '${data.bearing.toStringAsFixed(1)}°'),
+                      const SizedBox(height: 8),
+                      _buildInfoRow('Acceleration', '${data.accelerationG.toStringAsFixed(2)}G'),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 16),
+                Text(
+                  '🗺️ Maps will be enabled later',
+                  style: TextStyle(
+                    color: Colors.grey[600],
+                    fontSize: 14,
+                  ),
+                ),
+              ],
             ),
           ),
         );
-      });
-
-      _mapController?.animateCamera(
-        CameraUpdate.newLatLngZoom(_currentPosition, 15),
-      );
-    }
-
-    // Start tracking
-    _locationService.startTracking().listen((position) {
-      setState(() {
-        _currentPosition = LatLng(position.latitude, position.longitude);
-        _updateMarker(_currentPosition);
-      });
-
-      _mapController?.animateCamera(
-        CameraUpdate.newLatLng(_currentPosition),
-      );
-    });
-  }
-
-  void _updateMarker(LatLng position) {
-    _markers.removeWhere((m) => m.markerId.value == 'current');
-    _markers.add(
-      Marker(
-        markerId: const MarkerId('current'),
-        position: position,
-        icon: BitmapDescriptor.defaultMarkerWithHue(
-          BitmapDescriptor.hueBlue,
-        ),
-        rotation: _locationService.currentPosition?.heading ?? 0,
-      ),
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return GoogleMap(
-      initialCameraPosition: CameraPosition(
-        target: _currentPosition,
-        zoom: 15,
-      ),
-      onMapCreated: (controller) {
-        _mapController = controller;
       },
-      markers: _markers,
-      polylines: _polylines,
-      myLocationEnabled: true,
-      myLocationButtonEnabled: false,
-      compassEnabled: true,
-      mapType: MapType.normal,
-      zoomControlsEnabled: false,
-      trafficEnabled: true,
     );
   }
 
-  @override
-  void dispose() {
-    _mapController?.dispose();
-    super.dispose();
+  Widget _buildInfoRow(String label, String value) {
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      children: [
+        Text(
+          label,
+          style: TextStyle(
+            color: Colors.grey[500],
+            fontSize: 14,
+          ),
+        ),
+        Text(
+          value,
+          style: const TextStyle(
+            color: Colors.white,
+            fontSize: 14,
+            fontWeight: FontWeight.bold,
+            fontFeatures: [FontFeature.tabularFigures()],
+          ),
+        ),
+      ],
+    );
   }
 }

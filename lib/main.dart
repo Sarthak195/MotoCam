@@ -6,7 +6,7 @@ import 'package:provider/provider.dart';
 import 'features/camera/providers/camera_provider.dart';
 import 'features/telemetry/providers/telemetry_provider.dart';
 import 'features/home/home_screen.dart';
-import 'core/services/recording_service.dart';
+// REMOVED: import 'core/services/recording_service.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -16,8 +16,7 @@ void main() async {
     DeviceOrientation.portraitUp,
   ]);
   
-  // Initialize foreground service
-  RecordingService.initForegroundTask();
+  // REMOVED: RecordingService.initForegroundTask();
   
   runApp(const MotoCamApp());
 }
