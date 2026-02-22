@@ -15,7 +15,10 @@ dependencies:
   # Camera
   camera: ^0.10.5+5
   
-  # Location (no maps)
+  # Mappls Maps SDK (version 2.0.3 as per docs)
+  mappls_gl: 2.0.3
+  
+  # Location
   geolocator: ^10.1.0
   
   # Sensors
