@@ -13,30 +13,30 @@ dependencies:
   provider: ^6.1.1
   
   # Camera
-  camera: ^0.10.5+5
+  camera: ^0.12.0
   
   # Mappls Maps SDK (version 2.0.3 as per docs)
   mappls_gl: 2.0.3
   
   # Location
-  geolocator: ^10.1.0
+  geolocator: ^14.0.2
   
   # Sensors
-  sensors_plus: ^4.0.2
+  sensors_plus: ^7.0.0
   
   # Storage
   path_provider: ^2.1.1
   
   # Permissions
-  permission_handler: ^11.1.0
+  permission_handler: ^12.0.1
   
   # Utilities
-  intl: ^0.18.1
+  intl: ^0.20.2
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
-  flutter_lints: ^3.0.0
+  flutter_lints: ^6.0.0
 
 flutter:
   uses-material-design: true

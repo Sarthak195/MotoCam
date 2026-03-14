@@ -5,12 +5,11 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'features/camera/providers/camera_provider.dart';
 import 'features/telemetry/providers/telemetry_provider.dart';
-import 'features/home/home_screen.dart';
+import 'features/recording/recording_screen.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   
-  // Lock to portrait mode
   await SystemChrome.setPreferredOrientations([
     DeviceOrientation.portraitUp,
   ]);
@@ -36,7 +35,7 @@ class MotoCamApp extends StatelessWidget {
           brightness: Brightness.dark,
           useMaterial3: true,
         ),
-        home: const HomeScreen(),
+        home: const RecordingScreen(),
       ),
     );
   }

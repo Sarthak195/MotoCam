@@ -1,25 +1,31 @@
+plugins {
+    id("com.android.application")
+    id("kotlin-android")
+    id("dev.flutter.flutter-gradle-plugin")
+}
+
 android {
     namespace = "com.example.motocam"
-    compileSdk = 34  // Changed from flutter.compileSdkVersion
-    ndkVersion = flutter.ndkVersion
-    
+    compileSdk = 36
+    ndkVersion = "28.1.13356709"
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-    
+
     kotlinOptions {
-        jvmTarget = JavaVersion.VERSION_17.toString()
+        jvmTarget = "17"
     }
-    
+
     defaultConfig {
         applicationId = "com.example.motocam"
-        minSdk = 21  // Changed from flutter.minSdkVersion
-        targetSdk = 34  // Changed from flutter.targetSdkVersion
+        minSdk = flutter.minSdkVersion
+        targetSdk = 36
         versionCode = 1
         versionName = "1.0"
     }
-    
+
     buildTypes {
         release {
             signingConfig = signingConfigs.getByName("debug")
