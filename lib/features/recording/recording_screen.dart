@@ -129,9 +129,9 @@ class _RecordingScreenState extends State<RecordingScreen> {
         return Container(
           padding: const EdgeInsets.all(16),
           decoration: BoxDecoration(
-            color: Colors.black.withOpacity(0.7),
+            color: Colors.black.withValues(alpha: 0.7),
             border: Border(
-              top: BorderSide(color: Colors.white.withOpacity(0.1)),
+              top: BorderSide(color: Colors.white.withValues(alpha: 0.1)),
             ),
           ),
           child: Row(
@@ -197,10 +197,23 @@ class _RecordingScreenState extends State<RecordingScreen> {
               return ElevatedButton(
                 onPressed: () async {
                   if (camera.isRecording) {
-                    await camera.stopRecording();
+                    final videoPath = await camera.stopRecording();
+                    if (videoPath != null) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(
+                          content: Text('Video saved to:\n${videoPath}'),
+                          duration: const Duration(seconds: 4),
+                        ),
+                      );
+                    }
                   } else {
-                    // TODO: Generate proper file path
-                    await camera.startRecording('/tmp/video.mp4');
+                    await camera.startRecording();
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                        content: Text('Recording started\nSaving to: ${camera.recordingsDirectory}'),
+                        duration: const Duration(seconds: 2),
+                      ),
+                    );
                   }
                 },
                 style: ElevatedButton.styleFrom(

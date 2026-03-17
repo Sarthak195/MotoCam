@@ -48,7 +48,7 @@ class TelemetryProvider extends ChangeNotifier {
   }
 
   void _detectCrash(double gForce) {
-    debugPrint('⚠️ CRASH DETECTED! G-Force: $gForce');
+    // debugPrint('⚠️ CRASH DETECTED! G-Force: $gForce');
     // Trigger emergency recording save
     // Mark event in database
     // Possibly send alert
