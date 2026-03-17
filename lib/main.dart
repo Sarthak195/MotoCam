@@ -5,20 +5,30 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'features/camera/providers/camera_provider.dart';
 import 'features/telemetry/providers/telemetry_provider.dart';
-import 'features/home/home_screen.dart';
-// REMOVED: import 'core/services/recording_service.dart';
+import 'features/recording/recording_screen.dart';
+import 'dart:async';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   
-  // Lock to portrait mode
-  await SystemChrome.setPreferredOrientations([
-    DeviceOrientation.portraitUp,
-  ]);
+  // Disable flutter error handling/crash detection
+  FlutterError.onError = (FlutterErrorDetails details) {
+    // Silently ignore all Flutter errors
+  };
   
-  // REMOVED: RecordingService.initForegroundTask();
-  
-  runApp(const MotoCamApp());
+  // Disable zone errors
+  runZonedGuarded(
+    () async {
+      await SystemChrome.setPreferredOrientations([
+        DeviceOrientation.portraitUp,
+      ]);
+      
+      runApp(const MotoCamApp());
+    },
+    (error, stackTrace) {
+      // Silently ignore all zone errors
+    },
+  );
 }
 
 class MotoCamApp extends StatelessWidget {
@@ -28,7 +38,7 @@ class MotoCamApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MultiProvider(
       providers: [
-        ChangeNotifierProvider(create: (_) => CameraProvider()),
+        ChangeNotifierProvider(create: (_) => CameraProvider(enableDebugLogging: true)),
         ChangeNotifierProvider(create: (_) => TelemetryProvider()),
       ],
       child: MaterialApp(
@@ -39,7 +49,7 @@ class MotoCamApp extends StatelessWidget {
           brightness: Brightness.dark,
           useMaterial3: true,
         ),
-        home: const HomeScreen(),
+        home: const RecordingScreen(),
       ),
     );
   }
