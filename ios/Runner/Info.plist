@@ -1,19 +1,35 @@
-<!-- ios/Runner/Info.plist -->
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>NSCameraUsageDescription</key>
+    <string>MotoCam needs camera access to record your rides</string>
 
-<key>NSCameraUsageDescription</key>
-<string>MotoCam needs camera access to record your rides</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>MotoCam needs microphone access to record audio with video</string>
 
-<key>NSMicrophoneUsageDescription</key>
-<string>MotoCam needs microphone access to record audio</string>
+    <key>NSLocationWhenInUseUsageDescription</key>
+    <string>MotoCam needs your location to track your route</string>
 
-<key>NSLocationWhenInUseUsageDescription</key>
-<string>MotoCam needs your location to track your route</string>
+    <key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+    <string>MotoCam needs your location to track your route even when in background</string>
 
-<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
-<string>MotoCam needs your location to track your route even when in background</string>
+    <key>NSMotionUsageDescription</key>
+    <string>MotoCam needs accelerometer access to detect impacts and crashes</string>
 
-<key>UIBackgroundModes</key>
-<array>
-    <string>location</string>
-    <string>audio</string>
-</array>
+    <key>UIBackgroundModes</key>
+    <array>
+        <string>location</string>
+        <string>audio</string>
+        <string>processing</string>
+    </array>
+
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>MotoCam needs access to local network for data synchronization</string>
+
+    <key>NSBonjourServiceTypes</key>
+    <array>
+        <string>_motocam._tcp</string>
+    </array>
+</dict>
+</plist>

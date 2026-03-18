@@ -4,10 +4,12 @@ import 'package:flutter/foundation.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:sensors_plus/sensors_plus.dart';
 import '../models/telemetry_data.dart';
+import 'dart:async';
 
 class TelemetryProvider extends ChangeNotifier {
   TelemetryData _currentData = TelemetryData.empty();
   List<TelemetryData> _telemetryHistory = [];
+  StreamSubscription? _accelerometerSubscription;
 
   TelemetryData get currentData => _currentData;
   List<TelemetryData> get telemetryHistory => _telemetryHistory;
@@ -28,7 +30,7 @@ class TelemetryProvider extends ChangeNotifier {
 
   // Listen to accelerometer for crash detection
   void startAccelerometerTracking() {
-    accelerometerEvents.listen((AccelerometerEvent event) {
+    _accelerometerSubscription = accelerometerEvents.listen((AccelerometerEvent event) {
       // Calculate G-force magnitude
       double gForce = (event.x * event.x + 
                        event.y * event.y + 
@@ -57,5 +59,11 @@ class TelemetryProvider extends ChangeNotifier {
   void clearHistory() {
     _telemetryHistory.clear();
     notifyListeners();
+  }
+
+  @override
+  void dispose() {
+    _accelerometerSubscription?.cancel();
+    super.dispose();
   }
 }

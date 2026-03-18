@@ -142,10 +142,26 @@ class _RecordingScreenState extends State<RecordingScreen> {
                 label: 'Speed',
                 value: '${data.speed.toStringAsFixed(0)} km/h',
               ),
-              _buildStatItem(
-                icon: Icons.timer,
-                label: 'Duration',
-                value: '00:00:00',
+              Consumer<CameraProvider>(
+                builder: (context, camera, _) {
+                  return StreamBuilder<Duration>(
+                    stream: camera.timerStream,
+                    initialData: camera.elapsedTime,
+                    builder: (context, snapshot) {
+                      final duration = snapshot.data ?? Duration.zero;
+                      final hours = duration.inHours;
+                      final minutes = duration.inMinutes.remainder(60);
+                      final seconds = duration.inSeconds.remainder(60);
+                      final formattedTime = '${hours.toString().padLeft(2, '0')}:${minutes.toString().padLeft(2, '0')}:${seconds.toString().padLeft(2, '0')}';
+                      
+                      return _buildStatItem(
+                        icon: Icons.timer,
+                        label: 'Duration',
+                        value: formattedTime,
+                      );
+                    },
+                  );
+                },
               ),
               _buildStatItem(
                 icon: Icons.route,

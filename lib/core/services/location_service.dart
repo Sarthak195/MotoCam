@@ -1,7 +1,6 @@
 // lib/core/services/location_service.dart
 
 import 'package:geolocator/geolocator.dart';
-import 'package:flutter/foundation.dart';
 
 class LocationService {
   Stream<Position>? _positionStream;
