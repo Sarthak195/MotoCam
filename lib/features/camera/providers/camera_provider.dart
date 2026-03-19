@@ -7,6 +7,7 @@ import 'package:intl/intl.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:path_provider/path_provider.dart';
 import 'dart:io';
+import 'dart:async';
 
 enum RecordingState { idle, recording, paused, stopped }
 
@@ -21,6 +22,12 @@ class CameraProvider extends ChangeNotifier {
   bool _isInitialized = false;
   String? _recordingsDirectory;
   bool enableDebugLogging;
+  
+  // Recording timer
+  DateTime? _recordingStartTime;
+  Duration _elapsedTime = Duration.zero;
+  Timer? _timerStream;
+  final _timerController = StreamController<Duration>.broadcast();
 
   // Getters
   CameraController? get controller => _controller;
@@ -29,6 +36,8 @@ class CameraProvider extends ChangeNotifier {
   bool get isInitialized => _isInitialized;
   bool get isRecording => _state == RecordingState.recording;
   String? get recordingsDirectory => _recordingsDirectory;
+  Duration get elapsedTime => _elapsedTime;
+  Stream<Duration> get timerStream => _timerController.stream;
 
   // Debug logging helper
   void _log(String message) {
@@ -79,21 +88,40 @@ class CameraProvider extends ChangeNotifier {
   // Set up recordings directory
   Future<void> _setupRecordingsDirectory() async {
     try {
-      // Try to save to /storage/emulated/0/MotoCam Recordings/
-      final externalStoragePath = '/storage/emulated/0';
-      final recordingsDir = Directory('$externalStoragePath/MotoCam Recordings');
-      
-      if (!await recordingsDir.exists()) {
-        await recordingsDir.create(recursive: true);
-        _log('Created recordings directory: ${recordingsDir.path}');
+      if (Platform.isAndroid) {
+        // Android: Try to save to /storage/emulated/0/MotoCam Recordings/
+        final externalStoragePath = '/storage/emulated/0';
+        final recordingsDir = Directory('$externalStoragePath/MotoCam Recordings');
+        
+        if (!await recordingsDir.exists()) {
+          await recordingsDir.create(recursive: true);
+          _log('Created recordings directory: ${recordingsDir.path}');
+        } else {
+          _log('Recordings directory already exists: ${recordingsDir.path}');
+        }
+        
+        _recordingsDirectory = recordingsDir.path;
+        _log('Recordings directory set to: $_recordingsDirectory');
+      } else if (Platform.isIOS) {
+        // iOS: Use app documents directory
+        final documentsDir = await getApplicationDocumentsDirectory();
+        final recordingsDir = Directory('${documentsDir.path}/MotoCam Recordings');
+        
+        if (!await recordingsDir.exists()) {
+          await recordingsDir.create(recursive: true);
+          _log('Created iOS recordings directory: ${recordingsDir.path}');
+        }
+        
+        _recordingsDirectory = recordingsDir.path;
+        _log('iOS recordings directory set to: $_recordingsDirectory');
       } else {
-        _log('Recordings directory already exists: ${recordingsDir.path}');
+        // Other platforms: Use app cache directory
+        final cacheDir = await getApplicationCacheDirectory();
+        _recordingsDirectory = cacheDir.path;
+        _log('Using cache directory for recordings: $_recordingsDirectory');
       }
-      
-      _recordingsDirectory = recordingsDir.path;
-      _log('Recordings directory set to: $_recordingsDirectory');
     } catch (e) {
-      _log('Error setting up recordings directory in external storage: $e');
+      _log('Error setting up recordings directory: $e');
       // Fallback to app cache
       try {
         final cacheDir = await getApplicationCacheDirectory();
@@ -119,12 +147,25 @@ class CameraProvider extends ChangeNotifier {
       final fileName = 'motocam_$timestamp.mp4';
       
       _currentVideoPath = fileName; // Store filename for UI display
+      _recordingStartTime = DateTime.now();
+      _elapsedTime = Duration.zero;
 
       _log('Starting recording...');
       _log('Recording will be saved to: $_recordingsDirectory/$fileName');
       
       await _controller!.startVideoRecording();
       _state = RecordingState.recording;
+      
+      // Start timer to update elapsed time every 100ms
+      _timerStream?.cancel();
+      _timerStream = Timer.periodic(const Duration(milliseconds: 100), (_) {
+        if (_recordingStartTime != null && _state == RecordingState.recording) {
+          _elapsedTime = DateTime.now().difference(_recordingStartTime!);
+          _timerController.add(_elapsedTime);
+          notifyListeners();
+        }
+      });
+      
       _log('Recording started successfully');
       notifyListeners();
     } catch (e) {
@@ -152,8 +193,13 @@ class CameraProvider extends ChangeNotifier {
 
     try {
       _log('Stopping recording...');
+      // Cancel timer
+      _timerStream?.cancel();
+      _timerStream = null;
+      
       final file = await _controller!.stopVideoRecording();
       _state = RecordingState.stopped;
+      _recordingStartTime = null;
       final cacheVideoPath = file.path;
       
       _log('Video recorded to cache: $cacheVideoPath');
@@ -254,6 +300,8 @@ class CameraProvider extends ChangeNotifier {
 
   @override
   void dispose() {
+    _timerStream?.cancel();
+    _timerController.close();
     _controller?.dispose();
     super.dispose();
   }

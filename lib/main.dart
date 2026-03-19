@@ -11,12 +11,14 @@ import 'dart:async';
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   
-  // Disable flutter error handling/crash detection
+  // Set up error handling for Flutter errors
   FlutterError.onError = (FlutterErrorDetails details) {
-    // Silently ignore all Flutter errors
+    debugPrint('❌ Flutter Error: ${details.exception}');
+    debugPrint('Stack trace: ${details.stack}');
+    // Errors are logged but app continues running
   };
   
-  // Disable zone errors
+  // Set up zone error handling
   runZonedGuarded(
     () async {
       await SystemChrome.setPreferredOrientations([
@@ -26,7 +28,9 @@ void main() async {
       runApp(const MotoCamApp());
     },
     (error, stackTrace) {
-      // Silently ignore all zone errors
+      debugPrint('❌ Zone Error: $error');
+      debugPrint('Stack trace: $stackTrace');
+      // Errors are logged but app continues running
     },
   );
 }
