@@ -5,6 +5,7 @@ import 'package:provider/provider.dart';
 import 'package:camera/camera.dart';
 import '../camera/providers/camera_provider.dart';
 import '../telemetry/providers/telemetry_provider.dart';
+import '../history/rides_list_screen.dart';
 
 class RecordingScreen extends StatefulWidget {
   const RecordingScreen({Key? key}) : super(key: key);
@@ -21,8 +22,15 @@ class _RecordingScreenState extends State<RecordingScreen> {
   }
 
   Future<void> _initializeCamera() async {
-    await context.read<CameraProvider>().initializeCamera();
-    context.read<TelemetryProvider>().startAccelerometerTracking();
+    final cameraProvider = context.read<CameraProvider>();
+    final telemetryProvider = context.read<TelemetryProvider>();
+
+    await cameraProvider.initializeCamera();
+    if (!mounted) {
+      return;
+    }
+
+    await telemetryProvider.initialize();
   }
 
   @override
@@ -166,7 +174,7 @@ class _RecordingScreenState extends State<RecordingScreen> {
               _buildStatItem(
                 icon: Icons.route,
                 label: 'Distance',
-                value: '0.0 km',
+                value: '${telemetry.rideDistanceKm.toStringAsFixed(2)} km',
               ),
             ],
           ),
@@ -212,18 +220,41 @@ class _RecordingScreenState extends State<RecordingScreen> {
             builder: (context, camera, _) {
               return ElevatedButton(
                 onPressed: () async {
+                  final telemetry = context.read<TelemetryProvider>();
                   if (camera.isRecording) {
                     final videoPath = await camera.stopRecording();
+                    if (!mounted) {
+                      return;
+                    }
+
                     if (videoPath != null) {
+                      final telemetryPath = await telemetry.stopRideSessionAndPersist(videoPath);
+                      if (!mounted) {
+                        return;
+                      }
+
                       ScaffoldMessenger.of(context).showSnackBar(
                         SnackBar(
-                          content: Text('Video saved to:\n${videoPath}'),
+                          content: Text(
+                            telemetryPath == null
+                                ? 'Video saved to:\n$videoPath'
+                                : 'Video saved:\n$videoPath\nTelemetry saved:\n$telemetryPath',
+                          ),
                           duration: const Duration(seconds: 4),
                         ),
                       );
+                    } else {
+                      telemetry.cancelRideSession();
                     }
                   } else {
                     await camera.startRecording();
+                    if (camera.isRecording) {
+                      telemetry.startRideSession();
+                    }
+                    if (!mounted) {
+                      return;
+                    }
+
                     ScaffoldMessenger.of(context).showSnackBar(
                       SnackBar(
                         content: Text('Recording started\nSaving to: ${camera.recordingsDirectory}'),
@@ -252,8 +283,10 @@ class _RecordingScreenState extends State<RecordingScreen> {
           const SizedBox(height: 12),
           OutlinedButton(
             onPressed: () {
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('Ride history - Coming soon!')),
+              Navigator.of(context).push(
+                MaterialPageRoute(
+                  builder: (_) => const RidesListScreen(),
+                ),
               );
             },
             style: OutlinedButton.styleFrom(
