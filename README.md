@@ -13,12 +13,27 @@ Desktop and web platform folders were intentionally removed.
 
 ## Overview
 
-MotoCam is a mobile application that combines video recording with real-time navigation and location tracking. It's designed specifically for motorcycle riders to capture their journeys while maintaining awareness of their route through integrated mapping features.
+MotoCam is a mobile application that combines video recording with location tracking and ride telemetry. It is designed for motorcycle riders to capture journeys and review recorded GPS routes during playback.
+
+## Release Notes
+
+### v0.1.5 (2026-03-22)
+
+- Removed Mappls SDK integration to eliminate startup configuration failures.
+- Added persistent recording profile settings (quality, FPS, bitrate, audio, speed refresh interval).
+- Added active profile chips on the recording screen.
+- Added FPS fallback handling for unsupported device combinations.
+- Added static GPS route viewer in playback using recorded latitude/longitude samples.
+- Added release build shrinking/minification with ProGuard rules.
+- Improved telemetry UI refresh throttling for smoother performance.
+
+Release APK output:
+- build/app/outputs/flutter-apk/app-release.apk
 
 ## Features
 
 - **Video Recording**: Capture dashcam footage with the device camera
-- **Real-time Navigation**: View your route using Mappls Maps SDK
+- **Route Tracking**: Visualize recorded GPS routes on an interactive map viewer
 - **Location Tracking**: Track your position in real-time using GPS
 - **Sensor Data**: Collect accelerometer and sensor data during rides
 - **Permission Management**: Automatic handling of camera, location, and sensor permissions
@@ -30,7 +45,6 @@ MotoCam is a mobile application that combines video recording with real-time nav
 - **Framework**: Flutter 3.0+
 - **State Management**: Provider 6.1.1
 - **Camera**: camera 0.12.0
-- **Maps**: Mappls Maps SDK 2.0.3
 - **Location Services**: geolocator 14.0.2
 - **Sensors**: sensors_plus 7.0.0
 - **Storage**: path_provider 2.1.1
@@ -68,10 +82,7 @@ lib/
    flutter pub get
    ```
 
-3. **Configure API Keys**:
-   - Mappls Maps: Add your API key to the Android and iOS configuration files
-
-4. **Run the app**:
+3. **Run the app**:
    ```bash
    flutter run
    ```
@@ -142,6 +153,6 @@ For issues, feature requests, or questions, please open an issue on GitHub.
 ## Resources
 
 - [Flutter Documentation](https://docs.flutter.dev/)
-- [Mappls Maps SDK Documentation](https://mappls.com/docs/)
 - [Geolocator Plugin](https://pub.dev/packages/geolocator)
 - [Camera Plugin](https://pub.dev/packages/camera)
+- [Provider Package](https://pub.dev/packages/provider)
