@@ -1,6 +1,6 @@
 name: motocam
 description: Navigation-enabled dashcam app for riders
-version: 1.0.0+1
+version: 0.1.5+5
 
 environment:
   sdk: '>=3.0.0 <4.0.0'
@@ -14,9 +14,6 @@ dependencies:
   
   # Camera
   camera: ^0.12.0
-  
-  # Mappls Maps SDK (version 2.0.3 as per docs)
-  mappls_gl: 2.0.3
   
   # Location
   geolocator: ^14.0.2
@@ -32,6 +29,7 @@ dependencies:
   
   # Utilities
   intl: ^0.20.2
+  shared_preferences: ^2.5.3
 
   # Playback
   video_player: ^2.10.0

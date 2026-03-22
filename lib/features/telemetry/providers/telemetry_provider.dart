@@ -26,14 +26,26 @@ class TelemetryProvider extends ChangeNotifier {
   double _rideDistanceKm = 0.0;
   double _maxSpeedKmh = 0.0;
   double _averageSpeedKmh = 0.0;
+  DateTime? _lastUiNotifyAt;
+  Duration _uiNotifyMinInterval = const Duration(milliseconds: 100);
 
   TelemetryData get currentData => _currentData;
-  List<TelemetryData> get telemetryHistory => List.unmodifiable(_telemetryHistory);
-  List<TelemetryData> get activeRideSamples => List.unmodifiable(_activeRideSamples);
+  List<TelemetryData> get telemetryHistory =>
+      List.unmodifiable(_telemetryHistory);
+  List<TelemetryData> get activeRideSamples =>
+      List.unmodifiable(_activeRideSamples);
   bool get isRideActive => _isRideActive;
   double get rideDistanceKm => _rideDistanceKm;
   double get maxSpeedKmh => _maxSpeedKmh;
   double get averageSpeedKmh => _averageSpeedKmh;
+  Duration get uiNotifyMinInterval => _uiNotifyMinInterval;
+
+  void setSpeedUiRefreshInterval(Duration interval) {
+    final clampedMs = interval.inMilliseconds.clamp(100, 1000);
+    _uiNotifyMinInterval = Duration(milliseconds: clampedMs);
+    _lastUiNotifyAt = null;
+    _forceNotifyUi();
+  }
 
   Future<void> initialize() async {
     if (_isTrackingStarted) {
@@ -50,7 +62,8 @@ class TelemetryProvider extends ChangeNotifier {
       permission = await Geolocator.requestPermission();
     }
 
-    if (permission == LocationPermission.denied || permission == LocationPermission.deniedForever) {
+    if (permission == LocationPermission.denied ||
+        permission == LocationPermission.deniedForever) {
       return;
     }
 
@@ -61,8 +74,8 @@ class TelemetryProvider extends ChangeNotifier {
 
   void _startLocationTracking() {
     const locationSettings = LocationSettings(
-      accuracy: LocationAccuracy.bestForNavigation,
-      distanceFilter: 5,
+      accuracy: LocationAccuracy.high,
+      distanceFilter: 10,
     );
 
     _positionSubscription = Geolocator.getPositionStream(
@@ -94,13 +107,16 @@ class TelemetryProvider extends ChangeNotifier {
     }
 
     _lastRidePosition = position;
-    notifyListeners();
+    _notifyUiIfNeeded();
   }
 
   void _startAccelerometerTracking() {
-    _accelerometerSubscription = accelerometerEventStream().listen((AccelerometerEvent event) {
+    _accelerometerSubscription =
+        accelerometerEventStream().listen((AccelerometerEvent event) {
       // Calculate G-force magnitude
-      final double gForce = (event.x * event.x + event.y * event.y + event.z * event.z).abs() / 9.81;
+      final double gForce =
+          (event.x * event.x + event.y * event.y + event.z * event.z).abs() /
+              9.81;
 
       _currentData = _currentData.copyWith(
         accelerationG: gForce,
@@ -112,7 +128,7 @@ class TelemetryProvider extends ChangeNotifier {
         _detectCrash(gForce);
       }
 
-      notifyListeners();
+      _notifyUiIfNeeded();
     });
   }
 
@@ -131,7 +147,7 @@ class TelemetryProvider extends ChangeNotifier {
       _captureSample();
     });
 
-    notifyListeners();
+    _forceNotifyUi();
   }
 
   void _captureSample() {
@@ -153,18 +169,21 @@ class TelemetryProvider extends ChangeNotifier {
     }
 
     if (_activeRideSamples.isNotEmpty) {
-      final total = _activeRideSamples.fold<double>(0.0, (sum, point) => sum + point.speed);
+      final total = _activeRideSamples.fold<double>(
+          0.0, (sum, point) => sum + point.speed);
       _averageSpeedKmh = total / _activeRideSamples.length;
     }
 
-    notifyListeners();
+    _forceNotifyUi();
   }
 
   Future<String?> stopRideSessionAndPersist(String videoPath) async {
-    if (!_isRideActive || _rideStartTime == null || _activeRideSamples.isEmpty) {
+    if (!_isRideActive ||
+        _rideStartTime == null ||
+        _activeRideSamples.isEmpty) {
       _isRideActive = false;
       _sampleTimer?.cancel();
-      notifyListeners();
+      _forceNotifyUi();
       return null;
     }
 
@@ -193,7 +212,7 @@ class TelemetryProvider extends ChangeNotifier {
     await telemetryFile.writeAsString(jsonEncode(telemetryPayload));
 
     _activeRideSamples.clear();
-    notifyListeners();
+    _forceNotifyUi();
     return telemetryPath;
   }
 
@@ -206,7 +225,7 @@ class TelemetryProvider extends ChangeNotifier {
     _rideDistanceKm = 0.0;
     _maxSpeedKmh = 0.0;
     _averageSpeedKmh = 0.0;
-    notifyListeners();
+    _forceNotifyUi();
   }
 
   String _extractFileName(String path) {
@@ -238,6 +257,22 @@ class TelemetryProvider extends ChangeNotifier {
     _rideDistanceKm = 0.0;
     _maxSpeedKmh = 0.0;
     _averageSpeedKmh = 0.0;
+    _forceNotifyUi();
+  }
+
+  void _notifyUiIfNeeded() {
+    final now = DateTime.now();
+    if (_lastUiNotifyAt != null &&
+        now.difference(_lastUiNotifyAt!) < _uiNotifyMinInterval) {
+      return;
+    }
+
+    _lastUiNotifyAt = now;
+    notifyListeners();
+  }
+
+  void _forceNotifyUi() {
+    _lastUiNotifyAt = DateTime.now();
     notifyListeners();
   }
 
