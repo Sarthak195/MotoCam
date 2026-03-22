@@ -5,6 +5,7 @@ import 'package:video_player/video_player.dart';
 
 import '../telemetry/models/telemetry_data.dart';
 import 'models/ride_record.dart';
+import '../map/widgets/static_map_viewer.dart';
 
 class RidePlaybackScreen extends StatefulWidget {
   const RidePlaybackScreen({super.key, required this.ride});
@@ -117,6 +118,30 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen> {
                         ],
                       ),
                     ),
+                    // Route map viewer
+                    if (widget.ride.samples.isNotEmpty)
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Text(
+                              'Route Map',
+                              style: TextStyle(
+                                color: Colors.white,
+                                fontSize: 12,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                            const SizedBox(height: 8),
+                            StaticMapViewer(
+                              telemetryData: widget.ride.samples,
+                              width: double.infinity,
+                              height: 200,
+                            ),
+                          ],
+                        ),
+                      ),
                     Padding(
                       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                       child: Column(
