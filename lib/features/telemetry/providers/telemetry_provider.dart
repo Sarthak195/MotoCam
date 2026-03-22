@@ -7,6 +7,7 @@ import '../models/telemetry_data.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
 
 class TelemetryProvider extends ChangeNotifier {
   TelemetryProvider({this.sampleInterval = const Duration(seconds: 1)});
@@ -16,7 +17,7 @@ class TelemetryProvider extends ChangeNotifier {
   final List<TelemetryData> _telemetryHistory = [];
   final List<TelemetryData> _activeRideSamples = [];
 
-  StreamSubscription<AccelerometerEvent>? _accelerometerSubscription;
+  StreamSubscription<UserAccelerometerEvent>? _accelerometerSubscription;
   StreamSubscription<Position>? _positionSubscription;
   Timer? _sampleTimer;
   DateTime? _rideStartTime;
@@ -26,8 +27,15 @@ class TelemetryProvider extends ChangeNotifier {
   double _rideDistanceKm = 0.0;
   double _maxSpeedKmh = 0.0;
   double _averageSpeedKmh = 0.0;
+  double _incidentTriggerGForce = 3.5;
+  Duration _incidentDebounce = const Duration(seconds: 6);
+  DateTime? _lastIncidentDetectedAt;
+  double _lastIncidentGForce = 0.0;
+  int _incidentCount = 0;
   DateTime? _lastUiNotifyAt;
   Duration _uiNotifyMinInterval = const Duration(milliseconds: 100);
+  double _smoothedLinearAccelerationG = 0.0;
+  int _consecutiveIncidentHits = 0;
 
   TelemetryData get currentData => _currentData;
   List<TelemetryData> get telemetryHistory =>
@@ -38,6 +46,11 @@ class TelemetryProvider extends ChangeNotifier {
   double get rideDistanceKm => _rideDistanceKm;
   double get maxSpeedKmh => _maxSpeedKmh;
   double get averageSpeedKmh => _averageSpeedKmh;
+  double get incidentTriggerGForce => _incidentTriggerGForce;
+  Duration get incidentDebounce => _incidentDebounce;
+  DateTime? get lastIncidentDetectedAt => _lastIncidentDetectedAt;
+  double get lastIncidentGForce => _lastIncidentGForce;
+  int get incidentCount => _incidentCount;
   Duration get uiNotifyMinInterval => _uiNotifyMinInterval;
 
   void setSpeedUiRefreshInterval(Duration interval) {
@@ -45,6 +58,14 @@ class TelemetryProvider extends ChangeNotifier {
     _uiNotifyMinInterval = Duration(milliseconds: clampedMs);
     _lastUiNotifyAt = null;
     _forceNotifyUi();
+  }
+
+  void setIncidentDetectionConfig({
+    required double triggerGForce,
+    required Duration debounce,
+  }) {
+    _incidentTriggerGForce = triggerGForce;
+    _incidentDebounce = debounce;
   }
 
   Future<void> initialize() async {
@@ -112,20 +133,31 @@ class TelemetryProvider extends ChangeNotifier {
 
   void _startAccelerometerTracking() {
     _accelerometerSubscription =
-        accelerometerEventStream().listen((AccelerometerEvent event) {
-      // Calculate G-force magnitude
-      final double gForce =
-          (event.x * event.x + event.y * event.y + event.z * event.z).abs() /
+        userAccelerometerEventStream().listen((UserAccelerometerEvent event) {
+      // userAccelerometer provides linear acceleration (gravity removed).
+      final double rawLinearAccelerationG =
+          math.sqrt(event.x * event.x + event.y * event.y + event.z * event.z) /
               9.81;
+      const smoothingAlpha = 0.30;
+      _smoothedLinearAccelerationG = _smoothedLinearAccelerationG == 0.0
+          ? rawLinearAccelerationG
+          : (_smoothedLinearAccelerationG * (1.0 - smoothingAlpha)) +
+              (rawLinearAccelerationG * smoothingAlpha);
 
       _currentData = _currentData.copyWith(
-        accelerationG: gForce,
+        accelerationG: _smoothedLinearAccelerationG,
         timestamp: DateTime.now(),
       );
 
-      // Detect potential crash (>3G sudden deceleration)
-      if (gForce > 3.0) {
-        _detectCrash(gForce);
+      // Require short persistence above threshold to reduce random spikes.
+      if (_smoothedLinearAccelerationG >= _incidentTriggerGForce) {
+        _consecutiveIncidentHits++;
+        if (_consecutiveIncidentHits >= 2) {
+          _detectCrash(_smoothedLinearAccelerationG);
+          _consecutiveIncidentHits = 0;
+        }
+      } else {
+        _consecutiveIncidentHits = 0;
       }
 
       _notifyUiIfNeeded();
@@ -138,6 +170,11 @@ class TelemetryProvider extends ChangeNotifier {
     _rideDistanceKm = 0.0;
     _maxSpeedKmh = 0.0;
     _averageSpeedKmh = 0.0;
+    _lastIncidentDetectedAt = null;
+    _lastIncidentGForce = 0.0;
+    _incidentCount = 0;
+    _smoothedLinearAccelerationG = 0.0;
+    _consecutiveIncidentHits = 0;
     _lastRidePosition = null;
     _activeRideSamples.clear();
 
@@ -177,7 +214,11 @@ class TelemetryProvider extends ChangeNotifier {
     _forceNotifyUi();
   }
 
-  Future<String?> stopRideSessionAndPersist(String videoPath) async {
+  Future<String?> stopRideSessionAndPersist(
+    String videoPath, {
+    List<String>? segmentPaths,
+    List<String>? lockedSegmentPaths,
+  }) async {
     if (!_isRideActive ||
         _rideStartTime == null ||
         _activeRideSamples.isEmpty) {
@@ -194,11 +235,22 @@ class TelemetryProvider extends ChangeNotifier {
     final DateTime rideEnd = DateTime.now();
     _rideStartTime = null;
 
+    final resolvedSegmentPaths =
+        (segmentPaths ?? const <String>[]).where((p) => p.isNotEmpty).toList();
+    if (!resolvedSegmentPaths.contains(videoPath)) {
+      resolvedSegmentPaths.add(videoPath);
+    }
+    final resolvedLockedPaths = (lockedSegmentPaths ?? const <String>[])
+        .where((p) => p.isNotEmpty)
+        .toList();
+
     final telemetryPayload = {
-      'schemaVersion': 1,
+      'schemaVersion': 2,
       'sampleRateMs': sampleInterval.inMilliseconds,
       'videoPath': videoPath,
       'videoFileName': _extractFileName(videoPath),
+      'segmentPaths': resolvedSegmentPaths,
+      'lockedSegmentPaths': resolvedLockedPaths,
       'startedAt': rideStart.toIso8601String(),
       'endedAt': rideEnd.toIso8601String(),
       'distanceKm': _rideDistanceKm,
@@ -245,10 +297,16 @@ class TelemetryProvider extends ChangeNotifier {
   }
 
   void _detectCrash(double gForce) {
-    // debugPrint('⚠️ CRASH DETECTED! G-Force: $gForce');
-    // Trigger emergency recording save
-    // Mark event in database
-    // Possibly send alert
+    final now = DateTime.now();
+    if (_lastIncidentDetectedAt != null &&
+        now.difference(_lastIncidentDetectedAt!) < _incidentDebounce) {
+      return;
+    }
+
+    _lastIncidentDetectedAt = now;
+    _lastIncidentGForce = gForce;
+    _incidentCount++;
+    _forceNotifyUi();
   }
 
   void clearHistory() {

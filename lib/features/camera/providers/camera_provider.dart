@@ -3,7 +3,6 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:camera/camera.dart';
-import 'package:intl/intl.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:path_provider/path_provider.dart';
 import 'dart:io';
@@ -15,6 +14,7 @@ class CameraProvider extends ChangeNotifier {
   CameraProvider({this.enableDebugLogging = false});
 
   static const platform = MethodChannel('com.example.motocam/media');
+  static const String _galleryRelativePath = 'Movies/MotoCam/Videos';
 
   CameraController? _controller;
   RecordingState _state = RecordingState.idle;
@@ -26,7 +26,17 @@ class CameraProvider extends ChangeNotifier {
   int _recordingFps = 30;
   int _videoBitrateBps = 8 * 1000 * 1000;
   bool _audioEnabled = true;
+  Duration _segmentDuration = const Duration(minutes: 5);
+  int _maxRollingSegments = 24;
   final Map<String, List<int>> _supportedFpsCache = {};
+  final List<String> _sessionSegmentPaths = <String>[];
+  final Set<String> _lockedSegmentPaths = <String>{};
+  final List<String> _pendingGalleryExports = <String>[];
+  Timer? _segmentTimer;
+  bool _isRollingSegment = false;
+  bool _isStoppingRecording = false;
+  bool _isExportingToGallery = false;
+  int _pendingIncidentSegmentLocks = 0;
 
   static const List<int> _fpsCandidates = [24, 30, 60];
 
@@ -50,6 +60,13 @@ class CameraProvider extends ChangeNotifier {
   int get videoBitrateBps => _videoBitrateBps;
   int get videoBitrateMbps => (_videoBitrateBps / 1000000).round();
   bool get audioEnabled => _audioEnabled;
+  int get segmentDurationMinutes => _segmentDuration.inMinutes;
+  int get maxRollingSegments => _maxRollingSegments;
+  List<String> get lastSessionSegmentPaths =>
+      List.unmodifiable(_sessionSegmentPaths);
+  List<String> get lockedSegmentPaths =>
+      List.unmodifiable(_lockedSegmentPaths.toList()..sort());
+  int get lockedSegmentCount => _lockedSegmentPaths.length;
   List<int> get knownSupportedFpsOptions => List.unmodifiable(
       _supportedFpsCache[_fpsCacheKey(_resolutionPreset)] ?? _fpsCandidates);
 
@@ -66,6 +83,8 @@ class CameraProvider extends ChangeNotifier {
     int? recordingFps,
     int? videoBitrateBps,
     bool? audioEnabled,
+    int? segmentDurationMinutes,
+    int? maxRollingSegments,
   }) async {
     try {
       if (resolutionPreset != null) {
@@ -80,14 +99,24 @@ class CameraProvider extends ChangeNotifier {
       if (audioEnabled != null) {
         _audioEnabled = audioEnabled;
       }
+      if (segmentDurationMinutes != null) {
+        _segmentDuration =
+            Duration(minutes: segmentDurationMinutes.clamp(1, 10));
+      }
+      if (maxRollingSegments != null) {
+        _maxRollingSegments = maxRollingSegments.clamp(1, 120);
+      }
 
       // Request camera permission
       final cameraStatus = await Permission.camera.request();
       final microphoneStatus = _audioEnabled
           ? await Permission.microphone.request()
           : PermissionStatus.granted;
-      await Permission.storage.request();
-      await Permission.manageExternalStorage.request();
+      if (Platform.isAndroid) {
+        await Permission.videos.request();
+      } else {
+        await Permission.storage.request();
+      }
 
       if (cameraStatus.isDenied || microphoneStatus.isDenied) {
         _log('Camera or microphone permission denied');
@@ -112,6 +141,7 @@ class CameraProvider extends ChangeNotifier {
 
       try {
         await _controller!.initialize();
+        await _controller!.lockCaptureOrientation(DeviceOrientation.portraitUp);
       } catch (e) {
         _log('Configured FPS failed on this device, retrying default FPS: $e');
         _markFpsUnsupported(_recordingFps);
@@ -126,6 +156,7 @@ class CameraProvider extends ChangeNotifier {
           imageFormatGroup: ImageFormatGroup.jpeg,
         );
         await _controller!.initialize();
+        await _controller!.lockCaptureOrientation(DeviceOrientation.portraitUp);
       }
 
       _isInitialized = true;
@@ -146,6 +177,8 @@ class CameraProvider extends ChangeNotifier {
     required int recordingFps,
     required int videoBitrateBps,
     required bool audioEnabled,
+    required int segmentDurationMinutes,
+    required int maxRollingSegments,
   }) async {
     if (isRecording) {
       _log('Cannot apply recording settings while recording is active');
@@ -155,7 +188,9 @@ class CameraProvider extends ChangeNotifier {
     final hasChanged = _resolutionPreset != resolutionPreset ||
         _recordingFps != recordingFps ||
         _videoBitrateBps != videoBitrateBps ||
-        _audioEnabled != audioEnabled;
+      _audioEnabled != audioEnabled ||
+      _segmentDuration.inMinutes != segmentDurationMinutes ||
+      _maxRollingSegments != maxRollingSegments;
 
     if (!hasChanged) {
       return true;
@@ -165,6 +200,8 @@ class CameraProvider extends ChangeNotifier {
     _recordingFps = recordingFps;
     _videoBitrateBps = videoBitrateBps;
     _audioEnabled = audioEnabled;
+    _segmentDuration = Duration(minutes: segmentDurationMinutes.clamp(1, 10));
+    _maxRollingSegments = maxRollingSegments.clamp(1, 120);
     await initializeCamera();
     return _isInitialized;
   }
@@ -227,10 +264,7 @@ class CameraProvider extends ChangeNotifier {
   Future<void> _setupRecordingsDirectory() async {
     try {
       if (Platform.isAndroid) {
-        // Android: Try to save to /storage/emulated/0/MotoCam Recordings/
-        final externalStoragePath = '/storage/emulated/0';
-        final recordingsDir =
-            Directory('$externalStoragePath/MotoCam Recordings');
+        final recordingsDir = await getTemporaryDirectory();
 
         if (!await recordingsDir.exists()) {
           await recordingsDir.create(recursive: true);
@@ -285,19 +319,20 @@ class CameraProvider extends ChangeNotifier {
     }
 
     try {
-      // Generate a unique filename with timestamp
-      final timestamp = DateFormat('yyyyMMdd_HHmmss').format(DateTime.now());
-      final fileName = 'motocam_$timestamp.mp4';
-
-      _currentVideoPath = fileName; // Store filename for UI display
+      _sessionSegmentPaths.clear();
+      _lockedSegmentPaths.clear();
+      _pendingGalleryExports.clear();
+      _pendingIncidentSegmentLocks = 0;
+      _isStoppingRecording = false;
       _recordingStartTime = DateTime.now();
       _elapsedTime = Duration.zero;
 
       _log('Starting recording...');
-      _log('Recording will be saved to: $_recordingsDirectory/$fileName');
+      _log('Recording segments will be captured in ~5 minute chunks');
 
       await _controller!.startVideoRecording();
       _state = RecordingState.recording;
+      _armSegmentTimer();
 
       // Emit elapsed time once per second to reduce rebuild pressure.
       _timerStream?.cancel();
@@ -313,6 +348,148 @@ class CameraProvider extends ChangeNotifier {
     } catch (e) {
       _log('Error starting recording: $e');
       _log('Stack trace: ${StackTrace.current}');
+    }
+  }
+
+  void _armSegmentTimer() {
+    _segmentTimer?.cancel();
+    _segmentTimer = Timer(_segmentDuration, () async {
+      await _rollSegmentIfNeeded();
+    });
+  }
+
+  Future<void> _rollSegmentIfNeeded() async {
+    if (!isRecording || _isRollingSegment || _isStoppingRecording) {
+      return;
+    }
+
+    _isRollingSegment = true;
+    try {
+      _log('Rolling recording segment after ${_segmentDuration.inMinutes} minutes');
+      final file = await _controller!.stopVideoRecording();
+      await _registerCompletedSegment(file.path);
+      if (!_isStoppingRecording) {
+        await _controller!.startVideoRecording();
+        _armSegmentTimer();
+      }
+    } catch (e) {
+      _log('Error while rolling segment: $e');
+      if (!_isStoppingRecording && isRecording) {
+        _armSegmentTimer();
+      }
+    } finally {
+      _isRollingSegment = false;
+    }
+  }
+
+  Future<void> _registerCompletedSegment(String videoPath) async {
+    _currentVideoPath = videoPath;
+    _recordingsDirectory ??= File(videoPath).parent.path;
+    _sessionSegmentPaths.add(videoPath);
+
+    if (_pendingIncidentSegmentLocks > 0) {
+      _lockedSegmentPaths.add(videoPath);
+      _pendingIncidentSegmentLocks--;
+      _log('Incident lock applied to new segment: $videoPath');
+    }
+
+    while (_sessionSegmentPaths.length > _maxRollingSegments) {
+      final removableIndex =
+          _sessionSegmentPaths.indexWhere((path) => !_lockedSegmentPaths.contains(path));
+      if (removableIndex < 0) {
+        _log(
+            'Loop limit exceeded, but all segments are locked. Skipping overwrite for safety.');
+        break;
+      }
+
+      final oldestPath = _sessionSegmentPaths.removeAt(removableIndex);
+      _lockedSegmentPaths.remove(oldestPath);
+      try {
+        final oldestFile = File(oldestPath);
+        if (await oldestFile.exists()) {
+          await oldestFile.delete();
+          _log('Deleted oldest segment due to rolling limit: $oldestPath');
+        }
+        final dotIndex = oldestPath.lastIndexOf('.');
+        final telemetryPath = dotIndex <= 0
+            ? '$oldestPath.telemetry.json'
+            : '${oldestPath.substring(0, dotIndex)}.telemetry.json';
+        final telemetryFile = File(telemetryPath);
+        if (await telemetryFile.exists()) {
+          await telemetryFile.delete();
+          _log('Deleted telemetry for rolled-out segment: $telemetryPath');
+        }
+      } catch (e) {
+        _log('Failed deleting old rolling segment: $e');
+      }
+    }
+  }
+
+  void markIncident({
+    int protectPastSegments = 2,
+    bool protectCurrentSegment = true,
+    String reason = 'manual',
+  }) {
+    final int clampedPast = protectPastSegments.clamp(0, 10);
+    final int lockStart = (_sessionSegmentPaths.length - clampedPast).clamp(
+      0,
+      _sessionSegmentPaths.length,
+    );
+
+    for (var index = lockStart; index < _sessionSegmentPaths.length; index++) {
+      _lockedSegmentPaths.add(_sessionSegmentPaths[index]);
+    }
+
+    if (protectCurrentSegment && isRecording) {
+      _pendingIncidentSegmentLocks++;
+    }
+
+    _log(
+        'Incident marked ($reason): locked $clampedPast previous segments, pending current lock: ${protectCurrentSegment && isRecording}');
+    notifyListeners();
+  }
+
+  void _enqueueDeferredGalleryExport(Iterable<String> segmentPaths) {
+    if (!Platform.isAndroid) {
+      return;
+    }
+
+    _pendingGalleryExports.addAll(segmentPaths);
+    if (_isExportingToGallery) {
+      return;
+    }
+
+    _isExportingToGallery = true;
+    Future<void>.delayed(const Duration(seconds: 2), () async {
+      try {
+        await _drainGalleryExportQueue();
+      } finally {
+        _isExportingToGallery = false;
+      }
+    });
+  }
+
+  Future<void> _drainGalleryExportQueue() async {
+    while (_pendingGalleryExports.isNotEmpty) {
+      final sourcePath = _pendingGalleryExports.removeAt(0);
+      final sourceFile = File(sourcePath);
+      if (!await sourceFile.exists()) {
+        _log('Skipping export for missing segment: $sourcePath');
+        continue;
+      }
+
+      final fileName = sourcePath.split(Platform.pathSeparator).last;
+      try {
+        await platform.invokeMethod<String>('exportVideoToGallery', {
+          'sourcePath': sourcePath,
+          'displayName': fileName,
+          'relativePath': _galleryRelativePath,
+        });
+        _log('Deferred gallery export completed: $fileName');
+      } catch (e) {
+        _log('Deferred export failed, trying media scan fallback: $e');
+        await _scanMediaFile(sourcePath);
+      }
     }
   }
 
@@ -335,6 +512,17 @@ class CameraProvider extends ChangeNotifier {
 
     try {
       _log('Stopping recording...');
+      _isStoppingRecording = true;
+
+      _segmentTimer?.cancel();
+      _segmentTimer = null;
+
+      var waitAttempts = 0;
+      while (_isRollingSegment && waitAttempts < 20) {
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+        waitAttempts++;
+      }
+
       // Cancel timer
       _timerStream?.cancel();
       _timerStream = null;
@@ -347,80 +535,19 @@ class CameraProvider extends ChangeNotifier {
       _log('Video recorded to cache: $cacheVideoPath');
       _log('File exists: ${await File(cacheVideoPath).exists()}');
 
-      // Ensure recordings directory is set
-      if (_recordingsDirectory == null) {
-        _log('Error: Recordings directory not set');
-        notifyListeners();
-        return cacheVideoPath;
-      }
+      await _registerCompletedSegment(cacheVideoPath);
 
-      // Move video from cache to MotoCam Recordings folder
-      try {
-        final timestamp = DateFormat('yyyyMMdd_HHmmss').format(DateTime.now());
-        final fileName = 'motocam_$timestamp.mp4';
-        final finalPath = '$_recordingsDirectory/$fileName';
+      // Keep original output paths and export to gallery asynchronously.
+      _enqueueDeferredGalleryExport(List<String>.from(_sessionSegmentPaths));
 
-        _log('Moving video from cache to: $finalPath');
-
-        final sourceFile = File(cacheVideoPath);
-        final movedFile = await sourceFile.rename(finalPath);
-
-        _log('✓ Video successfully moved to: $finalPath');
-
-        // Verify file exists at new location
-        final exists = await movedFile.exists();
-        _log('File exists at destination: $exists');
-
-        // Get file size
-        try {
-          final fileSize = await movedFile.length();
-          _log('File size: ${(fileSize / 1024 / 1024).toStringAsFixed(2)} MB');
-        } catch (e) {
-          _log('Could not get file size: $e');
-        }
-
-        // Scan the media file to make it visible in gallery
-        await _scanMediaFile(finalPath);
-
-        notifyListeners();
-        return finalPath;
-      } catch (moveError) {
-        _log('Error moving file (will try copy): $moveError');
-
-        // Fallback: try copying the file
-        try {
-          final timestamp =
-              DateFormat('yyyyMMdd_HHmmss').format(DateTime.now());
-          final fileName = 'motocam_$timestamp.mp4';
-          final finalPath = '$_recordingsDirectory/$fileName';
-
-          _log('Attempting copy fallback to: $finalPath');
-
-          final sourceFile = File(cacheVideoPath);
-          final copiedFile = await sourceFile.copy(finalPath);
-
-          _log('✓ Video successfully copied to: $finalPath');
-
-          // Verify file exists at new location
-          final exists = await copiedFile.exists();
-          _log('File exists at destination: $exists');
-
-          // Scan the media file to make it visible in gallery
-          await _scanMediaFile(finalPath);
-
-          notifyListeners();
-          return finalPath;
-        } catch (copyError) {
-          _log('Error copying file: $copyError');
-          _log('Returning original cache path: $cacheVideoPath');
-          notifyListeners();
-          return cacheVideoPath;
-        }
-      }
+      notifyListeners();
+      return cacheVideoPath;
     } catch (e) {
       _log('Error stopping recording: $e');
       _log('Stack trace: ${StackTrace.current}');
       return null;
+    } finally {
+      _isStoppingRecording = false;
     }
   }
 
@@ -432,7 +559,7 @@ class CameraProvider extends ChangeNotifier {
       final dir = Directory(_recordingsDirectory!);
       if (!await dir.exists()) return [];
 
-      final files = await dir.list().toList();
+          final files = await dir.list(recursive: true, followLinks: false).toList();
       files.sort((a, b) => File(b.path)
           .statSync()
           .modified
@@ -446,6 +573,7 @@ class CameraProvider extends ChangeNotifier {
 
   @override
   void dispose() {
+    _segmentTimer?.cancel();
     _timerStream?.cancel();
     _timerController.close();
     _controller?.dispose();
