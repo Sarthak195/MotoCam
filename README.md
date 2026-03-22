@@ -2,6 +2,15 @@
 
 A navigation-enabled dashcam app for motorcycle riders built with Flutter.
 
+## Platform Support
+
+MotoCam is now maintained as a **mobile-only** Flutter app:
+
+- Android
+- iOS
+
+Desktop and web platform folders were intentionally removed.
+
 ## Overview
 
 MotoCam is a mobile application that combines video recording with real-time navigation and location tracking. It's designed specifically for motorcycle riders to capture their journeys while maintaining awareness of their route through integrated mapping features.
@@ -67,6 +76,14 @@ lib/
    flutter run
    ```
 
+### Run From Android Studio
+
+1. Open the project root folder in Android Studio.
+2. Wait for Gradle/Flutter indexing to finish.
+3. Start an emulator from Device Manager or connect a physical Android device.
+4. Select the target device from the device dropdown.
+5. Click the Run button (green triangle) for the Flutter run configuration.
+
 ## Required Permissions
 
 The app requires the following permissions:
@@ -97,6 +114,11 @@ flutter build apk --release
 ```bash
 flutter build ios --release
 ```
+
+## Notes
+
+- If Android SDK licenses are pending, run `flutter doctor --android-licenses`.
+- If dependencies change, run `flutter pub get` again.
 
 ## Dependencies
 
