@@ -46,6 +46,13 @@ class RideRecord {
     }
 
     final targetMs = position.inMilliseconds;
+    if (targetMs <= samples.first.elapsedMs) {
+      return samples.first;
+    }
+    if (targetMs >= samples.last.elapsedMs) {
+      return samples.last;
+    }
+
     var low = 0;
     var high = samples.length - 1;
 
@@ -62,9 +69,30 @@ class RideRecord {
       }
     }
 
-    final index = low.clamp(0, samples.length - 1);
-    return samples[index];
+    final upperIndex = low.clamp(1, samples.length - 1);
+    final lowerIndex = (upperIndex - 1).clamp(0, samples.length - 1);
+    final lower = samples[lowerIndex];
+    final upper = samples[upperIndex];
+
+    final spanMs = (upper.elapsedMs - lower.elapsedMs).abs();
+    if (spanMs == 0) {
+      return lower;
+    }
+
+    final t = ((targetMs - lower.elapsedMs) / spanMs).clamp(0.0, 1.0);
+    return TelemetryData(
+      latitude: _lerp(lower.latitude, upper.latitude, t),
+      longitude: _lerp(lower.longitude, upper.longitude, t),
+      speed: _lerp(lower.speed, upper.speed, t),
+      bearing: _lerp(lower.bearing, upper.bearing, t),
+      accelerationG: _lerp(lower.accelerationG, upper.accelerationG, t),
+      elapsedMs: targetMs,
+      distanceKm: _lerp(lower.distanceKm, upper.distanceKm, t),
+      timestamp: lower.timestamp.add(Duration(milliseconds: targetMs - lower.elapsedMs)),
+    );
   }
+
+  static double _lerp(double a, double b, double t) => a + ((b - a) * t);
 
   static Future<RideRecord> fromVideoFile(File videoFile) async {
     final telemetryPath = _telemetryPathForVideo(videoFile.path);

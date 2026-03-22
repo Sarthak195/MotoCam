@@ -10,6 +10,24 @@ import 'dart:async';
 
 enum RecordingState { idle, recording, paused, stopped }
 
+class SegmentTimelineEntry {
+  const SegmentTimelineEntry({
+    required this.path,
+    required this.startMs,
+    required this.endMs,
+  });
+
+  final String path;
+  final int startMs;
+  final int endMs;
+
+  Map<String, dynamic> toJson() => {
+        'path': path,
+        'startMs': startMs,
+        'endMs': endMs,
+      };
+}
+
 class CameraProvider extends ChangeNotifier {
   CameraProvider({this.enableDebugLogging = false});
 
@@ -26,10 +44,15 @@ class CameraProvider extends ChangeNotifier {
   int _recordingFps = 30;
   int _videoBitrateBps = 8 * 1000 * 1000;
   bool _audioEnabled = true;
+  String _preferredCameraName = '';
+  String _activeCameraName = '';
+  final List<CameraDescription> _availableCameras = <CameraDescription>[];
   Duration _segmentDuration = const Duration(minutes: 5);
   int _maxRollingSegments = 24;
   final Map<String, List<int>> _supportedFpsCache = {};
   final List<String> _sessionSegmentPaths = <String>[];
+  final List<SegmentTimelineEntry> _sessionSegmentTimeline =
+      <SegmentTimelineEntry>[];
   final Set<String> _lockedSegmentPaths = <String>{};
   final List<String> _pendingGalleryExports = <String>[];
   Timer? _segmentTimer;
@@ -37,6 +60,7 @@ class CameraProvider extends ChangeNotifier {
   bool _isStoppingRecording = false;
   bool _isExportingToGallery = false;
   int _pendingIncidentSegmentLocks = 0;
+  int _lastSegmentEndMs = 0;
 
   static const List<int> _fpsCandidates = [24, 30, 60];
 
@@ -60,10 +84,16 @@ class CameraProvider extends ChangeNotifier {
   int get videoBitrateBps => _videoBitrateBps;
   int get videoBitrateMbps => (_videoBitrateBps / 1000000).round();
   bool get audioEnabled => _audioEnabled;
+  String get preferredCameraName => _preferredCameraName;
+  String get activeCameraName => _activeCameraName;
+  List<CameraDescription> get discoveredCameras =>
+      List.unmodifiable(_availableCameras);
   int get segmentDurationMinutes => _segmentDuration.inMinutes;
   int get maxRollingSegments => _maxRollingSegments;
   List<String> get lastSessionSegmentPaths =>
       List.unmodifiable(_sessionSegmentPaths);
+    List<Map<String, dynamic>> get lastSessionSegmentTimeline =>
+      List.unmodifiable(_sessionSegmentTimeline.map((entry) => entry.toJson()));
   List<String> get lockedSegmentPaths =>
       List.unmodifiable(_lockedSegmentPaths.toList()..sort());
   int get lockedSegmentCount => _lockedSegmentPaths.length;
@@ -77,12 +107,63 @@ class CameraProvider extends ChangeNotifier {
     }
   }
 
+  String cameraLabel(CameraDescription camera) {
+    final lens = switch (camera.lensDirection) {
+      CameraLensDirection.front => 'Front',
+      CameraLensDirection.back => 'Back',
+      CameraLensDirection.external => 'External',
+    };
+    final name = camera.name.trim();
+    if (name.isEmpty) {
+      return lens;
+    }
+    return '$lens ($name)';
+  }
+
+  Future<List<CameraDescription>> getAvailableCameras({
+    bool refresh = false,
+  }) async {
+    if (_availableCameras.isNotEmpty && !refresh) {
+      return List.unmodifiable(_availableCameras);
+    }
+
+    try {
+      final cameras = await availableCameras();
+      _availableCameras
+        ..clear()
+        ..addAll(cameras);
+    } catch (e) {
+      _log('Failed to query cameras: $e');
+    }
+
+    return List.unmodifiable(_availableCameras);
+  }
+
+  CameraDescription _resolveCamera(List<CameraDescription> cameras) {
+    if (_preferredCameraName.isNotEmpty) {
+      for (final camera in cameras) {
+        if (camera.name == _preferredCameraName) {
+          return camera;
+        }
+      }
+    }
+
+    for (final camera in cameras) {
+      if (camera.lensDirection == CameraLensDirection.back) {
+        return camera;
+      }
+    }
+
+    return cameras.first;
+  }
+
   // Initialize camera
   Future<void> initializeCamera({
     ResolutionPreset? resolutionPreset,
     int? recordingFps,
     int? videoBitrateBps,
     bool? audioEnabled,
+    String? preferredCameraName,
     int? segmentDurationMinutes,
     int? maxRollingSegments,
   }) async {
@@ -99,6 +180,9 @@ class CameraProvider extends ChangeNotifier {
       if (audioEnabled != null) {
         _audioEnabled = audioEnabled;
       }
+      if (preferredCameraName != null) {
+        _preferredCameraName = preferredCameraName.trim();
+      }
       if (segmentDurationMinutes != null) {
         _segmentDuration =
             Duration(minutes: segmentDurationMinutes.clamp(1, 10));
@@ -114,6 +198,7 @@ class CameraProvider extends ChangeNotifier {
           : PermissionStatus.granted;
       if (Platform.isAndroid) {
         await Permission.videos.request();
+        await Permission.notification.request();
       } else {
         await Permission.storage.request();
       }
@@ -126,10 +211,16 @@ class CameraProvider extends ChangeNotifier {
       // Set up recordings directory
       await _setupRecordingsDirectory();
 
-      final cameras = await availableCameras();
-      final backCamera = cameras.firstWhere(
-        (camera) => camera.lensDirection == CameraLensDirection.back,
-      );
+      final cameras = await getAvailableCameras(refresh: true);
+      if (cameras.isEmpty) {
+        _log('No cameras detected on this device');
+        return;
+      }
+      final selectedCamera = _resolveCamera(cameras);
+      _activeCameraName = selectedCamera.name;
+      if (_preferredCameraName.isEmpty) {
+        _preferredCameraName = selectedCamera.name;
+      }
 
       final supportedFps = knownSupportedFpsOptions;
       if (!supportedFps.contains(_recordingFps)) {
@@ -137,7 +228,7 @@ class CameraProvider extends ChangeNotifier {
       }
 
       await _controller?.dispose();
-      _controller = await _buildController(backCamera);
+      _controller = await _buildController(selectedCamera);
 
       try {
         await _controller!.initialize();
@@ -148,7 +239,7 @@ class CameraProvider extends ChangeNotifier {
         _recordingFps = _fallbackFps();
         await _controller?.dispose();
         _controller = CameraController(
-          backCamera,
+          selectedCamera,
           _resolutionPreset,
           enableAudio: _audioEnabled,
           fps: _recordingFps,
@@ -165,6 +256,7 @@ class CameraProvider extends ChangeNotifier {
       _log('Target FPS: $_recordingFps');
       _log('Video bitrate bps: $_videoBitrateBps');
       _log('Audio enabled: $_audioEnabled');
+      _log('Selected camera: ${cameraLabel(selectedCamera)}');
       _log('Recordings directory: $_recordingsDirectory');
       notifyListeners();
     } catch (e) {
@@ -177,6 +269,7 @@ class CameraProvider extends ChangeNotifier {
     required int recordingFps,
     required int videoBitrateBps,
     required bool audioEnabled,
+    required String preferredCameraName,
     required int segmentDurationMinutes,
     required int maxRollingSegments,
   }) async {
@@ -189,6 +282,7 @@ class CameraProvider extends ChangeNotifier {
         _recordingFps != recordingFps ||
         _videoBitrateBps != videoBitrateBps ||
       _audioEnabled != audioEnabled ||
+      _preferredCameraName != preferredCameraName.trim() ||
       _segmentDuration.inMinutes != segmentDurationMinutes ||
       _maxRollingSegments != maxRollingSegments;
 
@@ -200,6 +294,7 @@ class CameraProvider extends ChangeNotifier {
     _recordingFps = recordingFps;
     _videoBitrateBps = videoBitrateBps;
     _audioEnabled = audioEnabled;
+    _preferredCameraName = preferredCameraName.trim();
     _segmentDuration = Duration(minutes: segmentDurationMinutes.clamp(1, 10));
     _maxRollingSegments = maxRollingSegments.clamp(1, 120);
     await initializeCamera();
@@ -320,9 +415,11 @@ class CameraProvider extends ChangeNotifier {
 
     try {
       _sessionSegmentPaths.clear();
+      _sessionSegmentTimeline.clear();
       _lockedSegmentPaths.clear();
       _pendingGalleryExports.clear();
       _pendingIncidentSegmentLocks = 0;
+      _lastSegmentEndMs = 0;
       _isStoppingRecording = false;
       _recordingStartTime = DateTime.now();
       _elapsedTime = Duration.zero;
@@ -387,6 +484,20 @@ class CameraProvider extends ChangeNotifier {
     _recordingsDirectory ??= File(videoPath).parent.path;
     _sessionSegmentPaths.add(videoPath);
 
+    final startMs = _lastSegmentEndMs;
+    final endMs = _recordingStartTime == null
+        ? startMs
+        : DateTime.now().difference(_recordingStartTime!).inMilliseconds;
+    final normalizedEndMs = endMs >= startMs ? endMs : startMs;
+    _sessionSegmentTimeline.add(
+      SegmentTimelineEntry(
+        path: videoPath,
+        startMs: startMs,
+        endMs: normalizedEndMs,
+      ),
+    );
+    _lastSegmentEndMs = normalizedEndMs;
+
     if (_pendingIncidentSegmentLocks > 0) {
       _lockedSegmentPaths.add(videoPath);
       _pendingIncidentSegmentLocks--;
@@ -404,6 +515,7 @@ class CameraProvider extends ChangeNotifier {
 
       final oldestPath = _sessionSegmentPaths.removeAt(removableIndex);
       _lockedSegmentPaths.remove(oldestPath);
+      _sessionSegmentTimeline.removeWhere((entry) => entry.path == oldestPath);
       try {
         final oldestFile = File(oldestPath);
         if (await oldestFile.exists()) {

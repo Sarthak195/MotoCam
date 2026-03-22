@@ -1,7 +1,11 @@
 package com.example.motocam
 
 import android.app.PictureInPictureParams
+import android.content.BroadcastReceiver
 import android.content.ContentValues
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.content.res.Configuration
 import android.media.MediaScannerConnection
 import android.os.Build
@@ -17,12 +21,65 @@ import java.io.FileOutputStream
 class MainActivity: FlutterActivity() {
     private val CHANNEL = "com.example.motocam/pip"
     private val MEDIA_CHANNEL = "com.example.motocam/media"
+    private val BACKGROUND_RECORDING_CHANNEL = "com.example.motocam/background_recording"
+    private var pipMethodChannel: MethodChannel? = null
+    private var backgroundRecordingMethodChannel: MethodChannel? = null
+    private var isRecordingActive = false
+
+    private val backgroundStopReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == BackgroundRecordingService.ACTION_STOP_REQUESTED) {
+                backgroundRecordingMethodChannel?.invokeMethod("onStopRequested", null)
+            }
+        }
+    }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+
+        backgroundRecordingMethodChannel =
+            MethodChannel(flutterEngine.dartExecutor.binaryMessenger, BACKGROUND_RECORDING_CHANNEL)
+        backgroundRecordingMethodChannel
+            ?.setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "startForegroundRecording" -> {
+                        isRecordingActive = true
+                        val elapsedMs = call.argument<Number>("elapsedMs")?.toLong() ?: 0L
+                        val serviceIntent = Intent(this, BackgroundRecordingService::class.java).apply {
+                            action = BackgroundRecordingService.ACTION_START
+                            putExtra(BackgroundRecordingService.EXTRA_ELAPSED_MS, elapsedMs)
+                        }
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                            startForegroundService(serviceIntent)
+                        } else {
+                            startService(serviceIntent)
+                        }
+                        result.success(true)
+                    }
+                    "updateForegroundRecording" -> {
+                        val elapsedMs = call.argument<Number>("elapsedMs")?.toLong() ?: 0L
+                        val serviceIntent = Intent(this, BackgroundRecordingService::class.java).apply {
+                            action = BackgroundRecordingService.ACTION_UPDATE
+                            putExtra(BackgroundRecordingService.EXTRA_ELAPSED_MS, elapsedMs)
+                        }
+                        startService(serviceIntent)
+                        result.success(true)
+                    }
+                    "stopForegroundRecording" -> {
+                        isRecordingActive = false
+                        val serviceIntent = Intent(this, BackgroundRecordingService::class.java).apply {
+                            action = BackgroundRecordingService.ACTION_STOP
+                        }
+                        startService(serviceIntent)
+                        result.success(true)
+                    }
+                    else -> result.notImplemented()
+                }
+            }
         
-        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
-            .setMethodCallHandler { call, result ->
+        pipMethodChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
+        pipMethodChannel
+            ?.setMethodCallHandler { call, result ->
                 when (call.method) {
                     "isPipSupported" -> {
                         result.success(Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
@@ -138,5 +195,62 @@ class MainActivity: FlutterActivity() {
                     else -> result.notImplemented()
                 }
             }
+    }
+
+    override fun onPictureInPictureModeChanged(
+        isInPictureInPictureMode: Boolean,
+        newConfig: Configuration,
+    ) {
+        super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
+        pipMethodChannel?.invokeMethod("onPipModeChanged", isInPictureInPictureMode)
+    }
+
+    override fun onUserLeaveHint() {
+        super.onUserLeaveHint()
+        maybeEnterRecordingPip()
+    }
+
+    override fun onPause() {
+        super.onPause()
+        maybeEnterRecordingPip()
+    }
+
+    private fun maybeEnterRecordingPip() {
+        if (!isRecordingActive) {
+            return
+        }
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+            return
+        }
+        if (isInPictureInPictureMode) {
+            return
+        }
+
+        try {
+            val params = PictureInPictureParams.Builder()
+                .setAspectRatio(Rational(9, 16))
+                .build()
+            enterPictureInPictureMode(params)
+        } catch (_: Exception) {
+        }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        val filter = IntentFilter(BackgroundRecordingService.ACTION_STOP_REQUESTED)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(backgroundStopReceiver, filter, RECEIVER_NOT_EXPORTED)
+        } else {
+            @Suppress("DEPRECATION")
+            registerReceiver(backgroundStopReceiver, filter)
+        }
+    }
+
+    override fun onStop() {
+        super.onStop()
+        try {
+            unregisterReceiver(backgroundStopReceiver)
+        } catch (_: IllegalArgumentException) {
+        }
     }
 }

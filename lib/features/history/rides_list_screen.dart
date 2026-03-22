@@ -17,6 +17,7 @@ class RidesListScreen extends StatefulWidget {
 
 class _RidesListScreenState extends State<RidesListScreen> {
 	late Future<List<RideRecord>> _ridesFuture;
+	bool _isOpeningRide = false;
 
 	@override
 	void initState() {
@@ -129,6 +130,7 @@ class _RidesListScreenState extends State<RidesListScreen> {
 
 	Widget _buildRideCard(BuildContext context, RideRecord ride) {
 		final hasTelemetry = ride.samples.isNotEmpty;
+		final segmentCount = ride.segmentPaths.length;
 
 		return Card(
 			child: ListTile(
@@ -165,6 +167,9 @@ class _RidesListScreenState extends State<RidesListScreen> {
 						Text('Distance: ${ride.distanceKm.toStringAsFixed(2)} km'),
 						Text('Duration: ${_formatDuration(ride.duration)}'),
 						Text('Max speed: ${ride.maxSpeedKmh.toStringAsFixed(1)} km/h'),
+						Text('Avg speed: ${ride.averageSpeedKmh.toStringAsFixed(1)} km/h'),
+						Text('Segments: $segmentCount'),
+						Text('Samples: ${ride.samples.length}'),
 						Text(hasTelemetry ? 'Telemetry: Available' : 'Telemetry: Not available'),
 					],
 				),
@@ -203,12 +208,20 @@ class _RidesListScreenState extends State<RidesListScreen> {
 						],
 					),
 				),
-				onTap: () {
-					Navigator.of(context).push(
-						MaterialPageRoute(
-							builder: (_) => RidePlaybackScreen(ride: ride),
-						),
-					);
+				onTap: () async {
+					if (_isOpeningRide) {
+						return;
+					}
+					_isOpeningRide = true;
+					try {
+						await Navigator.of(context).push(
+							MaterialPageRoute(
+								builder: (_) => RidePlaybackScreen(ride: ride),
+							),
+						);
+					} finally {
+						_isOpeningRide = false;
+					}
 				},
 			),
 		);

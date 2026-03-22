@@ -35,6 +35,7 @@ class AppSettingsProvider extends ChangeNotifier {
   static const _segmentMinutesKey = 'dashcam_segment_minutes';
   static const _loopSegmentsKey = 'dashcam_loop_segment_count';
   static const _incidentSensitivityKey = 'incident_sensitivity';
+  static const _cameraNameKey = 'camera_name';
 
   static const List<int> bitrateOptionsMbps = [4, 8, 12, 16];
   static const List<int> resolutionOptions = [480, 720, 1080, 1440, 1600, 2160];
@@ -102,6 +103,7 @@ class AppSettingsProvider extends ChangeNotifier {
   int _segmentMinutes = 5;
   int _loopSegmentCount = 24;
   IncidentSensitivity _incidentSensitivity = IncidentSensitivity.medium;
+  String _selectedCameraName = '';
   bool _isLoaded = false;
 
   int get recordingResolution => _recordingResolution;
@@ -115,6 +117,7 @@ class AppSettingsProvider extends ChangeNotifier {
   int get segmentMinutes => _segmentMinutes;
   int get loopSegmentCount => _loopSegmentCount;
   IncidentSensitivity get incidentSensitivity => _incidentSensitivity;
+  String get selectedCameraName => _selectedCameraName;
   double get incidentTriggerGForce {
     switch (_incidentSensitivity) {
       case IncidentSensitivity.low:
@@ -230,9 +233,21 @@ class AppSettingsProvider extends ChangeNotifier {
     _incidentSensitivity = _incidentSensitivityFromName(
       prefs.getString(_incidentSensitivityKey),
     );
+    _selectedCameraName = prefs.getString(_cameraNameKey) ?? '';
     _syncQualityProfileIdFromValues();
     _isLoaded = true;
     notifyListeners();
+  }
+
+  Future<void> updateSelectedCameraName(String cameraName) async {
+    final trimmed = cameraName.trim();
+    if (_selectedCameraName == trimmed) {
+      return;
+    }
+    _selectedCameraName = trimmed;
+    notifyListeners();
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_cameraNameKey, _selectedCameraName);
   }
 
   Future<void> updateIncidentSensitivity(IncidentSensitivity sensitivity) async {

@@ -1,9 +1,13 @@
 // lib/features/recording/recording_screen.dart
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:camera/camera.dart';
 import '../../core/providers/app_settings_provider.dart';
+import '../../core/services/background_recording_service.dart';
+import '../../core/services/pip_service.dart';
 import '../camera/providers/camera_provider.dart';
 import '../telemetry/providers/telemetry_provider.dart';
 import '../history/rides_list_screen.dart';
@@ -17,11 +21,139 @@ class RecordingScreen extends StatefulWidget {
 
 class _RecordingScreenState extends State<RecordingScreen> {
   DateTime? _lastHandledIncidentAt;
+  final BackgroundRecordingService _backgroundRecordingService =
+      BackgroundRecordingService.instance;
+  final PipService _pipService = PipService.instance;
+  StreamSubscription<BackgroundRecordingEvent>? _backgroundEventSubscription;
+  StreamSubscription<Duration>? _recordingTimerSubscription;
+  StreamSubscription<bool>? _pipModeSubscription;
+  bool _isStoppingRecording = false;
+  bool _isInPipMode = false;
+  final Stream<int> _pipBlinkStream =
+      Stream<int>.periodic(const Duration(milliseconds: 700), (tick) => tick);
 
   @override
   void initState() {
     super.initState();
+    _initializePipBridge();
+    _initializeBackgroundRecordingBridge();
     _initializeCamera();
+  }
+
+  Future<void> _initializePipBridge() async {
+    await _pipService.initialize();
+    _isInPipMode = _pipService.isInPipMode;
+    _pipModeSubscription?.cancel();
+    _pipModeSubscription = _pipService.pipModeStream.listen((inPip) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _isInPipMode = inPip;
+      });
+    });
+  }
+
+  Future<void> _initializeBackgroundRecordingBridge() async {
+    await _backgroundRecordingService.initialize();
+    _backgroundEventSubscription?.cancel();
+    _backgroundEventSubscription =
+        _backgroundRecordingService.events.listen((event) async {
+      if (event != BackgroundRecordingEvent.stopRequested || !mounted) {
+        return;
+      }
+
+      final camera = context.read<CameraProvider>();
+      final telemetry = context.read<TelemetryProvider>();
+      final messenger = ScaffoldMessenger.of(context);
+      await _stopRecordingFlow(
+        camera: camera,
+        telemetry: telemetry,
+        messenger: messenger,
+        showSuccessMessage: false,
+      );
+    });
+  }
+
+  Future<void> _startRecordingFlow({
+    required CameraProvider camera,
+    required TelemetryProvider telemetry,
+    required ScaffoldMessengerState messenger,
+  }) async {
+    await camera.startRecording();
+    if (camera.isRecording) {
+      telemetry.startRideSession();
+      await _backgroundRecordingService.startForegroundRecording(
+        elapsed: Duration.zero,
+      );
+      _recordingTimerSubscription?.cancel();
+      _recordingTimerSubscription = camera.timerStream.listen((elapsed) {
+        _backgroundRecordingService.updateForegroundRecording(elapsed: elapsed);
+      });
+    }
+
+    if (!mounted) {
+      return;
+    }
+
+    messenger.showSnackBar(
+      SnackBar(
+        content: Text(
+          'Recording started\nSaving to: ${camera.recordingsDirectory}',
+        ),
+        duration: const Duration(seconds: 2),
+      ),
+    );
+  }
+
+  Future<void> _stopRecordingFlow({
+    required CameraProvider camera,
+    required TelemetryProvider telemetry,
+    required ScaffoldMessengerState messenger,
+    bool showSuccessMessage = true,
+  }) async {
+    if (_isStoppingRecording) {
+      return;
+    }
+
+    _isStoppingRecording = true;
+    try {
+      _recordingTimerSubscription?.cancel();
+      _recordingTimerSubscription = null;
+      await _backgroundRecordingService.stopForegroundRecording();
+
+      final videoPath = await camera.stopRecording();
+      if (!mounted) {
+        return;
+      }
+
+      if (videoPath != null) {
+        final telemetryPath = await telemetry.stopRideSessionAndPersist(
+          videoPath,
+          segmentPaths: camera.lastSessionSegmentPaths,
+          lockedSegmentPaths: camera.lockedSegmentPaths,
+          segmentTimeline: camera.lastSessionSegmentTimeline,
+        );
+        if (!mounted || !showSuccessMessage) {
+          return;
+        }
+
+        messenger.showSnackBar(
+          SnackBar(
+            content: Text(
+              telemetryPath == null
+                  ? 'Video saved to:\n$videoPath'
+                  : 'Video saved:\n$videoPath\nTelemetry saved:\n$telemetryPath',
+            ),
+            duration: const Duration(seconds: 4),
+          ),
+        );
+      } else {
+        telemetry.cancelRideSession();
+      }
+    } finally {
+      _isStoppingRecording = false;
+    }
   }
 
   void _handleIncidentAutoLock({
@@ -75,6 +207,7 @@ class _RecordingScreenState extends State<RecordingScreen> {
       recordingFps: settingsProvider.recordingFps,
       videoBitrateBps: settingsProvider.videoBitrateMbps * 1000 * 1000,
       audioEnabled: settingsProvider.audioEnabled,
+      preferredCameraName: settingsProvider.selectedCameraName,
       segmentDurationMinutes: settingsProvider.segmentMinutes,
       maxRollingSegments: settingsProvider.loopSegmentCount,
     );
@@ -96,6 +229,10 @@ class _RecordingScreenState extends State<RecordingScreen> {
 
   @override
   Widget build(BuildContext context) {
+    if (_isInPipMode) {
+      return _buildPipRecordingView();
+    }
+
     return Scaffold(
       backgroundColor: Colors.black,
       body: SafeArea(
@@ -107,6 +244,94 @@ class _RecordingScreenState extends State<RecordingScreen> {
             _buildTelemetryStats(),
             _buildControls(),
           ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildPipRecordingView() {
+    return Scaffold(
+      backgroundColor: Colors.black,
+      body: SafeArea(
+        child: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(12),
+            child: Consumer2<CameraProvider, TelemetryProvider>(
+              builder: (context, camera, telemetry, _) {
+                return Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        if (camera.isRecording)
+                          StreamBuilder<int>(
+                            stream: _pipBlinkStream,
+                            builder: (context, snapshot) {
+                              final tick = snapshot.data ?? 0;
+                              final opacity = tick.isEven ? 1.0 : 0.25;
+                              return AnimatedOpacity(
+                                opacity: opacity,
+                                duration: const Duration(milliseconds: 180),
+                                child: Container(
+                                  width: 8,
+                                  height: 8,
+                                  margin: const EdgeInsets.only(right: 6),
+                                  decoration: const BoxDecoration(
+                                    color: Colors.redAccent,
+                                    shape: BoxShape.circle,
+                                  ),
+                                ),
+                              );
+                            },
+                          ),
+                        Text(
+                          camera.isRecording ? 'REC' : 'IDLE',
+                          style: TextStyle(
+                            color:
+                                camera.isRecording ? Colors.redAccent : Colors.white70,
+                            fontSize: 11,
+                            fontWeight: FontWeight.w700,
+                            letterSpacing: 0.8,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 6),
+                    StreamBuilder<Duration>(
+                      stream: camera.timerStream,
+                      initialData: camera.elapsedTime,
+                      builder: (context, snapshot) {
+                        final duration = snapshot.data ?? Duration.zero;
+                        final hours = duration.inHours;
+                        final minutes = duration.inMinutes.remainder(60);
+                        final seconds = duration.inSeconds.remainder(60);
+                        final text =
+                            '${hours.toString().padLeft(2, '0')}:${minutes.toString().padLeft(2, '0')}:${seconds.toString().padLeft(2, '0')}';
+                        return Text(
+                          text,
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 18,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        );
+                      },
+                    ),
+                    const SizedBox(height: 2),
+                    const Text(
+                      'Return to app for controls',
+                      style: TextStyle(
+                        color: Colors.white54,
+                        fontSize: 10,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                  ],
+                );
+              },
+            ),
+          ),
         ),
       ),
     );
@@ -150,6 +375,8 @@ class _RecordingScreenState extends State<RecordingScreen> {
         await cameraProvider.getSupportedFpsOptionsForPreset(
       preset: AppSettingsProvider.toResolutionPreset(settings.recordingResolution),
     );
+    final initialCameraOptions =
+        await cameraProvider.getAvailableCameras(refresh: true);
 
     if (!mounted) {
       return;
@@ -176,6 +403,14 @@ class _RecordingScreenState extends State<RecordingScreen> {
         int loopSegmentCount = settings.loopSegmentCount;
         IncidentSensitivity incidentSensitivity = settings.incidentSensitivity;
         List<int> availableFps = List<int>.from(initialFpsOptions);
+        final cameraOptions = List<CameraDescription>.from(initialCameraOptions);
+        String selectedCameraName = settings.selectedCameraName;
+        if (selectedCameraName.isEmpty) {
+          selectedCameraName = cameraProvider.activeCameraName;
+        }
+        if (selectedCameraName.isEmpty && cameraOptions.isNotEmpty) {
+          selectedCameraName = cameraOptions.first.name;
+        }
 
         return StatefulBuilder(
           builder: (context, setModalState) {
@@ -318,6 +553,30 @@ class _RecordingScreenState extends State<RecordingScreen> {
                           },
                         ),
                         const SizedBox(height: 12),
+                        if (cameraOptions.isNotEmpty) ...[
+                          _buildSettingsLabel('Camera lens'),
+                          DropdownButtonFormField<String>(
+                            initialValue: cameraOptions
+                                    .any((camera) => camera.name == selectedCameraName)
+                                ? selectedCameraName
+                                : cameraOptions.first.name,
+                            dropdownColor: const Color(0xFF1B1B1B),
+                            decoration: _settingsInputDecoration(),
+                            items: cameraOptions
+                                .map(
+                                  (camera) => DropdownMenuItem<String>(
+                                    value: camera.name,
+                                    child: Text(cameraProvider.cameraLabel(camera)),
+                                  ),
+                                )
+                                .toList(),
+                            onChanged: (value) {
+                              if (value == null) return;
+                              setModalState(() => selectedCameraName = value);
+                            },
+                          ),
+                          const SizedBox(height: 12),
+                        ],
                         _buildSettingsLabel('Recording resolution'),
                         DropdownButtonFormField<int>(
                           initialValue: selectedResolution,
@@ -512,6 +771,7 @@ class _RecordingScreenState extends State<RecordingScreen> {
                                   bitrateMbps: selectedBitrateMbps,
                                   audioEnabled: audioEnabled,
                                   speedRefreshMs: speedRefreshMs,
+                                  cameraName: selectedCameraName,
                                   segmentMinutes: segmentMinutes,
                                   loopSegmentCount: loopSegmentCount,
                                   incidentSensitivity: incidentSensitivity,
@@ -557,6 +817,7 @@ class _RecordingScreenState extends State<RecordingScreen> {
     }
     await settings.updateAudioEnabled(result.audioEnabled);
     await settings.updateSpeedRefreshMs(result.speedRefreshMs);
+    await settings.updateSelectedCameraName(result.cameraName);
     await settings.updateSegmentMinutes(result.segmentMinutes);
     await settings.updateLoopSegmentCount(result.loopSegmentCount);
     await settings.updateIncidentSensitivity(result.incidentSensitivity);
@@ -580,6 +841,7 @@ class _RecordingScreenState extends State<RecordingScreen> {
       recordingFps: result.fps,
       videoBitrateBps: result.bitrateMbps * 1000 * 1000,
       audioEnabled: result.audioEnabled,
+      preferredCameraName: result.cameraName,
       segmentDurationMinutes: result.segmentMinutes,
       maxRollingSegments: result.loopSegmentCount,
     );
@@ -607,6 +869,8 @@ class _RecordingScreenState extends State<RecordingScreen> {
     return Consumer<AppSettingsProvider>(
       builder: (context, settings, _) {
         final chips = <Widget>[
+          if (settings.selectedCameraName.isNotEmpty)
+            _buildProfileChip('Cam ${settings.selectedCameraName}'),
           _buildProfileChip('${settings.recordingResolution}p'),
           _buildProfileChip('${settings.recordingFps} FPS'),
           _buildProfileChip('${settings.videoBitrateMbps} Mbps'),
@@ -875,50 +1139,16 @@ class _RecordingScreenState extends State<RecordingScreen> {
                 onPressed: () async {
                   final messenger = ScaffoldMessenger.of(context);
                   if (camera.isRecording) {
-                    final videoPath = await camera.stopRecording();
-                    if (!mounted) {
-                      return;
-                    }
-
-                    if (videoPath != null) {
-                      final telemetryPath =
-                          await telemetry.stopRideSessionAndPersist(
-                        videoPath,
-                        segmentPaths: camera.lastSessionSegmentPaths,
-                        lockedSegmentPaths: camera.lockedSegmentPaths,
-                      );
-                      if (!mounted) {
-                        return;
-                      }
-
-                      messenger.showSnackBar(
-                        SnackBar(
-                          content: Text(
-                            telemetryPath == null
-                                ? 'Video saved to:\n$videoPath'
-                                : 'Video saved:\n$videoPath\nTelemetry saved:\n$telemetryPath',
-                          ),
-                          duration: const Duration(seconds: 4),
-                        ),
-                      );
-                    } else {
-                      telemetry.cancelRideSession();
-                    }
+                    await _stopRecordingFlow(
+                      camera: camera,
+                      telemetry: telemetry,
+                      messenger: messenger,
+                    );
                   } else {
-                    await camera.startRecording();
-                    if (camera.isRecording) {
-                      telemetry.startRideSession();
-                    }
-                    if (!mounted) {
-                      return;
-                    }
-
-                    messenger.showSnackBar(
-                      SnackBar(
-                        content: Text(
-                            'Recording started\nSaving to: ${camera.recordingsDirectory}'),
-                        duration: const Duration(seconds: 2),
-                      ),
+                    await _startRecordingFlow(
+                      camera: camera,
+                      telemetry: telemetry,
+                      messenger: messenger,
                     );
                   }
                 },
@@ -1015,6 +1245,15 @@ class _RecordingScreenState extends State<RecordingScreen> {
       ),
     );
   }
+
+  @override
+  void dispose() {
+    _recordingTimerSubscription?.cancel();
+    _backgroundEventSubscription?.cancel();
+    _pipModeSubscription?.cancel();
+    _backgroundRecordingService.stopForegroundRecording();
+    super.dispose();
+  }
 }
 
 class _SettingsFormResult {
@@ -1024,6 +1263,7 @@ class _SettingsFormResult {
     required this.bitrateMbps,
     required this.audioEnabled,
     required this.speedRefreshMs,
+    required this.cameraName,
     required this.segmentMinutes,
     required this.loopSegmentCount,
     required this.incidentSensitivity,
@@ -1034,6 +1274,7 @@ class _SettingsFormResult {
   final int bitrateMbps;
   final bool audioEnabled;
   final int speedRefreshMs;
+  final String cameraName;
   final int segmentMinutes;
   final int loopSegmentCount;
   final IncidentSensitivity incidentSensitivity;
