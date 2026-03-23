@@ -17,18 +17,31 @@ MotoCam is a mobile application that combines video recording with location trac
 
 ## Release Notes
 
+### v0.1.7 (2026-03-23)
+
+Highlights:
+
+- Faster and more stable speed telemetry updates with jitter filtering and stale-update fallback polling.
+- Ride playback upgrades: speed graph, smoother segment transitions, timeline scrubbing improvements, and telemetry continuity fixes.
+- Camera selector support with persisted lens preference.
+- Android background recording improvements with a foreground notification (elapsed timer and stop action).
+- Recording PiP refinements with a minimal compact UI and a blinking REC indicator.
+
+Release artifact:
+- `build/app/outputs/flutter-apk/app-release.apk`
+
 ### v0.1.5 (2026-03-22)
 
-- Removed Mappls SDK integration to eliminate startup configuration failures.
-- Added persistent recording profile settings (quality, FPS, bitrate, audio, speed refresh interval).
-- Added active profile chips on the recording screen.
-- Added FPS fallback handling for unsupported device combinations.
-- Added static GPS route viewer in playback using recorded latitude/longitude samples.
-- Added release build shrinking/minification with ProGuard rules.
-- Improved telemetry UI refresh throttling for smoother performance.
+- Removed Mappls SDK integration to resolve startup configuration failures.
+- Added persistent recording profile settings for quality, FPS, bitrate, audio, and speed refresh interval.
+- Added active profile chips to the recording screen.
+- Added FPS fallback handling for unsupported device and quality combinations.
+- Added a static GPS route viewer in playback using recorded latitude/longitude samples.
+- Enabled Android release shrinking/minification with ProGuard (R8).
+- Improved telemetry refresh throttling for smoother UI performance.
 
-Release APK output:
-- build/app/outputs/flutter-apk/app-release.apk
+Release artifact:
+- `build/app/outputs/flutter-apk/app-release.apk`
 
 ## Features
 
