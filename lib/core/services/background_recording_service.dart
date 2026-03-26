@@ -18,6 +18,7 @@ class BackgroundRecordingService {
       StreamController<BackgroundRecordingEvent>.broadcast();
 
   bool _initialized = false;
+  bool _batteryOptimizationRequestAttempted = false;
 
   Stream<BackgroundRecordingEvent> get events => _eventsController.stream;
 
@@ -46,9 +47,30 @@ class BackgroundRecordingService {
     if (!Platform.isAndroid) {
       return;
     }
+    await _ensureBatteryOptimizationExemption();
     await _channel.invokeMethod<void>('startForegroundRecording', {
       'elapsedMs': elapsed.inMilliseconds,
     });
+  }
+
+  Future<void> _ensureBatteryOptimizationExemption() async {
+    if (_batteryOptimizationRequestAttempted) {
+      return;
+    }
+
+    _batteryOptimizationRequestAttempted = true;
+    try {
+      final isIgnoring =
+          await _channel.invokeMethod<bool>('isIgnoringBatteryOptimizations') ??
+              true;
+      if (isIgnoring) {
+        return;
+      }
+
+      await _channel.invokeMethod<void>('requestIgnoreBatteryOptimizations');
+    } catch (_) {
+      // Best effort only: recording still proceeds with foreground service + wake lock.
+    }
   }
 
   Future<void> updateForegroundRecording({required Duration elapsed}) async {

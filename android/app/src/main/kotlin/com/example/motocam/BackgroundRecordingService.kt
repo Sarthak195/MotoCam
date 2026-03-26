@@ -9,6 +9,7 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 
 class BackgroundRecordingService : Service() {
@@ -23,7 +24,11 @@ class BackgroundRecordingService : Service() {
         const val ACTION_STOP_REQUESTED = "com.example.motocam.action.STOP_REQUESTED"
 
         const val EXTRA_ELAPSED_MS = "elapsedMs"
+        private const val WAKE_LOCK_TAG = "MotoCam:RecordingWakeLock"
+        private const val WAKE_LOCK_TIMEOUT_MS = 12 * 60 * 60 * 1000L
     }
+
+    private var wakeLock: PowerManager.WakeLock? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -31,6 +36,7 @@ class BackgroundRecordingService : Service() {
         when (intent?.action) {
             ACTION_START -> {
                 val elapsedMs = intent.getLongExtra(EXTRA_ELAPSED_MS, 0L)
+                acquireWakeLockIfNeeded()
                 startForeground(NOTIFICATION_ID, buildNotification(elapsedMs))
             }
             ACTION_UPDATE -> {
@@ -39,11 +45,13 @@ class BackgroundRecordingService : Service() {
                 manager.notify(NOTIFICATION_ID, buildNotification(elapsedMs))
             }
             ACTION_STOP -> {
+                releaseWakeLockIfHeld()
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
             }
             ACTION_STOP_FROM_NOTIFICATION -> {
                 sendBroadcast(Intent(ACTION_STOP_REQUESTED).setPackage(packageName))
+                releaseWakeLockIfHeld()
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
             }
@@ -79,7 +87,7 @@ class BackgroundRecordingService : Service() {
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.mipmap.ic_launcher)
             .setContentTitle("MotoCam recording in progress")
-            .setContentText("Elapsed: ${formatElapsed(elapsedMs)}")
+            .setContentText("Elapsed: ${formatElapsed(elapsedMs)} - screen can be off")
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
@@ -87,6 +95,32 @@ class BackgroundRecordingService : Service() {
             .setContentIntent(openAppPendingIntent)
             .addAction(0, "Stop", stopPendingIntent)
             .build()
+    }
+
+    private fun acquireWakeLockIfNeeded() {
+        val existing = wakeLock
+        if (existing?.isHeld == true) {
+            return
+        }
+
+        val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+        wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, WAKE_LOCK_TAG).apply {
+            setReferenceCounted(false)
+            acquire(WAKE_LOCK_TIMEOUT_MS)
+        }
+    }
+
+    private fun releaseWakeLockIfHeld() {
+        val lock = wakeLock
+        if (lock != null && lock.isHeld) {
+            lock.release()
+        }
+        wakeLock = null
+    }
+
+    override fun onDestroy() {
+        releaseWakeLockIfHeld()
+        super.onDestroy()
     }
 
     private fun createNotificationChannelIfNeeded() {
