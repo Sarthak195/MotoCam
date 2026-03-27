@@ -19,8 +19,13 @@ class RecordingScreen extends StatefulWidget {
   State<RecordingScreen> createState() => _RecordingScreenState();
 }
 
-class _RecordingScreenState extends State<RecordingScreen> {
+class _RecordingScreenState extends State<RecordingScreen>
+    with WidgetsBindingObserver {
+  static const Duration _stallRecoveryBackgroundThreshold =
+      Duration(seconds: 8);
+
   DateTime? _lastHandledIncidentAt;
+  DateTime? _lastBackgroundedAt;
   final BackgroundRecordingService _backgroundRecordingService =
       BackgroundRecordingService.instance;
   final PipService _pipService = PipService.instance;
@@ -29,15 +34,102 @@ class _RecordingScreenState extends State<RecordingScreen> {
   StreamSubscription<bool>? _pipModeSubscription;
   bool _isStoppingRecording = false;
   bool _isInPipMode = false;
+  bool _isRecoveringFromStall = false;
   final Stream<int> _pipBlinkStream =
-      Stream<int>.periodic(const Duration(milliseconds: 700), (tick) => tick);
+      Stream<int>.periodic(
+        const Duration(milliseconds: 700),
+        (tick) => tick,
+      ).asBroadcastStream();
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _initializePipBridge();
     _initializeBackgroundRecordingBridge();
     _initializeCamera();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (!mounted) {
+      return;
+    }
+
+    final camera = context.read<CameraProvider>();
+    if (state == AppLifecycleState.inactive ||
+        state == AppLifecycleState.paused ||
+        state == AppLifecycleState.hidden) {
+      if (camera.isRecording) {
+        _lastBackgroundedAt = DateTime.now();
+      }
+      return;
+    }
+
+    if (state != AppLifecycleState.resumed || !camera.isRecording) {
+      return;
+    }
+
+    final backgroundedAt = _lastBackgroundedAt;
+    _lastBackgroundedAt = null;
+    if (backgroundedAt == null) {
+      return;
+    }
+
+    final backgroundDuration = DateTime.now().difference(backgroundedAt);
+    if (backgroundDuration < _stallRecoveryBackgroundThreshold) {
+      return;
+    }
+
+    unawaited(
+      _attemptRecoveryFromPossibleVideoStall(
+        backgroundDuration: backgroundDuration,
+      ),
+    );
+  }
+
+  Future<void> _attemptRecoveryFromPossibleVideoStall({
+    required Duration backgroundDuration,
+  }) async {
+    if (_isRecoveringFromStall || !mounted) {
+      return;
+    }
+
+    _isRecoveringFromStall = true;
+    final messenger = ScaffoldMessenger.of(context);
+    final camera = context.read<CameraProvider>();
+
+    try {
+      final recovered = await camera.recoverRecordingPipeline(
+        reason:
+            'resume-after-background-${backgroundDuration.inSeconds}s',
+      );
+      if (!mounted) {
+        return;
+      }
+
+      if (recovered) {
+        messenger.showSnackBar(
+          SnackBar(
+            content: Text(
+              'Video feed may have stalled while screen was off. Recording was auto-recovered after ${backgroundDuration.inSeconds}s in background.',
+            ),
+            duration: const Duration(seconds: 4),
+          ),
+        );
+      } else {
+        messenger.showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Recording resumed from background. If video appears frozen, stop and restart recording.',
+            ),
+            duration: Duration(seconds: 4),
+          ),
+        );
+      }
+    } finally {
+      _isRecoveringFromStall = false;
+    }
   }
 
   Future<void> _initializePipBridge() async {
@@ -48,6 +140,19 @@ class _RecordingScreenState extends State<RecordingScreen> {
       if (!mounted) {
         return;
       }
+
+      if (_isInPipMode && !inPip) {
+        Future<void>.delayed(const Duration(milliseconds: 200), () {
+          if (!mounted) {
+            return;
+          }
+          setState(() {
+            _isInPipMode = false;
+          });
+        });
+        return;
+      }
+
       setState(() {
         _isInPipMode = inPip;
       });
@@ -227,25 +332,50 @@ class _RecordingScreenState extends State<RecordingScreen> {
     await telemetryProvider.initialize();
   }
 
-  @override
-  Widget build(BuildContext context) {
-    if (_isInPipMode) {
-      return _buildPipRecordingView();
+  Future<void> _handleBackPressWhileRecording() async {
+    final enteredPip = await PipService.enterPipMode();
+    if (!mounted || enteredPip) {
+      return;
     }
 
-    return Scaffold(
-      backgroundColor: Colors.black,
-      body: SafeArea(
-        child: Column(
-          children: [
-            _buildHeader(),
-            _buildActiveProfileBar(),
-            Expanded(child: _buildCameraPreview()),
-            _buildTelemetryStats(),
-            _buildControls(),
-          ],
-        ),
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Recording is active. Stop recording before exiting.'),
+        duration: Duration(seconds: 2),
       ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Consumer<CameraProvider>(
+      builder: (context, camera, _) {
+        return PopScope(
+          canPop: !camera.isRecording,
+          onPopInvokedWithResult: (didPop, _) {
+            if (didPop || !camera.isRecording) {
+              return;
+            }
+            unawaited(_handleBackPressWhileRecording());
+          },
+          child: _isInPipMode
+              ? _buildPipRecordingView()
+              : Scaffold(
+                  backgroundColor: Colors.black,
+                  body: SafeArea(
+                    child: Column(
+                      children: [
+                        _buildHeader(),
+                        _buildActiveProfileBar(),
+                        Expanded(child: _buildCameraPreview()),
+                        _buildTelemetryStats(),
+                        _buildControls(),
+                      ],
+                    ),
+                  ),
+                ),
+        );
+      },
     );
   }
 
@@ -982,6 +1112,9 @@ class _RecordingScreenState extends State<RecordingScreen> {
         final portraitAspectRatio = 1 / controller.value.aspectRatio;
 
         return Stack(
+          key: ValueKey(
+            'camera-preview-${camera.resolutionPreset}-${camera.recordingFps}-${camera.activeCameraName}',
+          ),
           children: [
             Positioned.fill(
               child: ClipRRect(
@@ -1177,13 +1310,17 @@ class _RecordingScreenState extends State<RecordingScreen> {
                 children: [
                   Expanded(
                     child: OutlinedButton.icon(
-                      onPressed: () {
-                        Navigator.of(context).push(
-                          MaterialPageRoute(
-                            builder: (_) => const RidesListScreen(),
-                          ),
-                        );
-                      },
+                      onPressed: camera.isRecording
+                          ? () {
+                              unawaited(_handleBackPressWhileRecording());
+                            }
+                          : () {
+                              Navigator.of(context).push(
+                                MaterialPageRoute(
+                                  builder: (_) => const RidesListScreen(),
+                                ),
+                              );
+                            },
                       icon: const Icon(Icons.video_library_outlined,
                           color: Colors.blue),
                       label: const Text(
@@ -1248,6 +1385,7 @@ class _RecordingScreenState extends State<RecordingScreen> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _recordingTimerSubscription?.cancel();
     _backgroundEventSubscription?.cancel();
     _pipModeSubscription?.cancel();

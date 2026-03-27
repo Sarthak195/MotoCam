@@ -61,6 +61,9 @@ class CameraProvider extends ChangeNotifier {
   bool _isExportingToGallery = false;
   int _pendingIncidentSegmentLocks = 0;
   int _lastSegmentEndMs = 0;
+  int _recordingRecoveryCount = 0;
+  DateTime? _lastRecordingRecoveryAt;
+  String? _lastRecordingRecoveryReason;
 
   static const List<int> _fpsCandidates = [24, 30, 60];
 
@@ -97,6 +100,9 @@ class CameraProvider extends ChangeNotifier {
   List<String> get lockedSegmentPaths =>
       List.unmodifiable(_lockedSegmentPaths.toList()..sort());
   int get lockedSegmentCount => _lockedSegmentPaths.length;
+  int get recordingRecoveryCount => _recordingRecoveryCount;
+  DateTime? get lastRecordingRecoveryAt => _lastRecordingRecoveryAt;
+  String? get lastRecordingRecoveryReason => _lastRecordingRecoveryReason;
   List<int> get knownSupportedFpsOptions => List.unmodifiable(
       _supportedFpsCache[_fpsCacheKey(_resolutionPreset)] ?? _fpsCandidates);
 
@@ -420,6 +426,9 @@ class CameraProvider extends ChangeNotifier {
       _pendingGalleryExports.clear();
       _pendingIncidentSegmentLocks = 0;
       _lastSegmentEndMs = 0;
+      _recordingRecoveryCount = 0;
+      _lastRecordingRecoveryAt = null;
+      _lastRecordingRecoveryReason = null;
       _isStoppingRecording = false;
       _recordingStartTime = DateTime.now();
       _elapsedTime = Duration.zero;
@@ -474,6 +483,37 @@ class CameraProvider extends ChangeNotifier {
       if (!_isStoppingRecording && isRecording) {
         _armSegmentTimer();
       }
+    } finally {
+      _isRollingSegment = false;
+    }
+  }
+
+  Future<bool> recoverRecordingPipeline({
+    String reason = 'suspected-video-stall',
+  }) async {
+    if (!isRecording || _controller == null) {
+      return false;
+    }
+    if (_isRollingSegment || _isStoppingRecording) {
+      return false;
+    }
+
+    _isRollingSegment = true;
+    try {
+      _log('Attempting recording pipeline recovery: $reason');
+      final file = await _controller!.stopVideoRecording();
+      await _registerCompletedSegment(file.path);
+      await _controller!.startVideoRecording();
+      _armSegmentTimer();
+      _recordingRecoveryCount++;
+      _lastRecordingRecoveryAt = DateTime.now();
+      _lastRecordingRecoveryReason = reason;
+      _log('Recording pipeline recovery succeeded');
+      notifyListeners();
+      return true;
+    } catch (e) {
+      _log('Recording pipeline recovery failed: $e');
+      return false;
     } finally {
       _isRollingSegment = false;
     }
