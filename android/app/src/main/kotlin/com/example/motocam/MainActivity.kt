@@ -9,6 +9,7 @@ import android.content.IntentFilter
 import android.content.res.Configuration
 import android.media.MediaScannerConnection
 import android.net.Uri
+import android.os.BatteryManager
 import android.os.Build
 import android.os.Environment
 import android.os.PowerManager
@@ -24,6 +25,7 @@ import java.io.FileOutputStream
 class MainActivity: FlutterActivity() {
     private val CHANNEL = "com.example.motocam/pip"
     private val MEDIA_CHANNEL = "com.example.motocam/media"
+    private val DEVICE_STATUS_CHANNEL = "com.example.motocam/device_status"
     private val BACKGROUND_RECORDING_CHANNEL = "com.example.motocam/background_recording"
     private var pipMethodChannel: MethodChannel? = null
     private var backgroundRecordingMethodChannel: MethodChannel? = null
@@ -39,6 +41,16 @@ class MainActivity: FlutterActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, DEVICE_STATUS_CHANNEL)
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "getBatteryStatus" -> {
+                        result.success(readBatteryStatus())
+                    }
+                    else -> result.notImplemented()
+                }
+            }
 
         backgroundRecordingMethodChannel =
             MethodChannel(flutterEngine.dartExecutor.binaryMessenger, BACKGROUND_RECORDING_CHANNEL)
@@ -223,6 +235,56 @@ class MainActivity: FlutterActivity() {
                     else -> result.notImplemented()
                 }
             }
+    }
+
+    private fun readBatteryStatus(): Map<String, Any?> {
+        val batteryIntent = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        val batteryLevelPercent = batteryIntent
+            ?.let {
+                val level = it.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
+                val scale = it.getIntExtra(BatteryManager.EXTRA_SCALE, -1)
+                if (level >= 0 && scale > 0) {
+                    ((level * 100.0) / scale).toInt()
+                } else {
+                    null
+                }
+            }
+
+        val batteryTemperatureC = batteryIntent
+            ?.let {
+                val tempTenthsC = it.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, Int.MIN_VALUE)
+                if (tempTenthsC != Int.MIN_VALUE && tempTenthsC > 0) {
+                    tempTenthsC / 10.0
+                } else {
+                    null
+                }
+            }
+
+        val thermalStatus = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+            thermalStatusLabel(powerManager.currentThermalStatus)
+        } else {
+            "unsupported"
+        }
+
+        return mapOf(
+            "batteryLevelPercent" to batteryLevelPercent,
+            "batteryTemperatureC" to batteryTemperatureC,
+            "thermalStatus" to thermalStatus,
+        )
+    }
+
+    private fun thermalStatusLabel(status: Int): String {
+        return when (status) {
+            PowerManager.THERMAL_STATUS_NONE -> "none"
+            PowerManager.THERMAL_STATUS_LIGHT -> "light"
+            PowerManager.THERMAL_STATUS_MODERATE -> "moderate"
+            PowerManager.THERMAL_STATUS_SEVERE -> "severe"
+            PowerManager.THERMAL_STATUS_CRITICAL -> "critical"
+            PowerManager.THERMAL_STATUS_EMERGENCY -> "emergency"
+            PowerManager.THERMAL_STATUS_SHUTDOWN -> "shutdown"
+            else -> "unknown"
+        }
     }
 
     override fun onPictureInPictureModeChanged(

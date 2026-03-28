@@ -50,6 +50,7 @@ class CameraProvider extends ChangeNotifier {
   Duration _segmentDuration = const Duration(minutes: 5);
   int _maxRollingSegments = 24;
   final Map<String, List<int>> _supportedFpsCache = {};
+  final Map<String, Set<ResolutionPreset>> _unsupportedResolutionCache = {};
   final List<String> _sessionSegmentPaths = <String>[];
   final List<SegmentTimelineEntry> _sessionSegmentTimeline =
       <SegmentTimelineEntry>[];
@@ -66,6 +67,14 @@ class CameraProvider extends ChangeNotifier {
   String? _lastRecordingRecoveryReason;
 
   static const List<int> _fpsCandidates = [24, 30, 60];
+  static const List<int> _safeResolutionOptions = [480, 720, 1080, 2160];
+  static const List<ResolutionPreset> _resolutionFallbackOrder = [
+    ResolutionPreset.ultraHigh,
+    ResolutionPreset.veryHigh,
+    ResolutionPreset.high,
+    ResolutionPreset.medium,
+    ResolutionPreset.low,
+  ];
 
   // Recording timer
   DateTime? _recordingStartTime;
@@ -95,7 +104,7 @@ class CameraProvider extends ChangeNotifier {
   int get maxRollingSegments => _maxRollingSegments;
   List<String> get lastSessionSegmentPaths =>
       List.unmodifiable(_sessionSegmentPaths);
-    List<Map<String, dynamic>> get lastSessionSegmentTimeline =>
+  List<Map<String, dynamic>> get lastSessionSegmentTimeline =>
       List.unmodifiable(_sessionSegmentTimeline.map((entry) => entry.toJson()));
   List<String> get lockedSegmentPaths =>
       List.unmodifiable(_lockedSegmentPaths.toList()..sort());
@@ -103,14 +112,96 @@ class CameraProvider extends ChangeNotifier {
   int get recordingRecoveryCount => _recordingRecoveryCount;
   DateTime? get lastRecordingRecoveryAt => _lastRecordingRecoveryAt;
   String? get lastRecordingRecoveryReason => _lastRecordingRecoveryReason;
-  List<int> get knownSupportedFpsOptions => List.unmodifiable(
-      _supportedFpsCache[_fpsCacheKey(_resolutionPreset)] ?? _fpsCandidates);
+  List<int> get knownSupportedFpsOptions =>
+      List.unmodifiable(_supportedFpsOptionsForPreset(_resolutionPreset));
+  List<int> get knownSupportedResolutionOptions {
+    final unsupported = knownUnsupportedResolutionPresets;
+    return List.unmodifiable(
+      _safeResolutionOptions
+          .where((resolution) =>
+              !unsupported.contains(presetForResolution(resolution)))
+          .toList(),
+    );
+  }
+  Set<ResolutionPreset> get knownUnsupportedResolutionPresets {
+    if (_activeCameraName.isEmpty) {
+      return const <ResolutionPreset>{};
+    }
+    final key = _resolutionSupportCacheKey(_activeCameraName);
+    return Set.unmodifiable(
+      _unsupportedResolutionCache[key] ?? const <ResolutionPreset>{},
+    );
+  }
 
   // Debug logging helper
   void _log(String message) {
     if (enableDebugLogging) {
       debugPrint('[MotoCam] $message');
     }
+  }
+
+  static ResolutionPreset presetForResolution(int resolution) {
+    if (resolution <= 480) {
+      return ResolutionPreset.low;
+    }
+    if (resolution <= 720) {
+      return ResolutionPreset.high;
+    }
+    if (resolution <= 1080) {
+      return ResolutionPreset.veryHigh;
+    }
+    return ResolutionPreset.ultraHigh;
+  }
+
+  static int resolutionForPreset(ResolutionPreset preset) {
+    switch (preset) {
+      case ResolutionPreset.low:
+      case ResolutionPreset.medium:
+        return 480;
+      case ResolutionPreset.high:
+        return 720;
+      case ResolutionPreset.veryHigh:
+        return 1080;
+      case ResolutionPreset.ultraHigh:
+      case ResolutionPreset.max:
+        return 2160;
+    }
+  }
+
+  ResolutionPreset resolvePresetForRequestedResolution(int requestedResolution) {
+    final requestedPreset = presetForResolution(requestedResolution);
+    final unsupported = knownUnsupportedResolutionPresets;
+    if (!unsupported.contains(requestedPreset)) {
+      return requestedPreset;
+    }
+
+    final lowerOrEqual = _safeResolutionOptions
+        .where((resolution) => resolution <= requestedResolution)
+        .toList()
+      ..sort((a, b) => b.compareTo(a));
+    for (final candidateResolution in lowerOrEqual) {
+      final preset = presetForResolution(candidateResolution);
+      if (!unsupported.contains(preset)) {
+        return preset;
+      }
+    }
+
+    final allCandidates = List<int>.from(_safeResolutionOptions)
+      ..sort((a, b) => a.compareTo(b));
+    for (final candidateResolution in allCandidates) {
+      final preset = presetForResolution(candidateResolution);
+      if (!unsupported.contains(preset)) {
+        return preset;
+      }
+    }
+
+    return requestedPreset;
+  }
+
+  int resolveAppliedResolutionForRequested(int requestedResolution) {
+    return resolutionForPreset(
+      resolvePresetForRequestedResolution(requestedResolution),
+    );
   }
 
   String cameraLabel(CameraDescription camera) {
@@ -174,6 +265,9 @@ class CameraProvider extends ChangeNotifier {
     int? maxRollingSegments,
   }) async {
     try {
+      final previousController = _controller;
+      final hadPreviousController = previousController != null;
+
       if (resolutionPreset != null) {
         _resolutionPreset = resolutionPreset;
       }
@@ -197,6 +291,22 @@ class CameraProvider extends ChangeNotifier {
         _maxRollingSegments = maxRollingSegments.clamp(1, 120);
       }
 
+      // Reset preview state before reinitializing to avoid rendering a
+      // disposed controller texture during resolution/camera switches.
+      if (hadPreviousController) {
+        _controller = null;
+        _isInitialized = false;
+        notifyListeners();
+        try {
+          await previousController.dispose();
+        } catch (_) {
+          // Best-effort cleanup of the previous controller.
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 120));
+      } else {
+        _isInitialized = false;
+      }
+
       // Request camera permission
       final cameraStatus = await Permission.camera.request();
       final microphoneStatus = _audioEnabled
@@ -211,6 +321,8 @@ class CameraProvider extends ChangeNotifier {
 
       if (cameraStatus.isDenied || microphoneStatus.isDenied) {
         _log('Camera or microphone permission denied');
+        _isInitialized = false;
+        notifyListeners();
         return;
       }
 
@@ -220,6 +332,8 @@ class CameraProvider extends ChangeNotifier {
       final cameras = await getAvailableCameras(refresh: true);
       if (cameras.isEmpty) {
         _log('No cameras detected on this device');
+        _isInitialized = false;
+        notifyListeners();
         return;
       }
       final selectedCamera = _resolveCamera(cameras);
@@ -228,36 +342,78 @@ class CameraProvider extends ChangeNotifier {
         _preferredCameraName = selectedCamera.name;
       }
 
-      final supportedFps = knownSupportedFpsOptions;
-      if (!supportedFps.contains(_recordingFps)) {
-        _recordingFps = supportedFps.last;
-      }
+      final requestedPreset = _resolutionPreset;
+      final requestedFps = _recordingFps;
+      CameraController? initializedController;
+      ResolutionPreset? initializedPreset;
+      var initializedFps = requestedFps;
 
-      await _controller?.dispose();
-      _controller = await _buildController(selectedCamera);
+      for (final candidatePreset
+          in _resolutionFallbackCandidates(requestedPreset)) {
+        var presetInitialized = false;
+        final supportedFps = _supportedFpsOptionsForPreset(candidatePreset);
+        var candidateFps = initializedFps;
+        if (!supportedFps.contains(candidateFps)) {
+          candidateFps = supportedFps.last;
+        }
 
-      try {
-        await _controller!.initialize();
-        await _controller!.lockCaptureOrientation(DeviceOrientation.portraitUp);
-      } catch (e) {
-        _log('Configured FPS failed on this device, retrying default FPS: $e');
-        _markFpsUnsupported(_recordingFps);
-        _recordingFps = _fallbackFps();
-        await _controller?.dispose();
-        _controller = CameraController(
-          selectedCamera,
-          _resolutionPreset,
-          enableAudio: _audioEnabled,
-          fps: _recordingFps,
-          videoBitrate: _videoBitrateBps,
-          imageFormatGroup: ImageFormatGroup.jpeg,
+        final firstAttempt = await _tryInitializeController(
+          camera: selectedCamera,
+          preset: candidatePreset,
+          fps: candidateFps,
         );
-        await _controller!.initialize();
-        await _controller!.lockCaptureOrientation(DeviceOrientation.portraitUp);
+        if (firstAttempt != null) {
+          initializedController = firstAttempt;
+          initializedPreset = candidatePreset;
+          initializedFps = candidateFps;
+          _markResolutionSupported(selectedCamera.name, candidatePreset);
+          presetInitialized = true;
+          break;
+        }
+
+        _markFpsUnsupportedForPreset(candidatePreset, candidateFps);
+        final fallbackFps = _fallbackFpsForPreset(candidatePreset);
+        if (fallbackFps != candidateFps) {
+          final fallbackAttempt = await _tryInitializeController(
+            camera: selectedCamera,
+            preset: candidatePreset,
+            fps: fallbackFps,
+          );
+          if (fallbackAttempt != null) {
+            initializedController = fallbackAttempt;
+            initializedPreset = candidatePreset;
+            initializedFps = fallbackFps;
+            _markResolutionSupported(selectedCamera.name, candidatePreset);
+            presetInitialized = true;
+            break;
+          }
+        }
+
+        if (!presetInitialized) {
+          _markResolutionUnsupported(selectedCamera.name, candidatePreset);
+        }
       }
+
+      if (initializedController == null || initializedPreset == null) {
+        _isInitialized = false;
+        _log('Unable to initialize camera for any preset on this device.');
+        notifyListeners();
+        return;
+      }
+
+      _controller = initializedController;
+      _resolutionPreset = initializedPreset;
+      _recordingFps = initializedFps;
 
       _isInitialized = true;
       _log('Camera initialized successfully');
+      if (_resolutionPreset != requestedPreset) {
+        _log(
+            'Requested preset $requestedPreset is not supported; downgraded to $_resolutionPreset.');
+      }
+      if (_recordingFps != requestedFps) {
+        _log('Requested FPS $requestedFps adjusted to $_recordingFps.');
+      }
       _log('Resolution preset: $_resolutionPreset');
       _log('Target FPS: $_recordingFps');
       _log('Video bitrate bps: $_videoBitrateBps');
@@ -266,6 +422,8 @@ class CameraProvider extends ChangeNotifier {
       _log('Recordings directory: $_recordingsDirectory');
       notifyListeners();
     } catch (e) {
+      _isInitialized = false;
+      notifyListeners();
       _log('Error initializing camera: $e');
     }
   }
@@ -310,7 +468,7 @@ class CameraProvider extends ChangeNotifier {
   Future<List<int>> getSupportedFpsOptionsForPreset({
     required ResolutionPreset preset,
   }) async {
-    final key = _fpsCacheKey(preset);
+    final key = _fpsCacheKeyForPreset(preset);
     if (_supportedFpsCache.containsKey(key)) {
       return List.unmodifiable(_supportedFpsCache[key]!);
     }
@@ -318,8 +476,42 @@ class CameraProvider extends ChangeNotifier {
     return List.unmodifiable(_fpsCandidates);
   }
 
-  void _markFpsUnsupported(int fps) {
-    final key = _fpsCacheKey(_resolutionPreset);
+  List<ResolutionPreset> _resolutionFallbackCandidates(
+    ResolutionPreset requested,
+  ) {
+    final startIndex = _resolutionFallbackOrder.indexOf(requested);
+    if (startIndex < 0) {
+      return const <ResolutionPreset>[ResolutionPreset.high, ResolutionPreset.medium, ResolutionPreset.low];
+    }
+    return _resolutionFallbackOrder.sublist(startIndex);
+  }
+
+  List<int> _supportedFpsOptionsForPreset(ResolutionPreset preset) {
+    return _supportedFpsCache[_fpsCacheKeyForPreset(preset)] ?? _fpsCandidates;
+  }
+
+  String _resolutionSupportCacheKey(String cameraName) =>
+      '${cameraName}_${_audioEnabled ? 1 : 0}';
+
+  void _markResolutionUnsupported(String cameraName, ResolutionPreset preset) {
+    final key = _resolutionSupportCacheKey(cameraName);
+    final unsupported =
+        Set<ResolutionPreset>.from(_unsupportedResolutionCache[key] ?? <ResolutionPreset>{});
+    unsupported.add(preset);
+    _unsupportedResolutionCache[key] = unsupported;
+  }
+
+  void _markResolutionSupported(String cameraName, ResolutionPreset preset) {
+    final key = _resolutionSupportCacheKey(cameraName);
+    final unsupported =
+        Set<ResolutionPreset>.from(_unsupportedResolutionCache[key] ?? <ResolutionPreset>{});
+    if (unsupported.remove(preset)) {
+      _unsupportedResolutionCache[key] = unsupported;
+    }
+  }
+
+  void _markFpsUnsupportedForPreset(ResolutionPreset preset, int fps) {
+    final key = _fpsCacheKeyForPreset(preset);
     final current = List<int>.from(_supportedFpsCache[key] ?? _fpsCandidates);
     current.remove(fps);
     if (current.isEmpty) {
@@ -328,33 +520,62 @@ class CameraProvider extends ChangeNotifier {
     _supportedFpsCache[key] = current;
   }
 
-  int _fallbackFps() {
-    final options =
-        _supportedFpsCache[_fpsCacheKey(_resolutionPreset)] ?? _fpsCandidates;
+  int _fallbackFpsForPreset(ResolutionPreset preset) {
+    final options = _supportedFpsOptionsForPreset(preset);
     if (options.contains(30)) {
       return 30;
     }
     return options.last;
   }
 
-  String _fpsCacheKey(ResolutionPreset preset) =>
+  String _fpsCacheKeyForPreset(ResolutionPreset preset) =>
       '${preset.name}_${_audioEnabled ? 1 : 0}';
 
-  Future<CameraController> _buildController(CameraDescription camera) async {
+  Future<CameraController?> _tryInitializeController({
+    required CameraDescription camera,
+    required ResolutionPreset preset,
+    required int fps,
+  }) async {
+    final controller = _buildController(
+      camera: camera,
+      preset: preset,
+      fps: fps,
+    );
+    try {
+      await controller.initialize();
+      await controller.lockCaptureOrientation(DeviceOrientation.portraitUp);
+      return controller;
+    } catch (e) {
+      _log('Camera init failed for preset $preset at ${fps}fps: $e');
+      try {
+        await controller.dispose();
+      } catch (_) {
+        // Best-effort dispose after failed initialize.
+      }
+      return null;
+    }
+  }
+
+  CameraController _buildController({
+    required CameraDescription camera,
+    required ResolutionPreset preset,
+    required int fps,
+  }) {
     try {
       return CameraController(
         camera,
-        _resolutionPreset,
+        preset,
         enableAudio: _audioEnabled,
-        fps: _recordingFps,
+        fps: fps,
         videoBitrate: _videoBitrateBps,
         imageFormatGroup: ImageFormatGroup.jpeg,
       );
     } catch (e) {
-      _log('FPS-specific controller failed, using default FPS. Error: $e');
+      _log(
+          'FPS-specific controller build failed for preset $preset at ${fps}fps, using default FPS. Error: $e');
       return CameraController(
         camera,
-        _resolutionPreset,
+        preset,
         enableAudio: _audioEnabled,
         imageFormatGroup: ImageFormatGroup.jpeg,
       );
@@ -409,14 +630,14 @@ class CameraProvider extends ChangeNotifier {
   }
 
   // Start recording
-  Future<void> startRecording() async {
+  Future<bool> startRecording() async {
     if (!_isInitialized ||
         _controller == null ||
         _recordingsDirectory == null) {
       _log('Camera not initialized or recordings directory not set');
       _log(
           'isInitialized: $_isInitialized, controller: $_controller, recordingsDir: $_recordingsDirectory');
-      return;
+      return false;
     }
 
     try {
@@ -436,7 +657,15 @@ class CameraProvider extends ChangeNotifier {
       _log('Starting recording...');
       _log('Recording segments will be captured in ~5 minute chunks');
 
-      await _controller!.startVideoRecording();
+      final started = await _startVideoRecordingWithFallback();
+      if (!started) {
+        _state = RecordingState.idle;
+        _recordingStartTime = null;
+        _elapsedTime = Duration.zero;
+        notifyListeners();
+        return false;
+      }
+
       _state = RecordingState.recording;
       _armSegmentTimer();
 
@@ -451,10 +680,92 @@ class CameraProvider extends ChangeNotifier {
 
       _log('Recording started successfully');
       notifyListeners();
+      return true;
     } catch (e) {
       _log('Error starting recording: $e');
       _log('Stack trace: ${StackTrace.current}');
+      return false;
     }
+  }
+
+  Future<bool> _startVideoRecordingWithFallback() async {
+    final currentController = _controller;
+    if (currentController == null) {
+      return false;
+    }
+
+    try {
+      await currentController.startVideoRecording();
+      return true;
+    } catch (e) {
+      _log('startVideoRecording failed at $_resolutionPreset/${_recordingFps}fps: $e');
+    }
+
+    final activeCamera = await _resolveActiveCameraDescription();
+    if (activeCamera == null) {
+      _log('Unable to resolve active camera for recording fallback.');
+      return false;
+    }
+
+    final candidates = _resolutionFallbackCandidates(_resolutionPreset).skip(1);
+    for (final candidatePreset in candidates) {
+      final supportedFps = _supportedFpsOptionsForPreset(candidatePreset);
+      var candidateFps = _recordingFps;
+      if (!supportedFps.contains(candidateFps)) {
+        candidateFps = _fallbackFpsForPreset(candidatePreset);
+      }
+
+      final candidateController = await _tryInitializeController(
+        camera: activeCamera,
+        preset: candidatePreset,
+        fps: candidateFps,
+      );
+      if (candidateController == null) {
+        _markResolutionUnsupported(activeCamera.name, candidatePreset);
+        continue;
+      }
+
+      final previousController = _controller;
+      _controller = candidateController;
+      _resolutionPreset = candidatePreset;
+      _recordingFps = candidateFps;
+      _markResolutionSupported(activeCamera.name, candidatePreset);
+      if (previousController != null && !identical(previousController, candidateController)) {
+        await previousController.dispose();
+      }
+      notifyListeners();
+
+      try {
+        await candidateController.startVideoRecording();
+        _log('Recording fallback succeeded at $_resolutionPreset/${_recordingFps}fps.');
+        return true;
+      } catch (e) {
+        _log('Recording fallback failed at $candidatePreset/${candidateFps}fps: $e');
+        _markResolutionUnsupported(activeCamera.name, candidatePreset);
+      }
+    }
+
+    return false;
+  }
+
+  Future<CameraDescription?> _resolveActiveCameraDescription() async {
+    for (final camera in _availableCameras) {
+      if (camera.name == _activeCameraName) {
+        return camera;
+      }
+    }
+
+    final refreshed = await getAvailableCameras(refresh: true);
+    for (final camera in refreshed) {
+      if (camera.name == _activeCameraName) {
+        return camera;
+      }
+    }
+
+    if (refreshed.isEmpty) {
+      return null;
+    }
+    return _resolveCamera(refreshed);
   }
 
   void _armSegmentTimer() {

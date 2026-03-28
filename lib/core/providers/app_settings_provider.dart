@@ -38,7 +38,7 @@ class AppSettingsProvider extends ChangeNotifier {
   static const _cameraNameKey = 'camera_name';
 
   static const List<int> bitrateOptionsMbps = [4, 8, 12, 16];
-  static const List<int> resolutionOptions = [480, 720, 1080, 1440, 1600, 2160];
+  static const List<int> resolutionOptions = [480, 720, 1080, 2160];
   static const List<int> segmentMinutesOptions = [1, 2, 3, 5, 10];
   static const List<int> loopSegmentCountOptions = [6, 12, 18, 24, 36, 48];
   static const String customQualityProfileId = 'custom';
@@ -63,27 +63,6 @@ class AppSettingsProvider extends ChangeNotifier {
       fps: 60,
       bitrateMbps: 12,
       tier: QualityPresetTier.balanced,
-    ),
-    RecordingQualityProfile(
-      id: '1440p_30_12',
-      resolution: 1440,
-      fps: 30,
-      bitrateMbps: 12,
-      tier: QualityPresetTier.highDetail,
-    ),
-    RecordingQualityProfile(
-      id: '1440p_60_16',
-      resolution: 1440,
-      fps: 60,
-      bitrateMbps: 16,
-      tier: QualityPresetTier.highDetail,
-    ),
-    RecordingQualityProfile(
-      id: '1600p_30_16',
-      resolution: 1600,
-      fps: 30,
-      bitrateMbps: 16,
-      tier: QualityPresetTier.highDetail,
     ),
     RecordingQualityProfile(
       id: '2160p_24_16',
@@ -141,22 +120,41 @@ class AppSettingsProvider extends ChangeNotifier {
   }
   bool get isLoaded => _isLoaded;
 
-  static String resolutionLabel(int resolution) => '${resolution}p';
+  static String resolutionLabel(int resolution) {
+    if (resolution >= 2160) {
+      return '4K (2160p)';
+    }
+    return '${resolution}p';
+  }
 
   static ResolutionPreset toResolutionPreset(int resolution) {
     if (resolution <= 480) {
       return ResolutionPreset.low;
     }
     if (resolution <= 720) {
-      return ResolutionPreset.medium;
-    }
-    if (resolution <= 1080) {
       return ResolutionPreset.high;
     }
-    if (resolution <= 1440) {
+    if (resolution <= 1080) {
       return ResolutionPreset.veryHigh;
     }
     return ResolutionPreset.ultraHigh;
+  }
+
+  static int fromResolutionPreset(ResolutionPreset preset) {
+    switch (preset) {
+      case ResolutionPreset.low:
+        return 480;
+      case ResolutionPreset.medium:
+        return 480;
+      case ResolutionPreset.high:
+        return 720;
+      case ResolutionPreset.veryHigh:
+        return 1080;
+      case ResolutionPreset.ultraHigh:
+        return 2160;
+      case ResolutionPreset.max:
+        return 2160;
+    }
   }
 
   static RecordingQualityProfile? profileById(String id) {
@@ -359,7 +357,7 @@ class AppSettingsProvider extends ChangeNotifier {
       case 'high':
         return 1080;
       case 'veryHigh':
-        return 1440;
+        return 1080;
       case 'ultraHigh':
         return 2160;
       default:

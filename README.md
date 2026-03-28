@@ -17,6 +17,19 @@ MotoCam is a mobile application that combines video recording with location trac
 
 ## Release Notes
 
+### v0.1.8 (2026-03-28)
+
+Highlights:
+
+- Added runtime permission auditing for reliable camera, audio, location, and background recording behavior, with clearer in-app guidance for missing permissions.
+- Added Android device status bridge and live battery/temperature telemetry on the recording screen.
+- Hardened camera settings apply flow to reduce preview loss during resolution switches (interaction lock while applying, controller reset before re-init, preview texture refresh).
+- Implemented safer capability-aware resolution routing so requested quality falls back to the nearest known-supported level per device/camera instead of static assumptions.
+- Improved recording start and settings synchronization messaging so requested versus applied quality/FPS is transparent.
+
+Release artifact:
+- `build/app/outputs/flutter-apk/app-release.apk`
+
 ### v0.1.7 (2026-03-23)
 
 Highlights:

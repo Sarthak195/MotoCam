@@ -5,8 +5,11 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:camera/camera.dart';
+import 'package:permission_handler/permission_handler.dart';
 import '../../core/providers/app_settings_provider.dart';
+import '../../core/services/app_permission_service.dart';
 import '../../core/services/background_recording_service.dart';
+import '../../core/services/device_status_service.dart';
 import '../../core/services/pip_service.dart';
 import '../camera/providers/camera_provider.dart';
 import '../telemetry/providers/telemetry_provider.dart';
@@ -29,12 +32,18 @@ class _RecordingScreenState extends State<RecordingScreen>
   final BackgroundRecordingService _backgroundRecordingService =
       BackgroundRecordingService.instance;
   final PipService _pipService = PipService.instance;
+  final AppPermissionService _permissionService = const AppPermissionService();
+  final DeviceStatusService _deviceStatusService = DeviceStatusService();
   StreamSubscription<BackgroundRecordingEvent>? _backgroundEventSubscription;
   StreamSubscription<Duration>? _recordingTimerSubscription;
   StreamSubscription<bool>? _pipModeSubscription;
+  Timer? _deviceStatusTimer;
   bool _isStoppingRecording = false;
+  bool _isApplyingSettings = false;
   bool _isInPipMode = false;
   bool _isRecoveringFromStall = false;
+  bool _isFetchingDeviceStatus = false;
+  DeviceStatusSnapshot _deviceStatus = DeviceStatusSnapshot.empty;
   final Stream<int> _pipBlinkStream =
       Stream<int>.periodic(
         const Duration(milliseconds: 700),
@@ -47,7 +56,109 @@ class _RecordingScreenState extends State<RecordingScreen>
     WidgetsBinding.instance.addObserver(this);
     _initializePipBridge();
     _initializeBackgroundRecordingBridge();
-    _initializeCamera();
+    _startDeviceStatusPolling();
+    unawaited(_bootstrapRuntimePrerequisites());
+  }
+
+  Future<void> _bootstrapRuntimePrerequisites() async {
+    final settings = context.read<AppSettingsProvider>();
+    if (!settings.isLoaded) {
+      await settings.load();
+    }
+
+    final permissionAudit = await _permissionService.ensureRequiredPermissions(
+      audioEnabled: settings.audioEnabled,
+    );
+    if (!mounted) {
+      return;
+    }
+
+    await _handlePermissionAuditResult(permissionAudit);
+    if (!mounted || permissionAudit.hasBlockingIssues) {
+      return;
+    }
+
+    await _initializeCamera();
+  }
+
+  Future<void> _handlePermissionAuditResult(
+    PermissionAuditResult audit,
+  ) async {
+    if (audit.hasPermanentlyDenied) {
+      final shouldOpenSettings = await showDialog<bool>(
+            context: context,
+            builder: (dialogContext) {
+              return AlertDialog(
+                title: const Text('Permissions Needed'),
+                content: const Text(
+                  'Some permissions are permanently denied. Open app settings and allow Camera, Location, and related permissions for full recording support.',
+                ),
+                actions: [
+                  TextButton(
+                    onPressed: () => Navigator.of(dialogContext).pop(false),
+                    child: const Text('Later'),
+                  ),
+                  TextButton(
+                    onPressed: () => Navigator.of(dialogContext).pop(true),
+                    child: const Text('Open Settings'),
+                  ),
+                ],
+              );
+            },
+          ) ??
+          false;
+
+      if (shouldOpenSettings) {
+        await openAppSettings();
+      }
+    }
+
+    if (!mounted || !audit.hasAnyIssue) {
+      return;
+    }
+
+    final issues = <String>[
+      ...audit.missingRequired,
+      ...audit.missingRecommended,
+    ];
+    final message = audit.hasBlockingIssues
+        ? 'Required permissions missing: ${audit.missingRequired.join(', ')}'
+        : 'Recommended for reliable background recording: ${issues.join(', ')}';
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        duration: const Duration(seconds: 4),
+      ),
+    );
+  }
+
+  void _startDeviceStatusPolling() {
+    unawaited(_refreshDeviceStatus());
+    _deviceStatusTimer?.cancel();
+    _deviceStatusTimer = Timer.periodic(const Duration(seconds: 15), (_) {
+      unawaited(_refreshDeviceStatus());
+    });
+  }
+
+  Future<void> _refreshDeviceStatus() async {
+    if (_isFetchingDeviceStatus || !mounted) {
+      return;
+    }
+
+    _isFetchingDeviceStatus = true;
+    try {
+      final snapshot = await _deviceStatusService.getBatteryAndThermalStatus();
+      if (!mounted || snapshot == _deviceStatus) {
+        return;
+      }
+
+      setState(() {
+        _deviceStatus = snapshot;
+      });
+    } finally {
+      _isFetchingDeviceStatus = false;
+    }
   }
 
   @override
@@ -185,8 +296,29 @@ class _RecordingScreenState extends State<RecordingScreen>
     required TelemetryProvider telemetry,
     required ScaffoldMessengerState messenger,
   }) async {
-    await camera.startRecording();
-    if (camera.isRecording) {
+    final settings = context.read<AppSettingsProvider>();
+    final permissionAudit = await _permissionService.ensureRequiredPermissions(
+      audioEnabled: settings.audioEnabled,
+    );
+    if (!mounted) {
+      return;
+    }
+
+    await _handlePermissionAuditResult(permissionAudit);
+    if (permissionAudit.hasBlockingIssues) {
+      return;
+    }
+
+    final started = await camera.startRecording();
+    if (started && camera.isRecording) {
+      if (!mounted) {
+        return;
+      }
+      await _syncSettingsWithCameraCapabilities(
+        settings: settings,
+        camera: camera,
+      );
+
       telemetry.startRideSession();
       await _backgroundRecordingService.startForegroundRecording(
         elapsed: Duration.zero,
@@ -204,7 +336,9 @@ class _RecordingScreenState extends State<RecordingScreen>
     messenger.showSnackBar(
       SnackBar(
         content: Text(
-          'Recording started\nSaving to: ${camera.recordingsDirectory}',
+          started
+              ? 'Recording started (${AppSettingsProvider.fromResolutionPreset(camera.resolutionPreset)}p @ ${camera.recordingFps} FPS)\nSaving to: ${camera.recordingsDirectory}'
+              : 'Unable to start recording with current camera settings. Try lower resolution/FPS.',
         ),
         duration: const Duration(seconds: 2),
       ),
@@ -307,14 +441,20 @@ class _RecordingScreenState extends State<RecordingScreen>
     }
 
     await cameraProvider.initializeCamera(
-      resolutionPreset:
-          AppSettingsProvider.toResolutionPreset(settingsProvider.recordingResolution),
+      resolutionPreset: cameraProvider.resolvePresetForRequestedResolution(
+        settingsProvider.recordingResolution,
+      ),
       recordingFps: settingsProvider.recordingFps,
       videoBitrateBps: settingsProvider.videoBitrateMbps * 1000 * 1000,
       audioEnabled: settingsProvider.audioEnabled,
       preferredCameraName: settingsProvider.selectedCameraName,
       segmentDurationMinutes: settingsProvider.segmentMinutes,
       maxRollingSegments: settingsProvider.loopSegmentCount,
+    );
+
+    await _syncSettingsWithCameraCapabilities(
+      settings: settingsProvider,
+      camera: cameraProvider,
     );
 
     telemetryProvider.setSpeedUiRefreshInterval(
@@ -330,6 +470,24 @@ class _RecordingScreenState extends State<RecordingScreen>
     }
 
     await telemetryProvider.initialize();
+  }
+
+  Future<void> _syncSettingsWithCameraCapabilities({
+    required AppSettingsProvider settings,
+    required CameraProvider camera,
+  }) async {
+    if (!camera.isInitialized) {
+      return;
+    }
+
+    final activeResolution =
+        AppSettingsProvider.fromResolutionPreset(camera.resolutionPreset);
+    if (settings.recordingResolution != activeResolution) {
+      await settings.updateRecordingResolution(activeResolution);
+    }
+    if (settings.recordingFps != camera.recordingFps) {
+      await settings.updateRecordingFps(camera.recordingFps);
+    }
   }
 
   Future<void> _handleBackPressWhileRecording() async {
@@ -483,7 +641,7 @@ class _RecordingScreenState extends State<RecordingScreen>
           ),
           IconButton(
             icon: const Icon(Icons.settings, color: Colors.white),
-            onPressed: _openSettingsSheet,
+            onPressed: _isApplyingSettings ? null : _openSettingsSheet,
           ),
         ],
       ),
@@ -491,6 +649,10 @@ class _RecordingScreenState extends State<RecordingScreen>
   }
 
   Future<void> _openSettingsSheet() async {
+    if (_isApplyingSettings) {
+      return;
+    }
+
     final settings = context.read<AppSettingsProvider>();
     final cameraProvider = context.read<CameraProvider>();
     if (!settings.isLoaded) {
@@ -503,10 +665,14 @@ class _RecordingScreenState extends State<RecordingScreen>
 
     final initialFpsOptions =
         await cameraProvider.getSupportedFpsOptionsForPreset(
-      preset: AppSettingsProvider.toResolutionPreset(settings.recordingResolution),
+      preset: cameraProvider.resolvePresetForRequestedResolution(
+        settings.recordingResolution,
+      ),
     );
     final initialCameraOptions =
         await cameraProvider.getAvailableCameras(refresh: true);
+    final initialUnsupportedPresets =
+      cameraProvider.knownUnsupportedResolutionPresets;
 
     if (!mounted) {
       return;
@@ -533,6 +699,8 @@ class _RecordingScreenState extends State<RecordingScreen>
         int loopSegmentCount = settings.loopSegmentCount;
         IncidentSensitivity incidentSensitivity = settings.incidentSensitivity;
         List<int> availableFps = List<int>.from(initialFpsOptions);
+        final unsupportedResolutionPresets =
+            Set<ResolutionPreset>.from(initialUnsupportedPresets);
         final cameraOptions = List<CameraDescription>.from(initialCameraOptions);
         String selectedCameraName = settings.selectedCameraName;
         if (selectedCameraName.isEmpty) {
@@ -540,6 +708,23 @@ class _RecordingScreenState extends State<RecordingScreen>
         }
         if (selectedCameraName.isEmpty && cameraOptions.isNotEmpty) {
           selectedCameraName = cameraOptions.first.name;
+        }
+        final resolutionIsUnsupported = unsupportedResolutionPresets.contains(
+          CameraProvider.presetForResolution(selectedResolution),
+        );
+        if (resolutionIsUnsupported) {
+          final fallbackResolutions = AppSettingsProvider.resolutionOptions
+              .where(
+                (resolution) => !unsupportedResolutionPresets.contains(
+                  CameraProvider.presetForResolution(resolution),
+                ),
+              )
+              .toList();
+          if (fallbackResolutions.isNotEmpty) {
+            selectedResolution = fallbackResolutions.last;
+            selectedQualityProfileId =
+                AppSettingsProvider.customQualityProfileId;
+          }
         }
 
         return StatefulBuilder(
@@ -601,8 +786,9 @@ class _RecordingScreenState extends State<RecordingScreen>
                             () async {
                               final fpsOptions = await cameraProvider
                                   .getSupportedFpsOptionsForPreset(
-                                preset: AppSettingsProvider.toResolutionPreset(
-                                    selectedProfile.resolution),
+                                preset: CameraProvider.presetForResolution(
+                                  selectedProfile.resolution,
+                                ),
                               );
                               if (!mounted) {
                                 return;
@@ -661,8 +847,9 @@ class _RecordingScreenState extends State<RecordingScreen>
                             () async {
                               final fpsOptions = await cameraProvider
                                   .getSupportedFpsOptionsForPreset(
-                                preset: AppSettingsProvider.toResolutionPreset(
-                                    profile.resolution),
+                                preset: CameraProvider.presetForResolution(
+                                  profile.resolution,
+                                ),
                               );
                               if (!mounted) {
                                 return;
@@ -714,11 +901,30 @@ class _RecordingScreenState extends State<RecordingScreen>
                           decoration: _settingsInputDecoration(),
                           items: AppSettingsProvider.resolutionOptions
                               .map(
-                                (resolution) => DropdownMenuItem<int>(
-                                  value: resolution,
-                                  child: Text(AppSettingsProvider.resolutionLabel(
-                                      resolution)),
-                                ),
+                                (resolution) {
+                                  final isUnsupported =
+                                      unsupportedResolutionPresets.contains(
+                                    CameraProvider.presetForResolution(
+                                      resolution,
+                                    ),
+                                  );
+                                  final label = AppSettingsProvider
+                                      .resolutionLabel(resolution);
+                                  return DropdownMenuItem<int>(
+                                    value: resolution,
+                                    enabled: !isUnsupported,
+                                    child: Text(
+                                      isUnsupported
+                                          ? '$label (unsupported)'
+                                          : label,
+                                      style: TextStyle(
+                                        color: isUnsupported
+                                            ? Colors.white38
+                                            : Colors.white,
+                                      ),
+                                    ),
+                                  );
+                                },
                               )
                               .toList(),
                           onChanged: (value) {
@@ -732,8 +938,7 @@ class _RecordingScreenState extends State<RecordingScreen>
                             () async {
                               final fpsOptions = await cameraProvider
                                   .getSupportedFpsOptionsForPreset(
-                                preset: AppSettingsProvider.toResolutionPreset(
-                                    value),
+                                preset: CameraProvider.presetForResolution(value),
                               );
                               if (!mounted) {
                                 return;
@@ -747,6 +952,17 @@ class _RecordingScreenState extends State<RecordingScreen>
                             }();
                           },
                         ),
+                        if (unsupportedResolutionPresets.isNotEmpty) ...[
+                          const SizedBox(height: 6),
+                          Text(
+                            'Known unsupported on this device: ${AppSettingsProvider.resolutionOptions.where((resolution) => unsupportedResolutionPresets.contains(CameraProvider.presetForResolution(resolution))).map(AppSettingsProvider.resolutionLabel).join(', ')}',
+                            style: const TextStyle(
+                              color: Colors.orange,
+                              fontSize: 11,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ],
                         const SizedBox(height: 12),
                         _buildSettingsLabel('Frame rate (FPS)'),
                         DropdownButtonFormField<int>(
@@ -933,66 +1149,87 @@ class _RecordingScreenState extends State<RecordingScreen>
       return;
     }
 
-    final matchedProfile = AppSettingsProvider.findMatchingQualityProfile(
-      resolution: result.resolution,
-      fps: result.fps,
-      bitrateMbps: result.bitrateMbps,
-    );
-    if (matchedProfile != null) {
-      await settings.updateRecordingQualityProfile(matchedProfile.id);
-    } else {
-      await settings.updateRecordingResolution(result.resolution);
-      await settings.updateRecordingFps(result.fps);
-      await settings.updateVideoBitrateMbps(result.bitrateMbps);
+    setState(() {
+      _isApplyingSettings = true;
+    });
+
+    try {
+      final matchedProfile = AppSettingsProvider.findMatchingQualityProfile(
+        resolution: result.resolution,
+        fps: result.fps,
+        bitrateMbps: result.bitrateMbps,
+      );
+      if (matchedProfile != null) {
+        await settings.updateRecordingQualityProfile(matchedProfile.id);
+      } else {
+        await settings.updateRecordingResolution(result.resolution);
+        await settings.updateRecordingFps(result.fps);
+        await settings.updateVideoBitrateMbps(result.bitrateMbps);
+      }
+      await settings.updateAudioEnabled(result.audioEnabled);
+      await settings.updateSpeedRefreshMs(result.speedRefreshMs);
+      await settings.updateSelectedCameraName(result.cameraName);
+      await settings.updateSegmentMinutes(result.segmentMinutes);
+      await settings.updateLoopSegmentCount(result.loopSegmentCount);
+      await settings.updateIncidentSensitivity(result.incidentSensitivity);
+
+      if (!mounted) {
+        return;
+      }
+
+      final telemetry = context.read<TelemetryProvider>();
+      telemetry.setSpeedUiRefreshInterval(
+        Duration(milliseconds: result.speedRefreshMs),
+      );
+      telemetry.setIncidentDetectionConfig(
+        triggerGForce: settings.incidentTriggerGForce,
+        debounce: settings.incidentDebounce,
+      );
+
+      final camera = context.read<CameraProvider>();
+      final wasRecording = camera.isRecording;
+      final applied = await camera.applyRecordingSettings(
+        resolutionPreset:
+            camera.resolvePresetForRequestedResolution(result.resolution),
+        recordingFps: result.fps,
+        videoBitrateBps: result.bitrateMbps * 1000 * 1000,
+        audioEnabled: result.audioEnabled,
+        preferredCameraName: result.cameraName,
+        segmentDurationMinutes: result.segmentMinutes,
+        maxRollingSegments: result.loopSegmentCount,
+      );
+
+      if (applied) {
+        await _syncSettingsWithCameraCapabilities(
+          settings: settings,
+          camera: camera,
+        );
+      }
+
+      if (!mounted) {
+        return;
+      }
+
+      final appliedResolution =
+          AppSettingsProvider.fromResolutionPreset(camera.resolutionPreset);
+      final message = applied
+          ? (appliedResolution != result.resolution
+              ? 'Requested ${result.resolution}p is not supported on this device. Applied ${appliedResolution}p at ${camera.recordingFps} FPS, ${result.bitrateMbps}Mbps, ${result.segmentMinutes}m segments, loop ${result.loopSegmentCount} segments'
+              : 'Settings applied: ${appliedResolution}p, ${camera.recordingFps} FPS, ${result.bitrateMbps}Mbps, ${result.segmentMinutes}m segments, loop ${result.loopSegmentCount} segments')
+          : (wasRecording
+              ? 'Stop recording first to apply camera settings'
+              : 'Unable to initialize camera with the selected settings on this device.');
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(message)),
+      );
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isApplyingSettings = false;
+        });
+      }
     }
-    await settings.updateAudioEnabled(result.audioEnabled);
-    await settings.updateSpeedRefreshMs(result.speedRefreshMs);
-    await settings.updateSelectedCameraName(result.cameraName);
-    await settings.updateSegmentMinutes(result.segmentMinutes);
-    await settings.updateLoopSegmentCount(result.loopSegmentCount);
-    await settings.updateIncidentSensitivity(result.incidentSensitivity);
-
-    if (!mounted) {
-      return;
-    }
-
-    final telemetry = context.read<TelemetryProvider>();
-    telemetry.setSpeedUiRefreshInterval(
-      Duration(milliseconds: result.speedRefreshMs),
-    );
-    telemetry.setIncidentDetectionConfig(
-      triggerGForce: settings.incidentTriggerGForce,
-      debounce: settings.incidentDebounce,
-    );
-
-    final camera = context.read<CameraProvider>();
-    final applied = await camera.applyRecordingSettings(
-      resolutionPreset: AppSettingsProvider.toResolutionPreset(result.resolution),
-      recordingFps: result.fps,
-      videoBitrateBps: result.bitrateMbps * 1000 * 1000,
-      audioEnabled: result.audioEnabled,
-      preferredCameraName: result.cameraName,
-      segmentDurationMinutes: result.segmentMinutes,
-      maxRollingSegments: result.loopSegmentCount,
-    );
-
-    if (applied && camera.recordingFps != result.fps) {
-      await settings.updateRecordingFps(camera.recordingFps);
-    }
-
-    if (!mounted) {
-      return;
-    }
-
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          applied
-              ? 'Settings applied: ${result.resolution}p, ${camera.recordingFps} FPS, ${result.bitrateMbps}Mbps, ${result.segmentMinutes}m segments, loop ${result.loopSegmentCount} segments'
-              : 'Stop recording first to apply camera settings',
-        ),
-      ),
-    );
   }
 
   Widget _buildActiveProfileBar() {
@@ -1109,11 +1346,16 @@ class _RecordingScreenState extends State<RecordingScreen>
         }
 
         final controller = camera.controller!;
+        if (!controller.value.isInitialized) {
+          return const Center(
+            child: CircularProgressIndicator(color: Colors.white),
+          );
+        }
         final portraitAspectRatio = 1 / controller.value.aspectRatio;
 
         return Stack(
           key: ValueKey(
-            'camera-preview-${camera.resolutionPreset}-${camera.recordingFps}-${camera.activeCameraName}',
+            'camera-preview-${camera.resolutionPreset}-${camera.recordingFps}-${camera.activeCameraName}-${controller.hashCode}',
           ),
           children: [
             Positioned.fill(
@@ -1171,6 +1413,9 @@ class _RecordingScreenState extends State<RecordingScreen>
   }
 
   Widget _buildTelemetryStats() {
+    final batteryLevel = _deviceStatus.batteryLevelPercent;
+    final batteryTemp = _deviceStatus.batteryTemperatureC;
+
     return Container(
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
@@ -1179,52 +1424,75 @@ class _RecordingScreenState extends State<RecordingScreen>
           top: BorderSide(color: Colors.white.withValues(alpha: 0.1)),
         ),
       ),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceAround,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
         children: [
-          Selector<TelemetryProvider, String>(
-            selector: (_, telemetry) =>
-                '${telemetry.currentData.speed.toStringAsFixed(0)} km/h',
-            builder: (context, speed, _) {
-              return _buildStatItem(
-                icon: Icons.speed,
-                label: 'Speed',
-                value: speed,
-              );
-            },
-          ),
-          Consumer<CameraProvider>(
-            builder: (context, camera, _) {
-              return StreamBuilder<Duration>(
-                stream: camera.timerStream,
-                initialData: camera.elapsedTime,
-                builder: (context, snapshot) {
-                  final duration = snapshot.data ?? Duration.zero;
-                  final hours = duration.inHours;
-                  final minutes = duration.inMinutes.remainder(60);
-                  final seconds = duration.inSeconds.remainder(60);
-                  final formattedTime =
-                      '${hours.toString().padLeft(2, '0')}:${minutes.toString().padLeft(2, '0')}:${seconds.toString().padLeft(2, '0')}';
-
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceAround,
+            children: [
+              Selector<TelemetryProvider, String>(
+                selector: (_, telemetry) =>
+                    '${telemetry.currentData.speed.toStringAsFixed(0)} km/h',
+                builder: (context, speed, _) {
                   return _buildStatItem(
-                    icon: Icons.timer,
-                    label: 'Duration',
-                    value: formattedTime,
+                    icon: Icons.speed,
+                    label: 'Speed',
+                    value: speed,
                   );
                 },
-              );
-            },
+              ),
+              Consumer<CameraProvider>(
+                builder: (context, camera, _) {
+                  return StreamBuilder<Duration>(
+                    stream: camera.timerStream,
+                    initialData: camera.elapsedTime,
+                    builder: (context, snapshot) {
+                      final duration = snapshot.data ?? Duration.zero;
+                      final hours = duration.inHours;
+                      final minutes = duration.inMinutes.remainder(60);
+                      final seconds = duration.inSeconds.remainder(60);
+                      final formattedTime =
+                          '${hours.toString().padLeft(2, '0')}:${minutes.toString().padLeft(2, '0')}:${seconds.toString().padLeft(2, '0')}';
+
+                      return _buildStatItem(
+                        icon: Icons.timer,
+                        label: 'Duration',
+                        value: formattedTime,
+                      );
+                    },
+                  );
+                },
+              ),
+              Selector<TelemetryProvider, String>(
+                selector: (_, telemetry) =>
+                    '${telemetry.rideDistanceKm.toStringAsFixed(2)} km',
+                builder: (context, distance, _) {
+                  return _buildStatItem(
+                    icon: Icons.route,
+                    label: 'Distance',
+                    value: distance,
+                  );
+                },
+              ),
+            ],
           ),
-          Selector<TelemetryProvider, String>(
-            selector: (_, telemetry) =>
-                '${telemetry.rideDistanceKm.toStringAsFixed(2)} km',
-            builder: (context, distance, _) {
-              return _buildStatItem(
-                icon: Icons.route,
-                label: 'Distance',
-                value: distance,
-              );
-            },
+          const SizedBox(height: 10),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceAround,
+            children: [
+              _buildStatItem(
+                icon: Icons.battery_std,
+                label: 'Battery',
+                value: batteryLevel == null ? '--' : '$batteryLevel%',
+              ),
+              _buildStatItem(
+                icon: Icons.device_thermostat,
+                label: 'Temp',
+                value: batteryTemp == null
+                    ? '--'
+                    : '${batteryTemp.toStringAsFixed(1)} C',
+              ),
+            ],
           ),
         ],
       ),
@@ -1265,41 +1533,107 @@ class _RecordingScreenState extends State<RecordingScreen>
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Consumer2<CameraProvider, TelemetryProvider>(
-            builder: (context, camera, telemetry, _) {
+          Consumer3<CameraProvider, TelemetryProvider, AppSettingsProvider>(
+            builder: (context, camera, telemetry, settings, _) {
               _handleIncidentAutoLock(camera: camera, telemetry: telemetry);
-              return ElevatedButton(
-                onPressed: () async {
-                  final messenger = ScaffoldMessenger.of(context);
-                  if (camera.isRecording) {
-                    await _stopRecordingFlow(
-                      camera: camera,
-                      telemetry: telemetry,
-                      messenger: messenger,
-                    );
-                  } else {
-                    await _startRecordingFlow(
-                      camera: camera,
-                      telemetry: telemetry,
-                      messenger: messenger,
-                    );
-                  }
-                },
-                style: ElevatedButton.styleFrom(
-                  backgroundColor:
-                      camera.isRecording ? Colors.red : Colors.blue,
-                  minimumSize: const Size(double.infinity, 52),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(12),
+              final selectedPreset = CameraProvider.presetForResolution(
+                settings.recordingResolution,
+              );
+              final resolvedPreset =
+                  camera.resolvePresetForRequestedResolution(
+                settings.recordingResolution,
+              );
+              final isPresetUnsupported = !camera.isRecording &&
+                  camera.knownUnsupportedResolutionPresets.contains(
+                    selectedPreset,
+                  );
+              final willAutoFallback =
+                  isPresetUnsupported && resolvedPreset != selectedPreset;
+              final supportedResolutions = AppSettingsProvider.resolutionOptions
+                  .where(
+                    (resolution) => !camera.knownUnsupportedResolutionPresets
+                        .contains(
+                          CameraProvider.presetForResolution(resolution),
+                        ),
+                  )
+                  .toList();
+              final suggestedResolution =
+                  supportedResolutions.isEmpty ? null : supportedResolutions.last;
+
+              return Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  ElevatedButton(
+                    onPressed: _isApplyingSettings
+                        ? null
+                        : () async {
+                            final messenger = ScaffoldMessenger.of(context);
+                            if (camera.isRecording) {
+                              await _stopRecordingFlow(
+                                camera: camera,
+                                telemetry: telemetry,
+                                messenger: messenger,
+                              );
+                            } else {
+                              await _startRecordingFlow(
+                                camera: camera,
+                                telemetry: telemetry,
+                                messenger: messenger,
+                              );
+                            }
+                          },
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor:
+                          camera.isRecording ? Colors.red : Colors.blue,
+                      disabledBackgroundColor: Colors.grey.shade800,
+                      minimumSize: const Size(double.infinity, 52),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                    ),
+                    child: Text(
+                      _isApplyingSettings
+                          ? 'APPLYING SETTINGS...'
+                          : (camera.isRecording
+                              ? 'STOP RECORDING'
+                              : 'START RECORDING'),
+                      style: const TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
                   ),
-                ),
-                child: Text(
-                  camera.isRecording ? 'STOP RECORDING' : 'START RECORDING',
-                  style: const TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
+                  if (_isApplyingSettings)
+                    const Padding(
+                      padding: EdgeInsets.only(top: 8),
+                      child: Text(
+                        'Applying settings... camera controls are temporarily locked.',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          color: Colors.white70,
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                  if (isPresetUnsupported)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 8),
+                      child: Text(
+                        willAutoFallback
+                            ? 'Current ${settings.recordingResolution}p is unstable on this device. Recording will auto-fallback to ${CameraProvider.resolutionForPreset(resolvedPreset)}p.'
+                            : (suggestedResolution == null
+                                ? 'Current ${settings.recordingResolution}p is known unstable on this device. Choose a lower resolution in Settings.'
+                                : 'Current ${settings.recordingResolution}p is known unstable on this device. Choose ${suggestedResolution}p or lower in Settings.'),
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(
+                          color: Colors.orange,
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                ],
               );
             },
           ),
@@ -1310,17 +1644,19 @@ class _RecordingScreenState extends State<RecordingScreen>
                 children: [
                   Expanded(
                     child: OutlinedButton.icon(
-                      onPressed: camera.isRecording
-                          ? () {
-                              unawaited(_handleBackPressWhileRecording());
-                            }
-                          : () {
-                              Navigator.of(context).push(
-                                MaterialPageRoute(
-                                  builder: (_) => const RidesListScreen(),
-                                ),
-                              );
-                            },
+                      onPressed: _isApplyingSettings
+                          ? null
+                          : (camera.isRecording
+                              ? () {
+                                  unawaited(_handleBackPressWhileRecording());
+                                }
+                              : () {
+                                  Navigator.of(context).push(
+                                    MaterialPageRoute(
+                                      builder: (_) => const RidesListScreen(),
+                                    ),
+                                  );
+                                }),
                       icon: const Icon(Icons.video_library_outlined,
                           color: Colors.blue),
                       label: const Text(
@@ -1389,6 +1725,7 @@ class _RecordingScreenState extends State<RecordingScreen>
     _recordingTimerSubscription?.cancel();
     _backgroundEventSubscription?.cancel();
     _pipModeSubscription?.cancel();
+    _deviceStatusTimer?.cancel();
     _backgroundRecordingService.stopForegroundRecording();
     super.dispose();
   }

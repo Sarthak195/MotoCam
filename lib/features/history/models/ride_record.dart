@@ -129,9 +129,9 @@ class RideRecord {
       createdAt: DateTime.tryParse(json['startedAt']?.toString() ?? '') ??
           (await videoFile.stat()).modified,
       telemetryPath: telemetryFile.path,
-      distanceKm: (json['distanceKm'] as num?)?.toDouble() ?? 0,
-      maxSpeedKmh: (json['maxSpeedKmh'] as num?)?.toDouble() ?? 0,
-      averageSpeedKmh: (json['averageSpeedKmh'] as num?)?.toDouble() ?? 0,
+      distanceKm: _readJsonDouble(json, 'distanceKm'),
+      maxSpeedKmh: _readJsonDouble(json, 'maxSpeedKmh'),
+      averageSpeedKmh: _readJsonDouble(json, 'averageSpeedKmh'),
       samples: samples,
     );
   }
@@ -165,12 +165,15 @@ class RideRecord {
       createdAt: DateTime.tryParse(json['startedAt']?.toString() ?? '') ??
           (await telemetryFile.stat()).modified,
       telemetryPath: telemetryFile.path,
-      distanceKm: (json['distanceKm'] as num?)?.toDouble() ?? 0,
-      maxSpeedKmh: (json['maxSpeedKmh'] as num?)?.toDouble() ?? 0,
-      averageSpeedKmh: (json['averageSpeedKmh'] as num?)?.toDouble() ?? 0,
+      distanceKm: _readJsonDouble(json, 'distanceKm'),
+      maxSpeedKmh: _readJsonDouble(json, 'maxSpeedKmh'),
+      averageSpeedKmh: _readJsonDouble(json, 'averageSpeedKmh'),
       samples: samples,
     );
   }
+
+  static double _readJsonDouble(Map<String, dynamic> json, String key) =>
+      (json[key] as num?)?.toDouble() ?? 0;
 
   static List<String> _readSegmentPaths(
     Map<String, dynamic> json, {
