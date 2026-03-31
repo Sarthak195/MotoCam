@@ -1034,6 +1034,36 @@ class CameraProvider extends ChangeNotifier {
     }
   }
 
+  Future<void> releaseCameraIfIdle() async {
+    if (isRecording || _isStoppingRecording) {
+      return;
+    }
+
+    final previousController = _controller;
+    if (previousController == null && !_isInitialized) {
+      return;
+    }
+
+    _controller = null;
+    _isInitialized = false;
+    _state = RecordingState.idle;
+    _recordingStartTime = null;
+    _elapsedTime = Duration.zero;
+    _timerStream?.cancel();
+    _timerStream = null;
+    notifyListeners();
+
+    if (previousController == null) {
+      return;
+    }
+
+    try {
+      await previousController.dispose();
+    } catch (e) {
+      _log('Error disposing idle camera controller: $e');
+    }
+  }
+
   @override
   void dispose() {
     _segmentTimer?.cancel();

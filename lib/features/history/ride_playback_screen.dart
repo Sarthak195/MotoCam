@@ -3,11 +3,12 @@ import 'dart:math' as math;
 import 'dart:async' show unawaited;
 
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:video_player/video_player.dart';
 
 import '../telemetry/models/telemetry_data.dart';
 import 'models/ride_record.dart';
-import '../map/widgets/static_map_viewer.dart';
+import 'widgets/route_map_view.dart';
 
 class RidePlaybackScreen extends StatefulWidget {
   const RidePlaybackScreen({super.key, required this.ride});
@@ -20,6 +21,8 @@ class RidePlaybackScreen extends StatefulWidget {
 
 class _RidePlaybackScreenState extends State<RidePlaybackScreen>
     with WidgetsBindingObserver {
+  static const String _showRouteMapPrefKey = 'ride_playback_show_route_map';
+
   VideoPlayerController? _controller;
   bool _isLoading = true;
   bool _isDisposing = false;
@@ -34,12 +37,42 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
   bool _isSeekingAcrossSegments = false;
   bool _isScrubbing = false;
   bool _resumeAfterScrub = false;
+  bool _showRouteMap = false;
+  bool _isFullscreenPlayback = false;
+  List<int> _lockMarkerMs = const <int>[];
+  List<int> _incidentMarkerMs = const <int>[];
+  Offset? _timelineTapStartLocal;
+  bool _timelineTapMoved = false;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    unawaited(_loadPlaybackPreferences());
     _initializePlayback();
+  }
+
+  Future<void> _loadPlaybackPreferences() async {
+    final prefs = await SharedPreferences.getInstance();
+    final showRouteMap = prefs.getBool(_showRouteMapPrefKey) ?? false;
+    if (!mounted || showRouteMap == _showRouteMap) {
+      return;
+    }
+    setState(() {
+      _showRouteMap = showRouteMap;
+    });
+  }
+
+  Future<void> _persistShowRouteMap(bool value) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_showRouteMapPrefKey, value);
+  }
+
+  void _toggleRouteMapVisibility() {
+    setState(() {
+      _showRouteMap = !_showRouteMap;
+    });
+    unawaited(_persistShowRouteMap(_showRouteMap));
   }
 
   @override
@@ -104,6 +137,11 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
     }
     _totalDuration = accumulated;
     _lastKnownGlobalPosition = Duration.zero;
+    _lockMarkerMs = _buildLockMarkers(totalDurationMs: accumulated.inMilliseconds);
+    _incidentMarkerMs = _buildIncidentMarkers(
+      samples: widget.ride.samples,
+      totalDurationMs: accumulated.inMilliseconds,
+    );
 
     await _loadSegment(index: 0, autoPlay: false);
     if (!mounted) {
@@ -216,7 +254,8 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
         !_isSwitchingSegment &&
         !_isSeekingAcrossSegments) {
       _lastKnownGlobalPosition = _clampDuration(
-        _segmentOffsets[_activeSegmentIndex] + _segmentDurations[_activeSegmentIndex],
+        _segmentOffsets[_activeSegmentIndex] +
+            _segmentDurations[_activeSegmentIndex],
         _totalDuration,
       );
       _advanceToNextSegment();
@@ -260,7 +299,8 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
     }
   }
 
-  Future<void> _stopAndDisposeController(VideoPlayerController controller) async {
+  Future<void> _stopAndDisposeController(
+      VideoPlayerController controller) async {
     try {
       if (controller.value.isPlaying) {
         await controller.pause();
@@ -290,8 +330,11 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
     return _clampDuration(offset + controller.value.position, _totalDuration);
   }
 
-  Future<void> _seekGlobal(Duration target, {required bool shouldResume}) async {
-    if (_isDisposing || _segmentPaths.isEmpty || _totalDuration == Duration.zero) {
+  Future<void> _seekGlobal(Duration target,
+      {required bool shouldResume}) async {
+    if (_isDisposing ||
+        _segmentPaths.isEmpty ||
+        _totalDuration == Duration.zero) {
       return;
     }
 
@@ -371,6 +414,160 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
     await _seekGlobal(target, shouldResume: shouldResume);
   }
 
+  void _toggleFullscreenPlayback() {
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _isFullscreenPlayback = !_isFullscreenPlayback;
+    });
+  }
+
+  List<int> _buildLockMarkers({required int totalDurationMs}) {
+    if (totalDurationMs <= 0 || _segmentPaths.isEmpty || _segmentOffsets.isEmpty) {
+      return const <int>[];
+    }
+
+    final lockedPathSet = widget.ride.lockedSegmentPaths.toSet();
+    if (lockedPathSet.isEmpty) {
+      return const <int>[];
+    }
+
+    final markers = <int>{};
+    for (var index = 0; index < _segmentPaths.length; index++) {
+      final segmentPath = _segmentPaths[index];
+      if (!lockedPathSet.contains(segmentPath)) {
+        continue;
+      }
+      if (index < _segmentOffsets.length) {
+        final marker = _segmentOffsets[index].inMilliseconds;
+        markers.add(marker.clamp(0, totalDurationMs));
+      }
+    }
+
+    final ordered = markers.toList()..sort();
+    return List<int>.unmodifiable(ordered);
+  }
+
+  List<int> _buildIncidentMarkers({
+    required List<TelemetryData> samples,
+    required int totalDurationMs,
+  }) {
+    if (samples.isEmpty || totalDurationMs <= 0) {
+      return const <int>[];
+    }
+
+    const incidentThresholdG = 3.2;
+    const debounceMs = 5000;
+    var lastAcceptedMs = -debounceMs;
+    final markers = <int>[];
+
+    for (final sample in samples) {
+      if (sample.accelerationG < incidentThresholdG) {
+        continue;
+      }
+
+      if (sample.elapsedMs - lastAcceptedMs < debounceMs) {
+        continue;
+      }
+
+      final markerMs = sample.elapsedMs.clamp(0, totalDurationMs);
+      markers.add(markerMs);
+      lastAcceptedMs = markerMs;
+    }
+
+    return List<int>.unmodifiable(markers);
+  }
+
+  List<_PlaybackTimelineMarker> _timelineMarkers() {
+    final markers = <_PlaybackTimelineMarker>[];
+    for (final marker in _incidentMarkerMs) {
+      markers.add(
+        _PlaybackTimelineMarker(
+          elapsedMs: marker,
+          type: _PlaybackTimelineMarkerType.incident,
+        ),
+      );
+    }
+    for (final marker in _lockMarkerMs) {
+      markers.add(
+        _PlaybackTimelineMarker(
+          elapsedMs: marker,
+          type: _PlaybackTimelineMarkerType.locked,
+        ),
+      );
+    }
+    markers.sort((a, b) => a.elapsedMs.compareTo(b.elapsedMs));
+    return markers;
+  }
+
+  _PlaybackTimelineMarker? _nearestTimelineMarkerForTap({
+    required double dx,
+    required double width,
+    required int totalDurationMs,
+  }) {
+    if (totalDurationMs <= 0 || width <= 0) {
+      return null;
+    }
+
+    final markers = _timelineMarkers();
+    if (markers.isEmpty) {
+      return null;
+    }
+
+    const tapTolerancePx = 18.0;
+    final usableWidth = width - (_TimelineMarkersPainter.horizontalInset * 2);
+    if (usableWidth <= 0) {
+      return null;
+    }
+
+    _PlaybackTimelineMarker? nearest;
+    var nearestPx = double.infinity;
+    for (final marker in markers) {
+      final normalized = (marker.elapsedMs / totalDurationMs).clamp(0.0, 1.0);
+      final markerX = _TimelineMarkersPainter.horizontalInset +
+          (normalized * usableWidth);
+      final distance = (markerX - dx).abs();
+      if (distance < nearestPx) {
+        nearestPx = distance;
+        nearest = marker;
+      }
+    }
+
+    if (nearest == null || nearestPx > tapTolerancePx) {
+      return null;
+    }
+    return nearest;
+  }
+
+  Future<void> _jumpToTimelineMarker({
+    required _PlaybackTimelineMarker marker,
+    required bool wasPlaying,
+  }) async {
+    if (_isDisposing || _isSwitchingSegment || _isSeekingAcrossSegments) {
+      return;
+    }
+
+    final target = Duration(milliseconds: marker.elapsedMs);
+    await _seekGlobal(target, shouldResume: wasPlaying);
+    if (!mounted) {
+      return;
+    }
+
+    final markerLabel = marker.type == _PlaybackTimelineMarkerType.incident
+        ? 'incident'
+        : 'locked';
+    ScaffoldMessenger.of(context).hideCurrentSnackBar();
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          'Jumped to $markerLabel marker at ${_formatDuration(target)}',
+        ),
+        duration: const Duration(milliseconds: 1200),
+      ),
+    );
+  }
+
   Duration _graphWindowMs(int totalMs) {
     return Duration(milliseconds: math.max(10000, math.min(totalMs, 60000)));
   }
@@ -385,7 +582,8 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
     }
 
     final centerX = width / 2;
-    final windowMs = _graphWindowMs(_totalDuration.inMilliseconds).inMilliseconds;
+    final windowMs =
+        _graphWindowMs(_totalDuration.inMilliseconds).inMilliseconds;
     final deltaMs = ((dx - centerX) / width) * windowMs;
     return _clampDuration(
       currentPosition + Duration(milliseconds: deltaMs.round()),
@@ -432,7 +630,7 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
     return Positioned(
       left: 12,
       right: 12,
-      bottom: 68,
+      bottom: 84,
       child: Container(
         padding: const EdgeInsets.all(12),
         decoration: BoxDecoration(
@@ -445,7 +643,8 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
             _stat('Speed', '${sample.speed.toStringAsFixed(1)} km/h'),
             _stat('Dist', '${sample.distanceKm.toStringAsFixed(2)} km'),
             _stat('G', sample.accelerationG.toStringAsFixed(2)),
-            _stat('GPS', '${sample.latitude.toStringAsFixed(5)}, ${sample.longitude.toStringAsFixed(5)}'),
+            _stat('GPS',
+                '${sample.latitude.toStringAsFixed(5)}, ${sample.longitude.toStringAsFixed(5)}'),
           ],
         ),
       ),
@@ -466,64 +665,70 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
       widget.ride.samples.last.elapsedMs,
     );
 
-    return Container(
-      margin: const EdgeInsets.fromLTRB(12, 4, 12, 6),
-      padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
-      decoration: BoxDecoration(
-        color: Colors.white.withValues(alpha: 0.06),
-        borderRadius: BorderRadius.circular(10),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          SizedBox(
-            width: double.infinity,
-            height: 68,
-            child: LayoutBuilder(
-              builder: (context, constraints) {
-                return GestureDetector(
-                  behavior: HitTestBehavior.opaque,
-                  onTapDown: (details) {
-                    if (_isDisposing || _isSwitchingSegment || _isSeekingAcrossSegments) {
-                      return;
-                    }
-                    final target = _graphTargetForOffset(
-                      dx: details.localPosition.dx,
-                      width: constraints.maxWidth,
-                      currentPosition: position,
-                    );
-                    _seekGlobal(target, shouldResume: isPlaying);
-                  },
-                  onHorizontalDragStart: (_) {
-                    if (_isDisposing || _isSwitchingSegment || _isSeekingAcrossSegments) {
-                      return;
-                    }
-                    _beginScrub(isPlaying);
-                  },
-                  onHorizontalDragUpdate: (details) {
-                    final target = _graphTargetForOffset(
-                      dx: details.localPosition.dx,
-                      width: constraints.maxWidth,
-                      currentPosition: position,
-                    );
-                    _updateScrubPreview(target);
-                  },
-                  onHorizontalDragEnd: (_) {
-                    final target = _scrubPreviewPosition ?? position;
-                    _commitScrub(target);
-                  },
-                  child: CustomPaint(
-                    painter: _SpeedGraphPainter(
-                      samples: widget.ride.samples,
-                      currentPositionMs: position.inMilliseconds,
-                      totalDurationMs: graphDurationMs,
-                    ),
+    return Positioned(
+      left: 12,
+      right: 12,
+      bottom: 12,
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
+        decoration: BoxDecoration(
+          color: Colors.black.withValues(alpha: 0.22),
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: Colors.white.withValues(alpha: 0.16)),
+        ),
+        child: SizedBox(
+          width: double.infinity,
+          height: 56,
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              return GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTapDown: (details) {
+                  if (_isDisposing ||
+                      _isSwitchingSegment ||
+                      _isSeekingAcrossSegments) {
+                    return;
+                  }
+                  final target = _graphTargetForOffset(
+                    dx: details.localPosition.dx,
+                    width: constraints.maxWidth,
+                    currentPosition: position,
+                  );
+                  _seekGlobal(target, shouldResume: isPlaying);
+                },
+                onHorizontalDragStart: (_) {
+                  if (_isDisposing ||
+                      _isSwitchingSegment ||
+                      _isSeekingAcrossSegments) {
+                    return;
+                  }
+                  _beginScrub(isPlaying);
+                },
+                onHorizontalDragUpdate: (details) {
+                  final target = _graphTargetForOffset(
+                    dx: details.localPosition.dx,
+                    width: constraints.maxWidth,
+                    currentPosition: position,
+                  );
+                  _updateScrubPreview(target);
+                },
+                onHorizontalDragEnd: (_) {
+                  final target = _scrubPreviewPosition ?? position;
+                  _commitScrub(target);
+                },
+                child: CustomPaint(
+                  painter: _SpeedGraphPainter(
+                    samples: widget.ride.samples,
+                    currentPositionMs: position.inMilliseconds,
+                    totalDurationMs: graphDurationMs,
+                    incidentMarkerMs: _incidentMarkerMs,
+                    lockMarkerMs: _lockMarkerMs,
                   ),
-                );
-              },
-            ),
+                ),
+              );
+            },
           ),
-        ],
+        ),
       ),
     );
   }
@@ -559,156 +764,392 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
         // Dispose handles teardown; avoid async playback work during route pop.
       },
       child: Scaffold(
-        appBar: AppBar(title: const Text('Ride Playback')),
+        appBar:
+            _isFullscreenPlayback ? null : AppBar(title: const Text('Ride Playback')),
         body: _isLoading || controller == null
             ? const Center(child: CircularProgressIndicator())
             : ValueListenableBuilder<VideoPlayerValue>(
-              valueListenable: controller,
-              builder: (context, value, _) {
-                final position = _isScrubbing
-                  ? (_scrubPreviewPosition ?? _globalPosition())
-                  : _globalPosition();
-                final duration = _totalDuration;
-                final sample = widget.ride.sampleForPosition(position);
+                valueListenable: controller,
+                builder: (context, value, _) {
+                  final position = _isScrubbing
+                      ? (_scrubPreviewPosition ?? _globalPosition())
+                      : _globalPosition();
+                  final duration = _totalDuration;
+                  final sample = widget.ride.sampleForPosition(position);
+                  final viewportHeight = MediaQuery.sizeOf(context).height;
+                  final mapHeight =
+                      (viewportHeight * 0.14).clamp(90.0, 130.0).toDouble();
+                    final showPlaybackChrome = !_isFullscreenPlayback;
 
-                return Column(
-                  children: [
-                    Expanded(
-                      child: Stack(
-                        children: [
-                          Center(
-                            child: AspectRatio(
-                              aspectRatio: controller.value.aspectRatio,
-                              child: VideoPlayer(controller),
-                            ),
-                          ),
-                          if (widget.ride.samples.isNotEmpty) _buildOverlay(sample),
-                        ],
-                      ),
-                    ),
-                    // Route map viewer
-                    if (widget.ride.samples.isNotEmpty)
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
+                  return Column(
+                    children: [
+                      Expanded(
+                        child: Stack(
                           children: [
-                            const Text(
-                              'Route Map',
-                              style: TextStyle(
-                                color: Colors.white,
-                                fontSize: 12,
-                                fontWeight: FontWeight.bold,
+                            Center(
+                              child: AspectRatio(
+                                aspectRatio: controller.value.aspectRatio,
+                                child: GestureDetector(
+                                  behavior: HitTestBehavior.opaque,
+                                  onTap: _toggleFullscreenPlayback,
+                                  child: VideoPlayer(controller),
+                                ),
                               ),
                             ),
+                            if (showPlaybackChrome && widget.ride.samples.isNotEmpty)
+                              _buildOverlay(sample),
+                            if (showPlaybackChrome && widget.ride.samples.isNotEmpty)
+                              _buildSpeedGraph(
+                                position,
+                                duration,
+                                isPlaying: value.isPlaying,
+                              ),
+                            Positioned(
+                              top: 10,
+                              right: 10,
+                              child: Container(
+                                decoration: BoxDecoration(
+                                  color: Colors.black.withValues(alpha: 0.45),
+                                  borderRadius: BorderRadius.circular(20),
+                                ),
+                                child: IconButton(
+                                  onPressed: _toggleFullscreenPlayback,
+                                  icon: Icon(
+                                    _isFullscreenPlayback
+                                        ? Icons.fullscreen_exit
+                                        : Icons.fullscreen,
+                                    color: Colors.white,
+                                  ),
+                                  tooltip: _isFullscreenPlayback
+                                      ? 'Exit fullscreen'
+                                      : 'Fullscreen',
+                                ),
+                              ),
+                            ),
+                            if (_isFullscreenPlayback)
+                              Positioned(
+                                left: 0,
+                                right: 0,
+                                bottom: 14,
+                                child: Center(
+                                  child: Container(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 10,
+                                      vertical: 4,
+                                    ),
+                                    decoration: BoxDecoration(
+                                      color: Colors.black.withValues(alpha: 0.45),
+                                      borderRadius: BorderRadius.circular(12),
+                                    ),
+                                    child: const Text(
+                                      'Tap video to show controls',
+                                      style: TextStyle(
+                                        color: Colors.white70,
+                                        fontSize: 11,
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                          ],
+                        ),
+                      ),
+                      if (showPlaybackChrome && widget.ride.samples.isNotEmpty)
+                        Container(
+                          margin: const EdgeInsets.fromLTRB(12, 6, 12, 0),
+                          padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
+                          decoration: BoxDecoration(
+                            color: Colors.white.withValues(alpha: 0.04),
+                            borderRadius: BorderRadius.circular(10),
+                            border: Border.all(
+                              color: Colors.white.withValues(alpha: 0.08),
+                            ),
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              InkWell(
+                                borderRadius: BorderRadius.circular(8),
+                                onTap: _toggleRouteMapVisibility,
+                                child: Row(
+                                  children: [
+                                    const Icon(
+                                      Icons.map_outlined,
+                                      size: 16,
+                                      color: Colors.white70,
+                                    ),
+                                    const SizedBox(width: 8),
+                                    const Text(
+                                      'Route Map',
+                                      style: TextStyle(
+                                        color: Colors.white,
+                                        fontSize: 12,
+                                        fontWeight: FontWeight.w700,
+                                      ),
+                                    ),
+                                    const Spacer(),
+                                    Icon(
+                                      _showRouteMap
+                                          ? Icons.expand_less
+                                          : Icons.expand_more,
+                                      color: Colors.white70,
+                                      size: 18,
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              AnimatedCrossFade(
+                                duration: const Duration(milliseconds: 180),
+                                firstCurve: Curves.easeOut,
+                                secondCurve: Curves.easeIn,
+                                crossFadeState: _showRouteMap
+                                    ? CrossFadeState.showFirst
+                                    : CrossFadeState.showSecond,
+                                firstChild: Padding(
+                                  padding: const EdgeInsets.only(top: 8),
+                                  child: RouteMapView(
+                                    telemetryData: widget.ride.samples,
+                                    height: mapHeight,
+                                    currentSample: sample,
+                                  ),
+                                ),
+                                secondChild: const SizedBox.shrink(),
+                              ),
+                            ],
+                          ),
+                        ),
+                      if (showPlaybackChrome)
+                        Padding(
+                        padding: const EdgeInsets.fromLTRB(12, 6, 12, 8),
+                        child: Column(
+                          children: [
+                            SizedBox(
+                              height: 34,
+                              child: Stack(
+                                children: [
+                                  Slider(
+                                    min: 0,
+                                    max: duration.inMilliseconds > 0
+                                        ? duration.inMilliseconds.toDouble()
+                                        : 1,
+                                    value: position.inMilliseconds
+                                        .clamp(
+                                            0,
+                                            duration.inMilliseconds > 0
+                                                ? duration.inMilliseconds
+                                                : 1)
+                                        .toDouble(),
+                                    onChangeStart: duration.inMilliseconds <= 0
+                                        ? null
+                                        : (_) {
+                                            if (_isDisposing ||
+                                                _isSwitchingSegment ||
+                                                _isSeekingAcrossSegments) {
+                                              return;
+                                            }
+                                            _beginScrub(value.isPlaying);
+                                          },
+                                    onChanged: duration.inMilliseconds <= 0
+                                        ? null
+                                        : (newValue) {
+                                            _updateScrubPreview(
+                                              Duration(
+                                                  milliseconds: newValue.round()),
+                                            );
+                                          },
+                                    onChangeEnd: duration.inMilliseconds <= 0
+                                        ? null
+                                        : (newValue) {
+                                            _commitScrub(
+                                              Duration(
+                                                  milliseconds: newValue.round()),
+                                            );
+                                          },
+                                  ),
+                                  Positioned.fill(
+                                    child: LayoutBuilder(
+                                      builder: (context, markerConstraints) {
+                                        return Stack(
+                                          children: [
+                                            IgnorePointer(
+                                              child: CustomPaint(
+                                                painter: _TimelineMarkersPainter(
+                                                  totalDurationMs:
+                                                      duration.inMilliseconds,
+                                                  incidentMarkerMs:
+                                                      _incidentMarkerMs,
+                                                  lockMarkerMs: _lockMarkerMs,
+                                                ),
+                                              ),
+                                            ),
+                                            Listener(
+                                              behavior: HitTestBehavior.translucent,
+                                              onPointerDown: (event) {
+                                                _timelineTapStartLocal =
+                                                    event.localPosition;
+                                                _timelineTapMoved = false;
+                                              },
+                                              onPointerMove: (event) {
+                                                final start = _timelineTapStartLocal;
+                                                if (start == null) {
+                                                  return;
+                                                }
+                                                if ((event.localPosition - start)
+                                                        .distance >
+                                                    10) {
+                                                  _timelineTapMoved = true;
+                                                }
+                                              },
+                                              onPointerCancel: (_) {
+                                                _timelineTapStartLocal = null;
+                                                _timelineTapMoved = false;
+                                              },
+                                              onPointerUp: (event) {
+                                                final moved = _timelineTapMoved;
+                                                _timelineTapStartLocal = null;
+                                                _timelineTapMoved = false;
+                                                if (moved) {
+                                                  return;
+                                                }
+                                                final marker =
+                                                    _nearestTimelineMarkerForTap(
+                                                  dx: event.localPosition.dx,
+                                                  width: markerConstraints.maxWidth,
+                                                  totalDurationMs:
+                                                      duration.inMilliseconds,
+                                                );
+                                                if (marker == null) {
+                                                  return;
+                                                }
+                                                unawaited(
+                                                  _jumpToTimelineMarker(
+                                                    marker: marker,
+                                                    wasPlaying: value.isPlaying,
+                                                  ),
+                                                );
+                                              },
+                                            ),
+                                          ],
+                                        );
+                                      },
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              children: [
+                                Text(_formatDuration(position)),
+                                Text(_formatDuration(duration)),
+                              ],
+                            ),
+                            if (_incidentMarkerMs.isNotEmpty ||
+                                _lockMarkerMs.isNotEmpty)
+                              Padding(
+                                padding: const EdgeInsets.only(top: 4),
+                                child: Row(
+                                  mainAxisAlignment: MainAxisAlignment.end,
+                                  children: [
+                                    if (_incidentMarkerMs.isNotEmpty) ...[
+                                      Container(
+                                        width: 8,
+                                        height: 8,
+                                        decoration: const BoxDecoration(
+                                          color: Colors.redAccent,
+                                          shape: BoxShape.circle,
+                                        ),
+                                      ),
+                                      const SizedBox(width: 4),
+                                      const Text(
+                                        'Incident',
+                                        style: TextStyle(
+                                          color: Colors.white70,
+                                          fontSize: 11,
+                                        ),
+                                      ),
+                                    ],
+                                    if (_incidentMarkerMs.isNotEmpty &&
+                                        _lockMarkerMs.isNotEmpty)
+                                      const SizedBox(width: 12),
+                                    if (_lockMarkerMs.isNotEmpty) ...[
+                                      Container(
+                                        width: 8,
+                                        height: 8,
+                                        decoration: const BoxDecoration(
+                                          color: Colors.orangeAccent,
+                                          shape: BoxShape.circle,
+                                        ),
+                                      ),
+                                      const SizedBox(width: 4),
+                                      const Text(
+                                        'Locked',
+                                        style: TextStyle(
+                                          color: Colors.white70,
+                                          fontSize: 11,
+                                        ),
+                                      ),
+                                    ],
+                                  ],
+                                ),
+                              ),
                             const SizedBox(height: 8),
-                            StaticMapViewer(
-                              telemetryData: widget.ride.samples,
-                              width: double.infinity,
-                              height: 130,
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                IconButton(
+                                  onPressed: () async {
+                                    final target =
+                                        position - const Duration(seconds: 10);
+                                    await _seekGlobal(
+                                      target,
+                                      shouldResume: value.isPlaying,
+                                    );
+                                  },
+                                  icon: const Icon(Icons.replay_10),
+                                ),
+                                IconButton(
+                                  onPressed: () {
+                                    if (controller.value.isPlaying) {
+                                      controller.pause();
+                                    } else {
+                                      controller.play();
+                                    }
+                                  },
+                                  icon: Icon(
+                                    controller.value.isPlaying
+                                        ? Icons.pause_circle
+                                        : Icons.play_circle,
+                                    size: 36,
+                                  ),
+                                ),
+                                IconButton(
+                                  onPressed: () async {
+                                    final target =
+                                        position + const Duration(seconds: 10);
+                                    await _seekGlobal(
+                                      target,
+                                      shouldResume: value.isPlaying,
+                                    );
+                                  },
+                                  icon: const Icon(Icons.forward_10),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              'Segment ${_activeSegmentIndex + 1}/${_segmentPaths.length}',
+                              style: const TextStyle(
+                                  color: Colors.white70, fontSize: 12),
                             ),
                           ],
                         ),
                       ),
-                    if (widget.ride.samples.isNotEmpty)
-                      _buildSpeedGraph(
-                        position,
-                        duration,
-                        isPlaying: value.isPlaying,
-                      ),
-                    Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                      child: Column(
-                        children: [
-                          Slider(
-                            min: 0,
-                            max: duration.inMilliseconds > 0
-                                ? duration.inMilliseconds.toDouble()
-                                : 1,
-                            value: position.inMilliseconds
-                                .clamp(0, duration.inMilliseconds > 0 ? duration.inMilliseconds : 1)
-                                .toDouble(),
-                            onChangeStart: duration.inMilliseconds <= 0
-                                ? null
-                                : (_) {
-                                    if (_isDisposing || _isSwitchingSegment || _isSeekingAcrossSegments) {
-                                      return;
-                                    }
-                                    _beginScrub(value.isPlaying);
-                                  },
-                            onChanged: duration.inMilliseconds <= 0
-                                ? null
-                                : (newValue) {
-                                    _updateScrubPreview(
-                                      Duration(milliseconds: newValue.round()),
-                                    );
-                                  },
-                            onChangeEnd: duration.inMilliseconds <= 0
-                                ? null
-                                : (newValue) {
-                                    _commitScrub(
-                                      Duration(milliseconds: newValue.round()),
-                                    );
-                                  },
-                          ),
-                          Row(
-                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                            children: [
-                              Text(_formatDuration(position)),
-                              Text(_formatDuration(duration)),
-                            ],
-                          ),
-                          const SizedBox(height: 8),
-                          Row(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              IconButton(
-                                onPressed: () async {
-                                  final target = position - const Duration(seconds: 10);
-                                  await _seekGlobal(
-                                    target,
-                                    shouldResume: value.isPlaying,
-                                  );
-                                },
-                                icon: const Icon(Icons.replay_10),
-                              ),
-                              IconButton(
-                                onPressed: () {
-                                  if (controller.value.isPlaying) {
-                                    controller.pause();
-                                  } else {
-                                    controller.play();
-                                  }
-                                },
-                                icon: Icon(
-                                  controller.value.isPlaying ? Icons.pause_circle : Icons.play_circle,
-                                  size: 36,
-                                ),
-                              ),
-                              IconButton(
-                                onPressed: () async {
-                                  final target = position + const Duration(seconds: 10);
-                                  await _seekGlobal(
-                                    target,
-                                    shouldResume: value.isPlaying,
-                                  );
-                                },
-                                icon: const Icon(Icons.forward_10),
-                              ),
-                            ],
-                          ),
-                          const SizedBox(height: 4),
-                          Text(
-                            'Segment ${_activeSegmentIndex + 1}/${_segmentPaths.length}',
-                            style: const TextStyle(color: Colors.white70, fontSize: 12),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                );
-              },
-            ),
+                    ],
+                  );
+                },
+              ),
       ),
     );
   }
@@ -733,20 +1174,18 @@ class _SpeedGraphPainter extends CustomPainter {
     required this.samples,
     required this.currentPositionMs,
     required this.totalDurationMs,
+    required this.incidentMarkerMs,
+    required this.lockMarkerMs,
   });
 
   final List<TelemetryData> samples;
   final int currentPositionMs;
   final int totalDurationMs;
+  final List<int> incidentMarkerMs;
+  final List<int> lockMarkerMs;
 
   @override
   void paint(Canvas canvas, Size size) {
-    final bgPaint = Paint()..color = Colors.white.withValues(alpha: 0.04);
-    canvas.drawRRect(
-      RRect.fromRectAndRadius(Offset.zero & size, const Radius.circular(8)),
-      bgPaint,
-    );
-
     if (samples.length < 2 || totalDurationMs <= 0) {
       return;
     }
@@ -759,9 +1198,38 @@ class _SpeedGraphPainter extends CustomPainter {
     }
 
     final path = Path();
+    final points = <Offset>[];
     final centerX = size.width / 2;
     final windowMs = math.max(10000, math.min(totalDurationMs, 60000));
+    final halfWindowMs = windowMs / 2;
     var started = false;
+
+    void drawEventMarkers(List<int> markers, Color color) {
+      if (markers.isEmpty) {
+        return;
+      }
+      final paint = Paint()
+        ..color = color.withValues(alpha: 0.85)
+        ..strokeWidth = 1.2;
+      for (final marker in markers) {
+        final relativeMs = marker - currentPositionMs;
+        if (relativeMs.abs() > halfWindowMs + 2500) {
+          continue;
+        }
+        final x = centerX + (relativeMs / windowMs) * size.width;
+        if (x < 0 || x > size.width) {
+          continue;
+        }
+        canvas.drawLine(
+          Offset(x, size.height - 10),
+          Offset(x, size.height),
+          paint,
+        );
+      }
+    }
+
+    drawEventMarkers(lockMarkerMs, Colors.orangeAccent);
+    drawEventMarkers(incidentMarkerMs, Colors.redAccent);
 
     for (var i = 0; i < samples.length; i++) {
       final sample = samples[i];
@@ -770,33 +1238,145 @@ class _SpeedGraphPainter extends CustomPainter {
       if (x < -2 || x > size.width + 2) {
         continue;
       }
-      final y = size.height - ((sample.speed / maxSpeed) * (size.height - 8)) - 4;
+      final y =
+          size.height - ((sample.speed / maxSpeed) * (size.height - 8)) - 4;
+      final point = Offset(x, y);
+      points.add(point);
       if (!started) {
-        path.moveTo(x, y);
+        path.moveTo(point.dx, point.dy);
         started = true;
       } else {
-        path.lineTo(x, y);
+        path.lineTo(point.dx, point.dy);
       }
     }
 
+    if (!started) {
+      return;
+    }
+
     final speedPaint = Paint()
-      ..color = Colors.cyanAccent
+      ..color = Colors.cyanAccent.withValues(alpha: 0.9)
       ..style = PaintingStyle.stroke
-      ..strokeWidth = 2;
+      ..strokeWidth = 1.8
+      ..strokeJoin = StrokeJoin.round
+      ..strokeCap = StrokeCap.round;
     canvas.drawPath(path, speedPaint);
 
-    final markerPaint = Paint()
+    final dotPaint = Paint()
+      ..color = Colors.cyanAccent.withValues(alpha: 0.95)
+      ..style = PaintingStyle.fill;
+    for (final point in points) {
+      canvas.drawCircle(point, 1.7, dotPaint);
+    }
+
+    // Highlight the sample closest to current timeline position.
+    var closestPoint = points.first;
+    var smallestDistance = (closestPoint.dx - centerX).abs();
+    for (final point in points.skip(1)) {
+      final distance = (point.dx - centerX).abs();
+      if (distance < smallestDistance) {
+        closestPoint = point;
+        smallestDistance = distance;
+      }
+    }
+
+    final focusPaint = Paint()
       ..color = Colors.orangeAccent
-      ..strokeWidth = 2;
-    canvas.drawLine(Offset(centerX, 0), Offset(centerX, size.height), markerPaint);
+      ..style = PaintingStyle.fill;
+    canvas.drawCircle(closestPoint, 2.8, focusPaint);
   }
 
   @override
   bool shouldRepaint(covariant _SpeedGraphPainter oldDelegate) {
     return oldDelegate.currentPositionMs != currentPositionMs ||
         oldDelegate.totalDurationMs != totalDurationMs ||
-        oldDelegate.samples.length != samples.length;
+        oldDelegate.samples.length != samples.length ||
+        oldDelegate.lockMarkerMs.length != lockMarkerMs.length ||
+        oldDelegate.incidentMarkerMs.length != incidentMarkerMs.length;
   }
+}
+
+class _TimelineMarkersPainter extends CustomPainter {
+  static const double horizontalInset = 14.0;
+
+  const _TimelineMarkersPainter({
+    required this.totalDurationMs,
+    required this.incidentMarkerMs,
+    required this.lockMarkerMs,
+  });
+
+  final int totalDurationMs;
+  final List<int> incidentMarkerMs;
+  final List<int> lockMarkerMs;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (totalDurationMs <= 0) {
+      return;
+    }
+
+    final usableWidth = size.width - (horizontalInset * 2);
+    if (usableWidth <= 0) {
+      return;
+    }
+
+    void drawMarkers({
+      required List<int> markers,
+      required Color color,
+      required double top,
+      required double bottom,
+      required double stroke,
+    }) {
+      if (markers.isEmpty) {
+        return;
+      }
+
+      final paint = Paint()
+        ..color = color.withValues(alpha: 0.9)
+        ..strokeWidth = stroke
+        ..strokeCap = StrokeCap.round;
+
+      for (final markerMs in markers) {
+        final normalized = (markerMs / totalDurationMs).clamp(0.0, 1.0);
+        final x = horizontalInset + (normalized * usableWidth);
+        canvas.drawLine(Offset(x, top), Offset(x, bottom), paint);
+      }
+    }
+
+    drawMarkers(
+      markers: lockMarkerMs,
+      color: Colors.orangeAccent,
+      top: 7,
+      bottom: size.height - 6,
+      stroke: 2,
+    );
+    drawMarkers(
+      markers: incidentMarkerMs,
+      color: Colors.redAccent,
+      top: 4,
+      bottom: size.height - 9,
+      stroke: 2,
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant _TimelineMarkersPainter oldDelegate) {
+    return oldDelegate.totalDurationMs != totalDurationMs ||
+        oldDelegate.incidentMarkerMs.length != incidentMarkerMs.length ||
+        oldDelegate.lockMarkerMs.length != lockMarkerMs.length;
+  }
+}
+
+enum _PlaybackTimelineMarkerType { incident, locked }
+
+class _PlaybackTimelineMarker {
+  const _PlaybackTimelineMarker({
+    required this.elapsedMs,
+    required this.type,
+  });
+
+  final int elapsedMs;
+  final _PlaybackTimelineMarkerType type;
 }
 
 class _SegmentSeekTarget {

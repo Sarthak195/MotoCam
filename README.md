@@ -17,6 +17,19 @@ MotoCam is a mobile application that combines video recording with location trac
 
 ## Release Notes
 
+### v0.1.9 (2026-03-31)
+
+Highlights:
+
+- Added a pre-recording checklist to validate permissions, location services, camera readiness, storage writability, and device health before recording starts.
+- Added an interactive route map to ride playback using OpenStreetMap tiles, with start/end/current markers and a collapsible panel state.
+- Added fullscreen playback mode to hide app chrome and focus on video during ride review.
+- Added playback timeline markers for incidents (high-G events) and locked segments, including tap-to-jump navigation.
+- Improved camera lifecycle when moving to and from ride history by releasing idle camera resources and reinitializing cleanly.
+
+Release artifact:
+- `build/app/outputs/flutter-apk/app-release.apk`
+
 ### v0.1.8 (2026-03-28)
 
 Highlights:

@@ -1,10 +1,12 @@
 // lib/features/recording/recording_screen.dart
 
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:camera/camera.dart';
+import 'package:geolocator/geolocator.dart';
 import 'package:permission_handler/permission_handler.dart';
 import '../../core/providers/app_settings_provider.dart';
 import '../../core/services/app_permission_service.dart';
@@ -43,6 +45,7 @@ class _RecordingScreenState extends State<RecordingScreen>
   bool _isInPipMode = false;
   bool _isRecoveringFromStall = false;
   bool _isFetchingDeviceStatus = false;
+  bool _isNavigatingHistory = false;
   DeviceStatusSnapshot _deviceStatus = DeviceStatusSnapshot.empty;
   final Stream<int> _pipBlinkStream =
       Stream<int>.periodic(
@@ -309,6 +312,26 @@ class _RecordingScreenState extends State<RecordingScreen>
       return;
     }
 
+    final hasLocationServices = await _ensureLocationServiceEnabled(
+      messenger: messenger,
+    );
+    if (!mounted || !hasLocationServices) {
+      return;
+    }
+
+    final preflightApproved = await _showStartPreflightChecklist(
+      camera: camera,
+      settings: settings,
+    );
+    if (!mounted || !preflightApproved) {
+      return;
+    }
+
+    await telemetry.initialize();
+    if (!mounted) {
+      return;
+    }
+
     final started = await camera.startRecording();
     if (started && camera.isRecording) {
       if (!mounted) {
@@ -343,6 +366,414 @@ class _RecordingScreenState extends State<RecordingScreen>
         duration: const Duration(seconds: 2),
       ),
     );
+  }
+
+  Future<bool> _showStartPreflightChecklist({
+    required CameraProvider camera,
+    required AppSettingsProvider settings,
+  }) async {
+    final checks = await _buildStartPreflightChecks(
+      camera: camera,
+      settings: settings,
+    );
+
+    if (!mounted) {
+      return false;
+    }
+
+    final hasBlockingIssue = checks.any(
+      (check) => check.isBlocking && check.status == _StartPreflightStatus.failed,
+    );
+
+    final proceed = await showModalBottomSheet<bool>(
+          context: context,
+          isScrollControlled: true,
+          backgroundColor: const Color(0xFF111111),
+          shape: const RoundedRectangleBorder(
+            borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+          ),
+          builder: (context) {
+            return SafeArea(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(16, 16, 16, 12),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'Ready To Record?',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 20,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      hasBlockingIssue
+                          ? 'Fix blocking checks before recording.'
+                          : 'Preflight checks look good. Start when ready.',
+                      style: TextStyle(
+                        color: hasBlockingIssue ? Colors.redAccent : Colors.white70,
+                        fontSize: 13,
+                      ),
+                    ),
+                    const SizedBox(height: 14),
+                    ConstrainedBox(
+                      constraints: const BoxConstraints(maxHeight: 340),
+                      child: ListView.separated(
+                        shrinkWrap: true,
+                        itemCount: checks.length,
+                        separatorBuilder: (_, __) => Divider(
+                          color: Colors.white.withValues(alpha: 0.08),
+                          height: 1,
+                        ),
+                        itemBuilder: (context, index) {
+                          final check = checks[index];
+                          final color = _preflightStatusColor(check.status);
+                          return ListTile(
+                            dense: true,
+                            contentPadding: const EdgeInsets.symmetric(
+                              horizontal: 4,
+                              vertical: 2,
+                            ),
+                            leading: Icon(
+                              _preflightStatusIcon(check.status),
+                              color: color,
+                            ),
+                            title: Text(
+                              check.title,
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                            subtitle: Text(
+                              check.detail,
+                              style: TextStyle(color: color.withValues(alpha: 0.95)),
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: OutlinedButton(
+                            onPressed: () => Navigator.of(context).pop(false),
+                            style: OutlinedButton.styleFrom(
+                              side: BorderSide(
+                                color: Colors.white.withValues(alpha: 0.25),
+                              ),
+                            ),
+                            child: const Text('Cancel'),
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: ElevatedButton(
+                            onPressed: hasBlockingIssue
+                                ? null
+                                : () => Navigator.of(context).pop(true),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: Colors.blue,
+                              disabledBackgroundColor: Colors.grey.shade800,
+                            ),
+                            child: const Text('Start Recording'),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        ) ??
+        false;
+
+    return proceed && !hasBlockingIssue;
+  }
+
+  Future<List<_StartPreflightCheck>> _buildStartPreflightChecks({
+    required CameraProvider camera,
+    required AppSettingsProvider settings,
+  }) async {
+    if (!camera.isInitialized && !camera.isRecording) {
+      await _initializeCamera();
+    }
+
+    final checks = <_StartPreflightCheck>[];
+
+    final cameraPermissionStatus = await Permission.camera.status;
+    final hasCameraPermission = cameraPermissionStatus.isGranted ||
+        cameraPermissionStatus.isLimited;
+    checks.add(
+      _StartPreflightCheck(
+        title: 'Camera Permission',
+        detail: hasCameraPermission
+            ? 'Granted'
+            : 'Camera permission is required',
+        status:
+            hasCameraPermission ? _StartPreflightStatus.ok : _StartPreflightStatus.failed,
+        isBlocking: true,
+      ),
+    );
+
+    if (settings.audioEnabled) {
+      final micStatus = await Permission.microphone.status;
+      final micGranted = micStatus.isGranted || micStatus.isLimited;
+      checks.add(
+        _StartPreflightCheck(
+          title: 'Microphone Permission',
+          detail: micGranted ? 'Granted' : 'Microphone is required for audio',
+          status: micGranted
+              ? _StartPreflightStatus.ok
+              : _StartPreflightStatus.failed,
+          isBlocking: true,
+        ),
+      );
+    }
+
+    final locationPermissionStatus = await Permission.locationWhenInUse.status;
+    final hasLocationPermission = locationPermissionStatus.isGranted ||
+        locationPermissionStatus.isLimited;
+    checks.add(
+      _StartPreflightCheck(
+        title: 'Location Permission',
+        detail: hasLocationPermission
+            ? 'Granted'
+            : 'Required for speed, distance, and route telemetry',
+        status: hasLocationPermission
+            ? _StartPreflightStatus.ok
+            : _StartPreflightStatus.failed,
+        isBlocking: true,
+      ),
+    );
+
+    final locationEnabled = await Geolocator.isLocationServiceEnabled();
+    checks.add(
+      _StartPreflightCheck(
+        title: 'Location Services',
+        detail: locationEnabled
+            ? 'Enabled'
+            : 'Turn ON location services in system settings',
+        status: locationEnabled
+            ? _StartPreflightStatus.ok
+            : _StartPreflightStatus.failed,
+        isBlocking: true,
+      ),
+    );
+
+    final cameraReady = camera.isInitialized &&
+        camera.controller != null &&
+        camera.controller!.value.isInitialized;
+    checks.add(
+      _StartPreflightCheck(
+        title: 'Camera Ready',
+        detail: cameraReady
+            ? 'Preview and encoder are initialized'
+            : 'Camera initialization failed, retry from Recording screen',
+        status: cameraReady
+            ? _StartPreflightStatus.ok
+            : _StartPreflightStatus.failed,
+        isBlocking: true,
+      ),
+    );
+
+    final canWriteMedia = await _verifyRecordingDirectoryWritable(camera);
+    checks.add(
+      _StartPreflightCheck(
+        title: 'Media Write Access',
+        detail: canWriteMedia
+            ? 'Recording storage path is writable'
+            : 'Unable to write to recording directory',
+        status: canWriteMedia
+            ? _StartPreflightStatus.ok
+            : _StartPreflightStatus.failed,
+        isBlocking: true,
+      ),
+    );
+
+    if (Platform.isAndroid) {
+      final notificationsGranted = (await Permission.notification.status).isGranted;
+      checks.add(
+        _StartPreflightCheck(
+          title: 'Foreground Notification',
+          detail: notificationsGranted
+              ? 'Allowed'
+              : 'Recommended so background recording status stays visible',
+          status: notificationsGranted
+              ? _StartPreflightStatus.ok
+              : _StartPreflightStatus.warning,
+          isBlocking: false,
+        ),
+      );
+
+      final ignoresBatteryOptimization =
+          await _backgroundRecordingService.isIgnoringBatteryOptimizations();
+      checks.add(
+        _StartPreflightCheck(
+          title: 'Battery Optimization Exemption',
+          detail: ignoresBatteryOptimization
+              ? 'Enabled'
+              : 'Recommended for stable screen-off recording',
+          status: ignoresBatteryOptimization
+              ? _StartPreflightStatus.ok
+              : _StartPreflightStatus.warning,
+          isBlocking: false,
+        ),
+      );
+    }
+
+    final batteryLevel = _deviceStatus.batteryLevelPercent;
+    if (batteryLevel != null) {
+      final lowBattery = batteryLevel < 15;
+      checks.add(
+        _StartPreflightCheck(
+          title: 'Battery Level',
+          detail: '$batteryLevel%${lowBattery ? ' (low for long rides)' : ''}',
+          status: lowBattery
+              ? _StartPreflightStatus.warning
+              : _StartPreflightStatus.ok,
+          isBlocking: false,
+        ),
+      );
+    }
+
+    final batteryTemp = _deviceStatus.batteryTemperatureC;
+    if (batteryTemp != null) {
+      final hotDevice = batteryTemp >= 43.0;
+      checks.add(
+        _StartPreflightCheck(
+          title: 'Device Temperature',
+          detail:
+              '${batteryTemp.toStringAsFixed(1)} C${hotDevice ? ' (high temperature)' : ''}',
+          status: hotDevice
+              ? _StartPreflightStatus.warning
+              : _StartPreflightStatus.ok,
+          isBlocking: false,
+        ),
+      );
+    }
+
+    return checks;
+  }
+
+  Future<bool> _verifyRecordingDirectoryWritable(CameraProvider camera) async {
+    final path = camera.recordingsDirectory;
+    if (path == null || path.isEmpty) {
+      return false;
+    }
+
+    final directory = Directory(path);
+    if (!await directory.exists()) {
+      return false;
+    }
+
+    final probeFile = File(
+      '${directory.path}${Platform.pathSeparator}.__motocam_write_probe.tmp',
+    );
+    try {
+      await probeFile.writeAsString('ok', flush: true);
+      if (await probeFile.exists()) {
+        await probeFile.delete();
+      }
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  IconData _preflightStatusIcon(_StartPreflightStatus status) {
+    switch (status) {
+      case _StartPreflightStatus.ok:
+        return Icons.check_circle;
+      case _StartPreflightStatus.warning:
+        return Icons.warning_amber_rounded;
+      case _StartPreflightStatus.failed:
+        return Icons.cancel;
+    }
+  }
+
+  Color _preflightStatusColor(_StartPreflightStatus status) {
+    switch (status) {
+      case _StartPreflightStatus.ok:
+        return Colors.lightGreenAccent;
+      case _StartPreflightStatus.warning:
+        return Colors.orangeAccent;
+      case _StartPreflightStatus.failed:
+        return Colors.redAccent;
+    }
+  }
+
+  Future<bool> _ensureLocationServiceEnabled({
+    required ScaffoldMessengerState messenger,
+  }) async {
+    final enabled = await Geolocator.isLocationServiceEnabled();
+    if (enabled) {
+      return true;
+    }
+
+    if (!mounted) {
+      return false;
+    }
+
+    final shouldOpenSettings = await showDialog<bool>(
+          context: context,
+          builder: (dialogContext) {
+            return AlertDialog(
+              title: const Text('Turn On Location Services'),
+              content: const Text(
+                'Location services are currently off. Turn them on to start recording ride telemetry.',
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(dialogContext).pop(false),
+                  child: const Text('Cancel'),
+                ),
+                TextButton(
+                  onPressed: () => Navigator.of(dialogContext).pop(true),
+                  child: const Text('Open Location Settings'),
+                ),
+              ],
+            );
+          },
+        ) ??
+        false;
+
+    if (!shouldOpenSettings) {
+      messenger.showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Location services must be enabled before recording starts.',
+          ),
+          duration: Duration(seconds: 3),
+        ),
+      );
+      return false;
+    }
+
+    await Geolocator.openLocationSettings();
+    if (!mounted) {
+      return false;
+    }
+
+    final enabledAfterPrompt = await Geolocator.isLocationServiceEnabled();
+    if (enabledAfterPrompt) {
+      return true;
+    }
+
+    messenger.showSnackBar(
+      const SnackBar(
+        content: Text(
+          'Location is still off. Enable it in system settings, then press START RECORDING again.',
+        ),
+        duration: Duration(seconds: 4),
+      ),
+    );
+    return false;
   }
 
   Future<void> _stopRecordingFlow({
@@ -502,6 +933,36 @@ class _RecordingScreenState extends State<RecordingScreen>
         duration: Duration(seconds: 2),
       ),
     );
+  }
+
+  Future<void> _openRideHistory({
+    required CameraProvider camera,
+  }) async {
+    if (_isNavigatingHistory || camera.isRecording) {
+      return;
+    }
+
+    _isNavigatingHistory = true;
+    try {
+      await camera.releaseCameraIfIdle();
+      if (!mounted) {
+        return;
+      }
+
+      await Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (_) => const RidesListScreen(),
+        ),
+      );
+
+      if (!mounted || camera.isRecording) {
+        return;
+      }
+
+      await _initializeCamera();
+    } finally {
+      _isNavigatingHistory = false;
+    }
   }
 
   @override
@@ -1650,12 +2111,8 @@ class _RecordingScreenState extends State<RecordingScreen>
                               ? () {
                                   unawaited(_handleBackPressWhileRecording());
                                 }
-                              : () {
-                                  Navigator.of(context).push(
-                                    MaterialPageRoute(
-                                      builder: (_) => const RidesListScreen(),
-                                    ),
-                                  );
+                              : () async {
+                                  await _openRideHistory(camera: camera);
                                 }),
                       icon: const Icon(Icons.video_library_outlined,
                           color: Colors.blue),
@@ -1753,4 +2210,20 @@ class _SettingsFormResult {
   final int segmentMinutes;
   final int loopSegmentCount;
   final IncidentSensitivity incidentSensitivity;
+}
+
+enum _StartPreflightStatus { ok, warning, failed }
+
+class _StartPreflightCheck {
+  const _StartPreflightCheck({
+    required this.title,
+    required this.detail,
+    required this.status,
+    required this.isBlocking,
+  });
+
+  final String title;
+  final String detail;
+  final _StartPreflightStatus status;
+  final bool isBlocking;
 }
