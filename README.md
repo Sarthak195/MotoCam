@@ -28,6 +28,8 @@ Highlights:
 
 Release artifact:
 - `build/app/outputs/flutter-apk/app-release.apk`
+- SHA256: `C1173CE2F7B89840838360DE182DEB19D02D2D43FD73F73805257F65F4FAAFAD`
+- Size: `53,913,969 bytes (51.42 MiB)`
 
 ### v0.1.9 (2026-03-31)
 
