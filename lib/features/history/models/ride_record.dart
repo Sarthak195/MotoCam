@@ -97,43 +97,55 @@ class RideRecord {
   static Future<RideRecord> fromVideoFile(File videoFile) async {
     final telemetryPath = _telemetryPathForVideo(videoFile.path);
     final telemetryFile = File(telemetryPath);
+    final fallbackRide = RideRecord(
+      videoPath: videoFile.path,
+      segmentPaths: <String>[videoFile.path],
+      lockedSegmentPaths: const <String>[],
+      createdAt: (await videoFile.stat()).modified,
+      telemetryPath: null,
+      distanceKm: 0,
+      maxSpeedKmh: 0,
+      averageSpeedKmh: 0,
+      samples: const <TelemetryData>[],
+    );
 
     if (!await telemetryFile.exists()) {
-      return RideRecord(
-        videoPath: videoFile.path,
-        segmentPaths: [videoFile.path],
-        lockedSegmentPaths: const [],
-        createdAt: (await videoFile.stat()).modified,
-        telemetryPath: null,
-        distanceKm: 0,
-        maxSpeedKmh: 0,
-        averageSpeedKmh: 0,
-        samples: const [],
-      );
+      return fallbackRide;
     }
 
-    final raw = await telemetryFile.readAsString();
-    final json = jsonDecode(raw) as Map<String, dynamic>;
-    final samplesJson = (json['samples'] as List<dynamic>? ?? const []);
-    final samples = samplesJson
-      .whereType<Map>()
-      .map((raw) => raw.map((key, value) => MapEntry(key.toString(), value)))
-      .map(TelemetryData.fromJson)
-      .toList();
+    try {
+      final raw = await telemetryFile.readAsString();
+      final json = jsonDecode(raw) as Map<String, dynamic>;
+      final samplesJson = (json['samples'] as List<dynamic>? ?? const <dynamic>[]);
+      final samples = samplesJson
+          .whereType<Map>()
+          .map((raw) => raw.map((key, value) => MapEntry(key.toString(), value)))
+          .map(TelemetryData.fromJson)
+          .toList();
 
-    return RideRecord(
-      videoPath: videoFile.path,
-      segmentPaths: _readSegmentPaths(json, fallbackPath: videoFile.path),
-      lockedSegmentPaths:
-        _readLockedSegmentPaths(json, fallbackPaths: [videoFile.path]),
-      createdAt: DateTime.tryParse(json['startedAt']?.toString() ?? '') ??
-          (await videoFile.stat()).modified,
-      telemetryPath: telemetryFile.path,
-      distanceKm: _readJsonDouble(json, 'distanceKm'),
-      maxSpeedKmh: _readJsonDouble(json, 'maxSpeedKmh'),
-      averageSpeedKmh: _readJsonDouble(json, 'averageSpeedKmh'),
-      samples: samples,
-    );
+      final segmentPaths = await _existingPathsInOrder(
+        _readSegmentPaths(json, fallbackPath: videoFile.path),
+      );
+      if (segmentPaths.isEmpty) {
+        segmentPaths.add(videoFile.path);
+      }
+
+      return RideRecord(
+        videoPath: videoFile.path,
+        segmentPaths: segmentPaths,
+        lockedSegmentPaths:
+            _readLockedSegmentPaths(json, fallbackPaths: segmentPaths),
+        createdAt: DateTime.tryParse(json['startedAt']?.toString() ?? '') ??
+            (await videoFile.stat()).modified,
+        telemetryPath: telemetryFile.path,
+        distanceKm: _readJsonDouble(json, 'distanceKm'),
+        maxSpeedKmh: _readJsonDouble(json, 'maxSpeedKmh'),
+        averageSpeedKmh: _readJsonDouble(json, 'averageSpeedKmh'),
+        samples: samples,
+      );
+    } catch (_) {
+      return fallbackRide;
+    }
   }
 
   static Future<RideRecord?> fromTelemetryFile(File telemetryFile) async {
@@ -141,35 +153,107 @@ class RideRecord {
       return null;
     }
 
-    final raw = await telemetryFile.readAsString();
-    final json = jsonDecode(raw) as Map<String, dynamic>;
-    final videoPath = json['videoPath']?.toString();
-    if (videoPath == null || videoPath.isEmpty) {
+    try {
+      final raw = await telemetryFile.readAsString();
+      final json = jsonDecode(raw) as Map<String, dynamic>;
+      final videoPath = json['videoPath']?.toString() ?? '';
+
+      final candidateSegmentPaths = _readSegmentPaths(
+        json,
+        fallbackPath: videoPath,
+      );
+      final segmentPaths = await _existingPathsInOrder(candidateSegmentPaths);
+
+      if (segmentPaths.isEmpty) {
+        final recoveredPath = await _recoverVideoPathFromTelemetryFile(
+          telemetryFile,
+        );
+        if (recoveredPath != null) {
+          segmentPaths.add(recoveredPath);
+        }
+      }
+
+      var resolvedVideoPath = videoPath;
+      if (resolvedVideoPath.isEmpty ||
+          !segmentPaths.contains(resolvedVideoPath)) {
+        if (segmentPaths.isNotEmpty) {
+          resolvedVideoPath = segmentPaths.last;
+        }
+      }
+
+      if (resolvedVideoPath.isEmpty) {
+        return null;
+      }
+      if (segmentPaths.isEmpty) {
+        segmentPaths.add(resolvedVideoPath);
+      }
+
+      final samplesJson = (json['samples'] as List<dynamic>? ?? const <dynamic>[]);
+      final samples = samplesJson
+          .whereType<Map>()
+          .map((raw) => raw.map((key, value) => MapEntry(key.toString(), value)))
+          .map(TelemetryData.fromJson)
+          .toList();
+
+      return RideRecord(
+        videoPath: resolvedVideoPath,
+        segmentPaths: segmentPaths,
+        lockedSegmentPaths:
+            _readLockedSegmentPaths(json, fallbackPaths: segmentPaths),
+        createdAt: DateTime.tryParse(json['startedAt']?.toString() ?? '') ??
+            (await telemetryFile.stat()).modified,
+        telemetryPath: telemetryFile.path,
+        distanceKm: _readJsonDouble(json, 'distanceKm'),
+        maxSpeedKmh: _readJsonDouble(json, 'maxSpeedKmh'),
+        averageSpeedKmh: _readJsonDouble(json, 'averageSpeedKmh'),
+        samples: samples,
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  static Future<List<String>> _existingPathsInOrder(
+    Iterable<String> paths,
+  ) async {
+    final existingPaths = <String>[];
+    final seen = <String>{};
+
+    for (final path in paths) {
+      final normalizedPath = path.trim();
+      if (normalizedPath.isEmpty || seen.contains(normalizedPath)) {
+        continue;
+      }
+      if (await File(normalizedPath).exists()) {
+        existingPaths.add(normalizedPath);
+        seen.add(normalizedPath);
+      }
+    }
+
+    return existingPaths;
+  }
+
+  static Future<String?> _recoverVideoPathFromTelemetryFile(
+    File telemetryFile,
+  ) async {
+    const telemetrySuffix = '.telemetry.json';
+    if (!telemetryFile.path.toLowerCase().endsWith(telemetrySuffix)) {
       return null;
     }
 
-    final samplesJson = (json['samples'] as List<dynamic>? ?? const []);
-    final samples = samplesJson
-        .whereType<Map>()
-        .map((raw) => raw.map((key, value) => MapEntry(key.toString(), value)))
-        .map(TelemetryData.fromJson)
-        .toList();
-
-    final segmentPaths = _readSegmentPaths(json, fallbackPath: videoPath);
-
-    return RideRecord(
-      videoPath: videoPath,
-      segmentPaths: segmentPaths,
-      lockedSegmentPaths:
-        _readLockedSegmentPaths(json, fallbackPaths: segmentPaths),
-      createdAt: DateTime.tryParse(json['startedAt']?.toString() ?? '') ??
-          (await telemetryFile.stat()).modified,
-      telemetryPath: telemetryFile.path,
-      distanceKm: _readJsonDouble(json, 'distanceKm'),
-      maxSpeedKmh: _readJsonDouble(json, 'maxSpeedKmh'),
-      averageSpeedKmh: _readJsonDouble(json, 'averageSpeedKmh'),
-      samples: samples,
+    final basePath = telemetryFile.path.substring(
+      0,
+      telemetryFile.path.length - telemetrySuffix.length,
     );
+
+    for (final extension in <String>['.mp4', '.mov', '.mkv', '.avi']) {
+      final candidate = File('$basePath$extension');
+      if (await candidate.exists()) {
+        return candidate.path;
+      }
+    }
+
+    return null;
   }
 
   static double _readJsonDouble(Map<String, dynamic> json, String key) =>

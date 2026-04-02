@@ -33,6 +33,8 @@ class CameraProvider extends ChangeNotifier {
 
   static const platform = MethodChannel('com.example.motocam/media');
   static const String _galleryRelativePath = 'Movies/MotoCam/Videos';
+  static const String _androidPublicGalleryDirectory =
+      '/storage/emulated/0/Movies/MotoCam/Videos';
 
   CameraController? _controller;
   RecordingState _state = RecordingState.idle;
@@ -585,46 +587,139 @@ class CameraProvider extends ChangeNotifier {
   // Set up recordings directory
   Future<void> _setupRecordingsDirectory() async {
     try {
-      if (Platform.isAndroid) {
-        final recordingsDir = await getTemporaryDirectory();
-
-        if (!await recordingsDir.exists()) {
-          await recordingsDir.create(recursive: true);
-          _log('Created recordings directory: ${recordingsDir.path}');
-        } else {
-          _log('Recordings directory already exists: ${recordingsDir.path}');
-        }
-
-        _recordingsDirectory = recordingsDir.path;
-        _log('Recordings directory set to: $_recordingsDirectory');
-      } else if (Platform.isIOS) {
-        // iOS: Use app documents directory
-        final documentsDir = await getApplicationDocumentsDirectory();
-        final recordingsDir =
-            Directory('${documentsDir.path}/MotoCam Recordings');
-
-        if (!await recordingsDir.exists()) {
-          await recordingsDir.create(recursive: true);
-          _log('Created iOS recordings directory: ${recordingsDir.path}');
-        }
-
-        _recordingsDirectory = recordingsDir.path;
-        _log('iOS recordings directory set to: $_recordingsDirectory');
+      final Directory baseDirectory;
+      if (Platform.isAndroid || Platform.isIOS) {
+        baseDirectory = await getApplicationDocumentsDirectory();
       } else {
-        // Other platforms: Use app cache directory
-        final cacheDir = await getApplicationCacheDirectory();
-        _recordingsDirectory = cacheDir.path;
-        _log('Using cache directory for recordings: $_recordingsDirectory');
+        baseDirectory = await getApplicationSupportDirectory();
       }
+
+      final recordingsDir = Directory(
+        '${baseDirectory.path}${Platform.pathSeparator}MotoCam Recordings',
+      );
+
+      if (!await recordingsDir.exists()) {
+        await recordingsDir.create(recursive: true);
+        _log('Created recordings directory: ${recordingsDir.path}');
+      } else {
+        _log('Recordings directory already exists: ${recordingsDir.path}');
+      }
+
+      _recordingsDirectory = recordingsDir.path;
+      _log('Recordings directory set to: $_recordingsDirectory');
     } catch (e) {
       _log('Error setting up recordings directory: $e');
       // Fallback to app cache
       try {
         final cacheDir = await getApplicationCacheDirectory();
-        _recordingsDirectory = cacheDir.path;
+        final fallbackDir = Directory(
+          '${cacheDir.path}${Platform.pathSeparator}MotoCam Recordings',
+        );
+        if (!await fallbackDir.exists()) {
+          await fallbackDir.create(recursive: true);
+        }
+        _recordingsDirectory = fallbackDir.path;
         _log('Fallback to cache directory: $_recordingsDirectory');
       } catch (fallbackError) {
         _log('Error setting up fallback cache directory: $fallbackError');
+      }
+    }
+  }
+
+  String _normalizePath(String path) {
+    var normalized = path.replaceAll('\\', Platform.pathSeparator);
+    normalized = normalized.replaceAll('/', Platform.pathSeparator);
+    while (normalized.length > 1 &&
+        normalized.endsWith(Platform.pathSeparator)) {
+      normalized = normalized.substring(0, normalized.length - 1);
+    }
+    return Platform.isWindows ? normalized.toLowerCase() : normalized;
+  }
+
+  bool _isPathInsideDirectory(String filePath, String directoryPath) {
+    final normalizedFilePath = _normalizePath(filePath);
+    final normalizedDirectoryPath = _normalizePath(directoryPath);
+    if (normalizedFilePath == normalizedDirectoryPath) {
+      return true;
+    }
+    return normalizedFilePath
+        .startsWith('$normalizedDirectoryPath${Platform.pathSeparator}');
+  }
+
+  String _fileNameFromPath(String path) {
+    final parts = path.split(Platform.pathSeparator);
+    if (parts.isEmpty) {
+      return path;
+    }
+    return parts.last;
+  }
+
+  Future<String> _buildUniqueSegmentPath(
+    String directoryPath,
+    String fileName,
+  ) async {
+    final resolvedName = fileName.trim().isEmpty
+        ? 'segment_${DateTime.now().millisecondsSinceEpoch}.mp4'
+        : fileName;
+    final dotIndex = resolvedName.lastIndexOf('.');
+    final baseName = dotIndex <= 0
+        ? resolvedName
+        : resolvedName.substring(0, dotIndex);
+    final extension = dotIndex <= 0 ? '' : resolvedName.substring(dotIndex);
+
+    var suffix = 0;
+    while (true) {
+      final candidateName =
+          suffix == 0 ? resolvedName : '${baseName}_$suffix$extension';
+      final candidatePath =
+          '$directoryPath${Platform.pathSeparator}$candidateName';
+      if (!await File(candidatePath).exists()) {
+        return candidatePath;
+      }
+      suffix++;
+    }
+  }
+
+  Future<String> _persistSegmentToRecordingsDirectory(String sourcePath) async {
+    final recordingsDirectoryPath = _recordingsDirectory;
+    if (recordingsDirectoryPath == null || sourcePath.isEmpty) {
+      return sourcePath;
+    }
+
+    final sourceFile = File(sourcePath);
+    if (!await sourceFile.exists()) {
+      _log('Segment missing before persistence step: $sourcePath');
+      return sourcePath;
+    }
+
+    if (_isPathInsideDirectory(sourcePath, recordingsDirectoryPath)) {
+      return sourcePath;
+    }
+
+    final recordingsDir = Directory(recordingsDirectoryPath);
+    if (!await recordingsDir.exists()) {
+      await recordingsDir.create(recursive: true);
+    }
+
+    final targetPath = await _buildUniqueSegmentPath(
+      recordingsDirectoryPath,
+      _fileNameFromPath(sourcePath),
+    );
+
+    try {
+      final movedFile = await sourceFile.rename(targetPath);
+      _log('Moved segment into persistent directory: ${movedFile.path}');
+      return movedFile.path;
+    } catch (renameError) {
+      _log('Rename failed, falling back to copy/delete: $renameError');
+      try {
+        final copiedFile = await sourceFile.copy(targetPath);
+        await sourceFile.delete();
+        _log('Copied segment into persistent directory: ${copiedFile.path}');
+        return copiedFile.path;
+      } catch (copyError) {
+        _log('Failed to persist segment into recordings directory: $copyError');
+        return sourcePath;
       }
     }
   }
@@ -831,9 +926,12 @@ class CameraProvider extends ChangeNotifier {
   }
 
   Future<void> _registerCompletedSegment(String videoPath) async {
-    _currentVideoPath = videoPath;
-    _recordingsDirectory ??= File(videoPath).parent.path;
-    _sessionSegmentPaths.add(videoPath);
+    final persistedVideoPath =
+        await _persistSegmentToRecordingsDirectory(videoPath);
+
+    _currentVideoPath = persistedVideoPath;
+    _recordingsDirectory ??= File(persistedVideoPath).parent.path;
+    _sessionSegmentPaths.add(persistedVideoPath);
 
     final startMs = _lastSegmentEndMs;
     final endMs = _recordingStartTime == null
@@ -842,7 +940,7 @@ class CameraProvider extends ChangeNotifier {
     final normalizedEndMs = endMs >= startMs ? endMs : startMs;
     _sessionSegmentTimeline.add(
       SegmentTimelineEntry(
-        path: videoPath,
+        path: persistedVideoPath,
         startMs: startMs,
         endMs: normalizedEndMs,
       ),
@@ -850,9 +948,9 @@ class CameraProvider extends ChangeNotifier {
     _lastSegmentEndMs = normalizedEndMs;
 
     if (_pendingIncidentSegmentLocks > 0) {
-      _lockedSegmentPaths.add(videoPath);
+      _lockedSegmentPaths.add(persistedVideoPath);
       _pendingIncidentSegmentLocks--;
-      _log('Incident lock applied to new segment: $videoPath');
+      _log('Incident lock applied to new segment: $persistedVideoPath');
     }
 
     while (_sessionSegmentPaths.length > _maxRollingSegments) {
@@ -999,12 +1097,14 @@ class CameraProvider extends ChangeNotifier {
       _log('File exists: ${await File(cacheVideoPath).exists()}');
 
       await _registerCompletedSegment(cacheVideoPath);
+      final finalVideoPath = _currentVideoPath ?? cacheVideoPath;
+      _log('Final persisted video path: $finalVideoPath');
 
       // Keep original output paths and export to gallery asynchronously.
       _enqueueDeferredGalleryExport(List<String>.from(_sessionSegmentPaths));
 
       notifyListeners();
-      return cacheVideoPath;
+      return finalVideoPath;
     } catch (e) {
       _log('Error stopping recording: $e');
       _log('Stack trace: ${StackTrace.current}');
@@ -1016,13 +1116,41 @@ class CameraProvider extends ChangeNotifier {
 
   // Get list of all recordings
   Future<List<FileSystemEntity>> getRecordings() async {
+    if (_recordingsDirectory == null) {
+      await _setupRecordingsDirectory();
+    }
     if (_recordingsDirectory == null) return [];
 
     try {
-      final dir = Directory(_recordingsDirectory!);
-      if (!await dir.exists()) return [];
+      final files = <FileSystemEntity>[];
+      final seenPaths = <String>{};
+      await _appendFilesFromDirectory(
+        files: files,
+        seenPaths: seenPaths,
+        directoryPath: _recordingsDirectory,
+      );
 
-          final files = await dir.list(recursive: true, followLinks: false).toList();
+      if (Platform.isAndroid) {
+        try {
+          final tempDir = await getTemporaryDirectory();
+          if (!_isPathInsideDirectory(tempDir.path, _recordingsDirectory!)) {
+            await _appendFilesFromDirectory(
+              files: files,
+              seenPaths: seenPaths,
+              directoryPath: tempDir.path,
+            );
+          }
+        } catch (_) {
+          // Best effort only for legacy temp recordings.
+        }
+
+        await _appendFilesFromDirectory(
+          files: files,
+          seenPaths: seenPaths,
+          directoryPath: _androidPublicGalleryDirectory,
+        );
+      }
+
       files.sort((a, b) => File(b.path)
           .statSync()
           .modified
@@ -1031,6 +1159,35 @@ class CameraProvider extends ChangeNotifier {
     } catch (e) {
       _log('Error getting recordings: $e');
       return [];
+    }
+  }
+
+  Future<void> _appendFilesFromDirectory({
+    required List<FileSystemEntity> files,
+    required Set<String> seenPaths,
+    required String? directoryPath,
+  }) async {
+    if (directoryPath == null || directoryPath.isEmpty) {
+      return;
+    }
+
+    try {
+      final dir = Directory(directoryPath);
+      if (!await dir.exists()) {
+        return;
+      }
+
+      await for (final entity in dir.list(recursive: true, followLinks: false)) {
+        if (entity is! File) {
+          continue;
+        }
+        final normalizedPath = _normalizePath(entity.path);
+        if (seenPaths.add(normalizedPath)) {
+          files.add(entity);
+        }
+      }
+    } catch (_) {
+      // Directory may be inaccessible due platform or permission constraints.
     }
   }
 

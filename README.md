@@ -17,6 +17,18 @@ MotoCam is a mobile application that combines video recording with location trac
 
 ## Release Notes
 
+### v0.1.10 (2026-04-02)
+
+Highlights:
+
+- Fixed day-later recording visibility issues by moving recording retention to persistent app storage instead of relying on temporary paths.
+- Hardened multi-segment ride metadata handling so stale or malformed telemetry sidecars no longer hide valid video clips.
+- Added fallback history discovery for video-only recovered segments (including older gallery-visible clips) with de-duplication.
+- Added a clear `VIDEO ONLY (RECOVERED)` badge in ride history for clips that are playable but missing telemetry overlays.
+
+Release artifact:
+- `build/app/outputs/flutter-apk/app-release.apk`
+
 ### v0.1.9 (2026-03-31)
 
 Highlights:
