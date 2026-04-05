@@ -46,7 +46,12 @@ class _RecordingScreenState extends State<RecordingScreen>
   bool _isRecoveringFromStall = false;
   bool _isFetchingDeviceStatus = false;
   bool _isNavigatingHistory = false;
+  bool _isBlackoutMode = false;
+  String? _inAppNoticeText;
   DeviceStatusSnapshot _deviceStatus = DeviceStatusSnapshot.empty;
+  Timer? _inAppNoticeTimer;
+  Timer? _blackoutExitHoldTimer;
+  bool _blackoutExitTriggered = false;
   final Stream<int> _pipBlinkStream = Stream<int>.periodic(
     const Duration(milliseconds: 700),
     (tick) => tick,
@@ -211,6 +216,9 @@ class _RecordingScreenState extends State<RecordingScreen>
     if (state == AppLifecycleState.inactive ||
         state == AppLifecycleState.paused ||
         state == AppLifecycleState.hidden) {
+      if (_isBlackoutMode) {
+        unawaited(_exitBlackoutMode(camera: camera));
+      }
       if (camera.isRecording) {
         _lastBackgroundedAt = DateTime.now();
       }
@@ -395,16 +403,99 @@ class _RecordingScreenState extends State<RecordingScreen>
       return;
     }
 
-    messenger.showSnackBar(
-      SnackBar(
-        content: Text(
-          started
-              ? 'Recording started (${AppSettingsProvider.fromResolutionPreset(camera.resolutionPreset)}p @ ${camera.recordingFps} FPS)\nSaving to: ${camera.recordingsDirectory}'
-              : 'Unable to start recording with current camera settings. Try lower resolution/FPS.',
-        ),
-        duration: const Duration(seconds: 2),
-      ),
+    _showInAppNotice(
+      started ? 'REC started' : 'Start failed. Try lower quality.',
     );
+  }
+
+  void _showInAppNotice(
+    String message, {
+    Duration duration = const Duration(seconds: 2),
+  }) {
+    if (!mounted) {
+      return;
+    }
+
+    _inAppNoticeTimer?.cancel();
+    setState(() {
+      _inAppNoticeText = message;
+    });
+    _inAppNoticeTimer = Timer(duration, () {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _inAppNoticeText = null;
+      });
+    });
+  }
+
+  Future<void> _enterBlackoutMode({
+    required CameraProvider camera,
+  }) async {
+    if (_isBlackoutMode || !camera.isRecording) {
+      return;
+    }
+
+    try {
+      await camera.controller?.pausePreview();
+    } catch (e) {
+      debugPrint('Blackout: pausePreview failed: $e');
+    }
+
+    if (!mounted) {
+      return;
+    }
+
+    setState(() {
+      _isBlackoutMode = true;
+    });
+    _showInAppNotice('Blackout on. Hold 2s anywhere to exit.');
+  }
+
+  Future<void> _exitBlackoutMode({
+    required CameraProvider camera,
+  }) async {
+    if (!_isBlackoutMode) {
+      return;
+    }
+
+    _blackoutExitHoldTimer?.cancel();
+    _blackoutExitTriggered = false;
+
+    try {
+      await camera.controller?.resumePreview();
+    } catch (e) {
+      debugPrint('Blackout: resumePreview failed: $e');
+    }
+
+    if (!mounted) {
+      return;
+    }
+
+    setState(() {
+      _isBlackoutMode = false;
+    });
+    _showInAppNotice('Blackout off');
+  }
+
+  void _startBlackoutExitHold({required CameraProvider camera}) {
+    _blackoutExitHoldTimer?.cancel();
+    _blackoutExitTriggered = false;
+    _blackoutExitHoldTimer = Timer(const Duration(seconds: 2), () {
+      _blackoutExitTriggered = true;
+      unawaited(_exitBlackoutMode(camera: camera));
+    });
+  }
+
+  void _endBlackoutExitHold() {
+    if (_blackoutExitTriggered) {
+      _blackoutExitTriggered = false;
+      return;
+    }
+
+    _blackoutExitHoldTimer?.cancel();
+    _showInAppNotice('Hold for 2 seconds to exit blackout');
   }
 
   Future<bool> _showStartPreflightChecklist({
@@ -919,18 +1010,15 @@ class _RecordingScreenState extends State<RecordingScreen>
           return;
         }
 
-        messenger.showSnackBar(
-          SnackBar(
-            content: Text(
-              telemetryPath == null
-                  ? 'Video saved to:\n$resolvedVideoPath'
-                  : 'Video saved:\n$resolvedVideoPath\nTelemetry saved:\n$telemetryPath',
-            ),
-            duration: const Duration(seconds: 4),
-          ),
+        _showInAppNotice(
+          telemetryPath == null ? 'Recording saved' : 'Recording + telemetry saved',
         );
       } else {
         telemetry.cancelRideSession();
+      }
+
+      if (_isBlackoutMode) {
+        await _exitBlackoutMode(camera: camera);
       }
     } finally {
       _isStoppingRecording = false;
@@ -962,14 +1050,7 @@ class _RecordingScreenState extends State<RecordingScreen>
         protectCurrentSegment: true,
         reason: 'auto-crash',
       );
-
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-              'Incident detected (${telemetry.lastIncidentGForce.toStringAsFixed(2)}g). Recent segments are locked.'),
-          duration: const Duration(seconds: 3),
-        ),
-      );
+      _showInAppNotice('Incident detected. Segments locked.');
     });
   }
 
@@ -1038,12 +1119,7 @@ class _RecordingScreenState extends State<RecordingScreen>
       return;
     }
 
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('Recording is active. Stop recording before exiting.'),
-        duration: Duration(seconds: 2),
-      ),
-    );
+    _showInAppNotice('Recording active. Stop first to exit.');
   }
 
   Future<void> _openRideHistory({
@@ -1093,19 +1169,75 @@ class _RecordingScreenState extends State<RecordingScreen>
               : Scaffold(
                   backgroundColor: Colors.black,
                   body: SafeArea(
-                    child: Column(
+                    child: Stack(
                       children: [
-                        _buildHeader(),
-                        _buildActiveProfileBar(),
-                        Expanded(child: _buildCameraPreview()),
-                        _buildTelemetryStats(),
-                        _buildControls(),
+                        Column(
+                          children: [
+                            _buildHeader(camera),
+                            _buildActiveProfileBar(),
+                            Expanded(child: _buildCameraPreview()),
+                            _buildTelemetryStats(),
+                            _buildControls(),
+                          ],
+                        ),
+                        _buildInAppNoticeOverlay(),
+                        if (_isBlackoutMode)
+                          _buildBlackoutOverlay(camera: camera),
                       ],
                     ),
                   ),
                 ),
         );
       },
+    );
+  }
+
+  Widget _buildInAppNoticeOverlay() {
+    return Positioned(
+      top: 12,
+      left: 12,
+      right: 12,
+      child: IgnorePointer(
+        child: AnimatedOpacity(
+          duration: const Duration(milliseconds: 140),
+          opacity: _inAppNoticeText == null ? 0.0 : 1.0,
+          child: Container(
+            alignment: Alignment.center,
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            decoration: BoxDecoration(
+              color: Colors.black.withValues(alpha: 0.35),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: Colors.white.withValues(alpha: 0.12)),
+            ),
+            child: Text(
+              _inAppNoticeText ?? '',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildBlackoutOverlay({
+    required CameraProvider camera,
+  }) {
+    return Positioned.fill(
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTapDown: (_) => _startBlackoutExitHold(camera: camera),
+        onTapUp: (_) => _endBlackoutExitHold(),
+        onTapCancel: _endBlackoutExitHold,
+        child: Container(
+          color: Colors.black,
+        ),
+      ),
     );
   }
 
@@ -1198,7 +1330,7 @@ class _RecordingScreenState extends State<RecordingScreen>
     );
   }
 
-  Widget _buildHeader() {
+  Widget _buildHeader(CameraProvider camera) {
     return Container(
       padding: const EdgeInsets.all(16),
       child: Row(
@@ -1212,9 +1344,29 @@ class _RecordingScreenState extends State<RecordingScreen>
               fontWeight: FontWeight.bold,
             ),
           ),
-          IconButton(
-            icon: const Icon(Icons.settings, color: Colors.white),
-            onPressed: _isApplyingSettings ? null : _openSettingsSheet,
+          Row(
+            children: [
+              IconButton(
+                icon: Icon(
+                  _isBlackoutMode ? Icons.light_mode : Icons.dark_mode,
+                  color: camera.isRecording ? Colors.white : Colors.white30,
+                ),
+                tooltip: _isBlackoutMode ? 'Exit blackout' : 'Enter blackout',
+                onPressed: _isApplyingSettings || !camera.isRecording
+                    ? null
+                    : () {
+                        if (_isBlackoutMode) {
+                          unawaited(_exitBlackoutMode(camera: camera));
+                        } else {
+                          unawaited(_enterBlackoutMode(camera: camera));
+                        }
+                      },
+              ),
+              IconButton(
+                icon: const Icon(Icons.settings, color: Colors.white),
+                onPressed: _isApplyingSettings ? null : _openSettingsSheet,
+              ),
+            ],
           ),
         ],
       ),
@@ -1931,6 +2083,10 @@ class _RecordingScreenState extends State<RecordingScreen>
   Widget _buildCameraPreview() {
     return Consumer<CameraProvider>(
       builder: (context, camera, _) {
+        if (_isBlackoutMode) {
+          return const ColoredBox(color: Colors.black);
+        }
+
         if (!camera.isInitialized || camera.controller == null) {
           return const Center(
             child: CircularProgressIndicator(color: Colors.white),
@@ -2290,12 +2446,8 @@ class _RecordingScreenState extends State<RecordingScreen>
                                 protectCurrentSegment: true,
                                 reason: 'manual-emergency',
                               );
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                SnackBar(
-                                  content: Text(
-                                      'Emergency lock enabled. Protected segments: ${camera.lockedSegmentCount}'),
-                                  duration: const Duration(seconds: 2),
-                                ),
+                              _showInAppNotice(
+                                'Emergency lock enabled (${camera.lockedSegmentCount})',
                               );
                             }
                           : null,
@@ -2330,6 +2482,12 @@ class _RecordingScreenState extends State<RecordingScreen>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    final camera = context.read<CameraProvider>();
+    if (_isBlackoutMode) {
+      unawaited(camera.controller?.resumePreview());
+    }
+    _blackoutExitHoldTimer?.cancel();
+    _inAppNoticeTimer?.cancel();
     _recordingTimerSubscription?.cancel();
     _backgroundEventSubscription?.cancel();
     _pipModeSubscription?.cancel();

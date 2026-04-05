@@ -60,14 +60,22 @@ class CameraProvider extends ChangeNotifier {
   final Set<String> _lockedSegmentPaths = <String>{};
   final List<String> _pendingGalleryExports = <String>[];
   Timer? _segmentTimer;
+  Timer? _deferredMaintenanceTimer;
   bool _isRollingSegment = false;
   bool _isStoppingRecording = false;
   bool _isExportingToGallery = false;
+  bool _isDeferredMaintenanceRunning = false;
   int _pendingIncidentSegmentLocks = 0;
   int _lastSegmentEndMs = 0;
   int _recordingRecoveryCount = 0;
   DateTime? _lastRecordingRecoveryAt;
   String? _lastRecordingRecoveryReason;
+  int _lastRollStopMs = 0;
+  int _lastRollRestartMs = 0;
+  int _lastRollRegisterMs = 0;
+  int _lastRollTotalMs = 0;
+  DateTime? _lastRollAt;
+  final List<int> _recentRollTotalMs = <int>[];
 
   static const List<int> _fpsCandidates = [24, 30, 60];
   static const List<int> _safeResolutionOptions = [480, 720, 1080, 2160];
@@ -116,6 +124,19 @@ class CameraProvider extends ChangeNotifier {
   int get recordingRecoveryCount => _recordingRecoveryCount;
   DateTime? get lastRecordingRecoveryAt => _lastRecordingRecoveryAt;
   String? get lastRecordingRecoveryReason => _lastRecordingRecoveryReason;
+  int get lastRollStopMs => _lastRollStopMs;
+  int get lastRollRestartMs => _lastRollRestartMs;
+  int get lastRollRegisterMs => _lastRollRegisterMs;
+  int get lastRollTotalMs => _lastRollTotalMs;
+  DateTime? get lastRollAt => _lastRollAt;
+  List<int> get recentRollTotalMs => List.unmodifiable(_recentRollTotalMs);
+  int get averageRollTotalMs {
+    if (_recentRollTotalMs.isEmpty) {
+      return 0;
+    }
+    final total = _recentRollTotalMs.reduce((a, b) => a + b);
+    return (total / _recentRollTotalMs.length).round();
+  }
   List<int> get knownSupportedFpsOptions =>
       List.unmodifiable(_supportedFpsOptionsForPreset(_resolutionPreset));
   List<int> get knownSupportedResolutionOptions {
@@ -143,6 +164,24 @@ class CameraProvider extends ChangeNotifier {
     if (enableDebugLogging) {
       debugPrint('[MotoCam] $message');
     }
+  }
+
+  void _recordRollMetrics({
+    required int stopMs,
+    required int restartMs,
+    required int registerMs,
+    required int totalMs,
+  }) {
+    _lastRollStopMs = stopMs;
+    _lastRollRestartMs = restartMs;
+    _lastRollRegisterMs = registerMs;
+    _lastRollTotalMs = totalMs;
+    _lastRollAt = DateTime.now();
+    _recentRollTotalMs.add(totalMs);
+    if (_recentRollTotalMs.length > 10) {
+      _recentRollTotalMs.removeAt(0);
+    }
+    notifyListeners();
   }
 
   bool _isPermissionGranted(PermissionStatus status) {
@@ -780,20 +819,92 @@ class CameraProvider extends ChangeNotifier {
 
     try {
       final movedFile = await sourceFile.rename(targetPath);
-      _log('Moved segment into persistent directory: ${movedFile.path}');
-      return movedFile.path;
+      final movedPath = movedFile.path;
+      if (await _isSegmentFileReady(movedPath)) {
+        _log('Moved segment into persistent directory: $movedPath');
+        return movedPath;
+      }
+
+      _log(
+          'Moved segment failed readiness check, keeping source path: $movedPath');
+      return sourcePath;
     } catch (renameError) {
       _log('Rename failed, falling back to copy/delete: $renameError');
       try {
         final copiedFile = await sourceFile.copy(targetPath);
-        await sourceFile.delete();
-        _log('Copied segment into persistent directory: ${copiedFile.path}');
-        return copiedFile.path;
+        final copiedPath = copiedFile.path;
+        if (await _isSegmentFileReady(copiedPath)) {
+          await sourceFile.delete();
+          _log('Copied segment into persistent directory: $copiedPath');
+          return copiedPath;
+        }
+        _log(
+            'Copied segment failed readiness check, keeping source path: $copiedPath');
+        await copiedFile.delete();
+        return sourcePath;
       } catch (copyError) {
         _log('Failed to persist segment into recordings directory: $copyError');
         return sourcePath;
       }
     }
+  }
+
+  Future<bool> _isSegmentFileReady(String path) async {
+    if (path.trim().isEmpty) {
+      return false;
+    }
+
+    final file = File(path);
+    if (!await file.exists()) {
+      return false;
+    }
+
+    try {
+      final length = await file.length();
+      return length > 0;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<String?> _resolveReadyFinalVideoPath({
+    required String? cacheVideoPath,
+  }) async {
+    final candidates = <String>[];
+
+    void addCandidate(String? rawPath) {
+      if (rawPath == null) {
+        return;
+      }
+      final path = rawPath.trim();
+      if (path.isEmpty || candidates.contains(path)) {
+        return;
+      }
+      candidates.add(path);
+    }
+
+    addCandidate(_currentVideoPath);
+    addCandidate(cacheVideoPath);
+    for (final path in _sessionSegmentPaths.reversed) {
+      addCandidate(path);
+    }
+
+    if (candidates.isEmpty) {
+      return null;
+    }
+
+    for (var attempt = 0; attempt < 2; attempt++) {
+      for (final candidate in candidates) {
+        if (await _isSegmentFileReady(candidate)) {
+          return candidate;
+        }
+      }
+      if (attempt == 0) {
+        await Future<void>.delayed(const Duration(milliseconds: 300));
+      }
+    }
+
+    return candidates.first;
   }
 
   // Start recording
@@ -953,15 +1064,39 @@ class CameraProvider extends ChangeNotifier {
     }
 
     _isRollingSegment = true;
+    final rollStartedAt = DateTime.now();
     try {
       _log(
           'Rolling recording segment after ${_segmentDuration.inSeconds} seconds');
+      final stopStartedAt = DateTime.now();
       final file = await _controller!.stopVideoRecording();
-      await _registerCompletedSegment(file.path);
+      final stopElapsedMs = DateTime.now().difference(stopStartedAt).inMilliseconds;
+      var restartElapsedMs = 0;
+
       if (!_isStoppingRecording) {
+        final restartStartedAt = DateTime.now();
         await _controller!.startVideoRecording();
         _armSegmentTimer();
+        restartElapsedMs =
+            DateTime.now().difference(restartStartedAt).inMilliseconds;
+        _log('Segment roll restart completed in ${restartElapsedMs}ms');
       }
+
+      final registerStartedAt = DateTime.now();
+      await _registerCompletedSegment(
+        file.path,
+        deferMaintenance: true,
+      );
+      final registerElapsedMs =
+          DateTime.now().difference(registerStartedAt).inMilliseconds;
+      final totalElapsedMs = DateTime.now().difference(rollStartedAt).inMilliseconds;
+      _recordRollMetrics(
+        stopMs: stopElapsedMs,
+        restartMs: restartElapsedMs,
+        registerMs: registerElapsedMs,
+        totalMs: totalElapsedMs,
+      );
+      _log('Segment roll timings: stop=${stopElapsedMs}ms, register=${registerElapsedMs}ms, total=${totalElapsedMs}ms');
     } catch (e) {
       _log('Error while rolling segment: $e');
       if (!_isStoppingRecording && isRecording) {
@@ -1003,9 +1138,17 @@ class CameraProvider extends ChangeNotifier {
     }
   }
 
-  Future<void> _registerCompletedSegment(String videoPath) async {
+  Future<void> _registerCompletedSegment(
+    String videoPath, {
+    bool deferMaintenance = false,
+  }) async {
     final persistedVideoPath =
         await _persistSegmentToRecordingsDirectory(videoPath);
+    if (!await _isSegmentFileReady(persistedVideoPath)) {
+      _log('Skipping segment registration due to unreadable file: '
+          '$persistedVideoPath');
+      return;
+    }
 
     _currentVideoPath = persistedVideoPath;
     _recordingsDirectory ??= File(persistedVideoPath).parent.path;
@@ -1055,9 +1198,35 @@ class CameraProvider extends ChangeNotifier {
     }
 
     if (Platform.isAndroid) {
-      unawaited(_scanMediaFile(persistedVideoPath));
+      if (deferMaintenance) {
+        Future<void>.delayed(const Duration(milliseconds: 700), () {
+          unawaited(_scanMediaFile(persistedVideoPath));
+        });
+      } else {
+        unawaited(_scanMediaFile(persistedVideoPath));
+      }
     }
-    await _enforceRecordingRetention();
+
+    if (deferMaintenance) {
+      _queueDeferredMaintenance();
+    } else {
+      await _enforceRecordingRetention(includeTelemetryPrune: true);
+    }
+  }
+
+  void _queueDeferredMaintenance() {
+    _deferredMaintenanceTimer?.cancel();
+    _deferredMaintenanceTimer = Timer(const Duration(seconds: 2), () async {
+      if (_isDeferredMaintenanceRunning || _isStoppingRecording) {
+        return;
+      }
+      _isDeferredMaintenanceRunning = true;
+      try {
+        await _enforceRecordingRetention(includeTelemetryPrune: false);
+      } finally {
+        _isDeferredMaintenanceRunning = false;
+      }
+    });
   }
 
   bool _isVideoFilePath(String path) {
@@ -1068,7 +1237,9 @@ class CameraProvider extends ChangeNotifier {
         lower.endsWith('.avi');
   }
 
-  Future<void> _enforceRecordingRetention() async {
+  Future<void> _enforceRecordingRetention({
+    required bool includeTelemetryPrune,
+  }) async {
     final recordingsDirectoryPath = _recordingsDirectory;
     if (recordingsDirectoryPath == null || recordingsDirectoryPath.isEmpty) {
       return;
@@ -1076,6 +1247,13 @@ class CameraProvider extends ChangeNotifier {
 
     final recordingsDir = Directory(recordingsDirectoryPath);
     if (!await recordingsDir.exists()) {
+      return;
+    }
+
+    if (_sessionSegmentPaths.length <= _maxRollingSegments) {
+      if (includeTelemetryPrune) {
+        await _pruneOrphanTelemetryFiles(recordingsDir);
+      }
       return;
     }
 
@@ -1128,7 +1306,9 @@ class CameraProvider extends ChangeNotifier {
       }
     }
 
-    await _pruneOrphanTelemetryFiles(recordingsDir);
+    if (includeTelemetryPrune) {
+      await _pruneOrphanTelemetryFiles(recordingsDir);
+    }
   }
 
   Future<void> _pruneOrphanTelemetryFiles(Directory recordingsDir) async {
@@ -1350,7 +1530,7 @@ class CameraProvider extends ChangeNotifier {
 
       if (cacheVideoPath != null && cacheVideoPath.isNotEmpty) {
         _log('Video stop candidate path: $cacheVideoPath');
-        _log('File exists: ${await File(cacheVideoPath).exists()}');
+        _log('File ready: ${await _isSegmentFileReady(cacheVideoPath)}');
 
         if (!_sessionSegmentPaths.contains(cacheVideoPath)) {
           await _registerCompletedSegment(cacheVideoPath);
@@ -1359,9 +1539,9 @@ class CameraProvider extends ChangeNotifier {
         }
       }
 
-      final finalVideoPath = _currentVideoPath ??
-          (cacheVideoPath?.isNotEmpty == true ? cacheVideoPath : null) ??
-          (_sessionSegmentPaths.isNotEmpty ? _sessionSegmentPaths.last : null);
+      final finalVideoPath = await _resolveReadyFinalVideoPath(
+        cacheVideoPath: cacheVideoPath,
+      );
       _log('Final persisted video path: $finalVideoPath');
 
       // Keep original output paths and export to gallery asynchronously.
@@ -1369,7 +1549,7 @@ class CameraProvider extends ChangeNotifier {
         _enqueueDeferredGalleryExport(List<String>.from(_sessionSegmentPaths));
       }
 
-      await _enforceRecordingRetention();
+      await _enforceRecordingRetention(includeTelemetryPrune: true);
 
       notifyListeners();
       return finalVideoPath;
@@ -1478,6 +1658,7 @@ class CameraProvider extends ChangeNotifier {
   @override
   void dispose() {
     _segmentTimer?.cancel();
+    _deferredMaintenanceTimer?.cancel();
     _timerStream?.cancel();
     _timerController.close();
     _controller?.dispose();

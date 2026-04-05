@@ -44,6 +44,8 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
   List<int> _incidentMarkerMs = const <int>[];
   List<_MissingSegmentRange> _missingSegmentRanges =
       const <_MissingSegmentRange>[];
+  bool _hasShownInitializationWarning = false;
+  bool _hasShownRuntimeTrailingWarning = false;
   Offset? _timelineTapStartLocal;
   bool _timelineTapMoved = false;
 
@@ -90,40 +92,56 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
   Future<void> _initializePlayback() async {
     final declaredPaths = _orderedDeclaredSegmentPaths();
 
-    _segmentPaths.clear();
-    for (final path in declaredPaths) {
-      final file = File(path);
-      if (await file.exists()) {
-        _segmentPaths.add(path);
-      }
-    }
-
-    if (_segmentPaths.isEmpty) {
-      setState(() {
-        _isLoading = false;
-      });
-      return;
-    }
-
-    _segmentDurations.clear();
-    final validPaths = <String>[];
+    final playablePaths = <String>[];
+    final playableDurations = <Duration>[];
     final availableDurationsByPath = <String, Duration>{};
-    for (final path in _segmentPaths) {
-      final duration = await _probeDuration(path);
-      if (duration > Duration.zero) {
-        validPaths.add(path);
-        _segmentDurations.add(duration);
-        availableDurationsByPath[path] = duration;
+    var missingSegmentsCount = 0;
+    var unreadableSegmentsCount = 0;
+    var unreadableTrailingSegmentsCount = 0;
+
+    for (var index = 0; index < declaredPaths.length; index++) {
+      final path = declaredPaths[index];
+      final file = File(path);
+      if (!await file.exists()) {
+        missingSegmentsCount++;
+        continue;
       }
+
+      final isTrailingSegment = index == declaredPaths.length - 1;
+      final probe = await _probeSegmentDuration(
+        path,
+        retryOnFailure: isTrailingSegment,
+      );
+
+      if (probe.duration > Duration.zero) {
+        playablePaths.add(path);
+        playableDurations.add(probe.duration);
+        availableDurationsByPath[path] = probe.duration;
+        continue;
+      }
+
+      unreadableSegmentsCount++;
+      if (isTrailingSegment) {
+        unreadableTrailingSegmentsCount++;
+      }
+      debugPrint(
+        'Ride playback: skipped unreadable segment $path (${probe.error ?? 'unknown-error'})',
+      );
     }
+
     _segmentPaths
       ..clear()
-      ..addAll(validPaths);
+      ..addAll(playablePaths);
+    _segmentDurations
+      ..clear()
+      ..addAll(playableDurations);
 
     if (_segmentPaths.isEmpty) {
-      if (!mounted) {
-        return;
-      }
+      _showInitializationWarning(
+        missingSegmentsCount: missingSegmentsCount,
+        unreadableSegmentsCount: unreadableSegmentsCount,
+        unreadableTrailingSegmentsCount: unreadableTrailingSegmentsCount,
+      );
       setState(() {
         _isLoading = false;
       });
@@ -214,6 +232,46 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
     setState(() {
       _isLoading = false;
     });
+    _showInitializationWarning(
+      missingSegmentsCount: missingSegmentsCount,
+      unreadableSegmentsCount: unreadableSegmentsCount,
+      unreadableTrailingSegmentsCount: unreadableTrailingSegmentsCount,
+    );
+  }
+
+  void _showInitializationWarning({
+    required int missingSegmentsCount,
+    required int unreadableSegmentsCount,
+    required int unreadableTrailingSegmentsCount,
+  }) {
+    if (!mounted || _hasShownInitializationWarning) {
+      return;
+    }
+    if (missingSegmentsCount <= 0 && unreadableSegmentsCount <= 0) {
+      return;
+    }
+
+    _hasShownInitializationWarning = true;
+    final details = <String>[];
+    if (missingSegmentsCount > 0) {
+      details.add('$missingSegmentsCount missing');
+    }
+    if (unreadableSegmentsCount > 0) {
+      details.add('$unreadableSegmentsCount unreadable');
+    }
+
+    final trailingHint = unreadableTrailingSegmentsCount > 0
+        ? ' Last segment was retried once and skipped.'
+        : '';
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          'Some ride segments are unavailable (${details.join(', ')}). Playback is running in incomplete mode.$trailingHint',
+        ),
+        duration: const Duration(seconds: 4),
+      ),
+    );
   }
 
   List<String> _orderedDeclaredSegmentPaths() {
@@ -391,16 +449,71 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
     return List<_MissingSegmentRange>.unmodifiable(merged);
   }
 
-  Future<Duration> _probeDuration(String path) async {
+  Future<_SegmentProbeResult> _probeDurationOnce(String path) async {
     final probe = VideoPlayerController.file(File(path));
     try {
       await probe.initialize();
-      return probe.value.duration;
-    } catch (_) {
-      return Duration.zero;
+      final duration = probe.value.duration;
+      if (duration > Duration.zero) {
+        return _SegmentProbeResult(duration: duration);
+      }
+      return const _SegmentProbeResult(
+        duration: Duration.zero,
+        error: 'duration-is-zero',
+      );
+    } catch (e) {
+      return _SegmentProbeResult(duration: Duration.zero, error: e.toString());
     } finally {
       await probe.dispose();
     }
+  }
+
+  Future<_SegmentProbeResult> _probeSegmentDuration(
+    String path, {
+    required bool retryOnFailure,
+  }) async {
+    final firstAttempt = await _probeDurationOnce(path);
+    if (firstAttempt.duration > Duration.zero || !retryOnFailure) {
+      return firstAttempt;
+    }
+
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+    final secondAttempt = await _probeDurationOnce(path);
+    if (secondAttempt.duration > Duration.zero) {
+      return secondAttempt;
+    }
+
+    return _SegmentProbeResult(
+      duration: Duration.zero,
+      error: secondAttempt.error ?? firstAttempt.error,
+    );
+  }
+
+  Future<VideoPlayerController?> _initializeSegmentController(
+    String path, {
+    required bool retryOnFailure,
+  }) async {
+    Future<VideoPlayerController?> tryInitializeOnce() async {
+      final controller = VideoPlayerController.file(File(path));
+      try {
+        await controller.initialize();
+        return controller;
+      } catch (e) {
+        debugPrint(
+          'Ride playback: failed loading segment $path (${e.toString()})',
+        );
+        await _stopAndDisposeController(controller);
+        return null;
+      }
+    }
+
+    final firstAttempt = await tryInitializeOnce();
+    if (firstAttempt != null || !retryOnFailure) {
+      return firstAttempt;
+    }
+
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+    return tryInitializeOnce();
   }
 
   Future<bool> _loadSegment({
@@ -421,9 +534,15 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
       _lastKnownGlobalPosition = _globalPosition();
     }
 
-    final controller = VideoPlayerController.file(File(_segmentPaths[index]));
+    final retryOnFailure = index == _segmentPaths.length - 1;
+    final controller = await _initializeSegmentController(
+      _segmentPaths[index],
+      retryOnFailure: retryOnFailure,
+    );
+    if (controller == null) {
+      return false;
+    }
     try {
-      await controller.initialize();
       if (_isDisposing) {
         await _stopAndDisposeController(controller);
         return false;
@@ -520,6 +639,9 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
         if (loaded) {
           return;
         }
+        if (candidate == _segmentPaths.length - 1) {
+          _showRuntimeTrailingSegmentWarning();
+        }
         candidate++;
       }
       await _stopPlayback();
@@ -548,6 +670,21 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
       // Best effort pause before dispose.
     }
     await controller.dispose();
+  }
+
+  void _showRuntimeTrailingSegmentWarning() {
+    if (!mounted || _hasShownRuntimeTrailingWarning) {
+      return;
+    }
+    _hasShownRuntimeTrailingWarning = true;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text(
+          'Final segment could not be opened after retry. Playback continued without it.',
+        ),
+        duration: Duration(seconds: 4),
+      ),
+    );
   }
 
   Duration _globalPosition() {
@@ -1826,4 +1963,14 @@ class _SegmentSeekTarget {
 
   final int segmentIndex;
   final Duration localPosition;
+}
+
+class _SegmentProbeResult {
+  const _SegmentProbeResult({
+    required this.duration,
+    this.error,
+  });
+
+  final Duration duration;
+  final String? error;
 }

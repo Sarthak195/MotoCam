@@ -373,12 +373,17 @@ class TelemetryProvider extends ChangeNotifier {
       segmentPaths: segmentPaths,
       fallbackVideoPath: canonicalVideoPath,
     );
-    final resolvedSegmentPaths = _filterPathsInDirectory(
+    var resolvedSegmentPaths = _filterPathsInDirectory(
       paths: normalizedSegmentPaths,
       directoryPath: canonicalStorageDirectory,
     );
+    resolvedSegmentPaths = await _filterExistingPathsInOrder(
+      paths: resolvedSegmentPaths,
+    );
     if (resolvedSegmentPaths.isEmpty && canonicalVideoPath.isNotEmpty) {
-      resolvedSegmentPaths.add(canonicalVideoPath);
+      if (await File(canonicalVideoPath).exists()) {
+        resolvedSegmentPaths.add(canonicalVideoPath);
+      }
     }
     final resolvedLockedPaths = _normalizeLockedPaths(
       lockedSegmentPaths: lockedSegmentPaths,
@@ -418,8 +423,10 @@ class TelemetryProvider extends ChangeNotifier {
       canonicalVideoPath: canonicalVideoPath,
       segmentPaths: resolvedSegmentPaths,
     );
-    final telemetryFile = File(telemetryPath);
-    await telemetryFile.writeAsString(jsonEncode(telemetryPayload));
+    await _writeTelemetryAtomically(
+      telemetryPath: telemetryPath,
+      payload: telemetryPayload,
+    );
 
     _activeRideSamples.clear();
     _rideSessionId = null;
@@ -552,6 +559,49 @@ class TelemetryProvider extends ChangeNotifier {
       }
     }
     return filtered;
+  }
+
+  Future<List<String>> _filterExistingPathsInOrder({
+    required List<String> paths,
+  }) async {
+    final existing = <String>[];
+    for (final path in paths) {
+      if (await File(path).exists()) {
+        existing.add(path);
+      } else {
+        debugPrint('Telemetry: dropping missing segment path $path');
+      }
+    }
+    return existing;
+  }
+
+  Future<void> _writeTelemetryAtomically({
+    required String telemetryPath,
+    required Map<String, dynamic> payload,
+  }) async {
+    final telemetryFile = File(telemetryPath);
+    final parent = telemetryFile.parent;
+    if (!await parent.exists()) {
+      await parent.create(recursive: true);
+    }
+
+    final tempPath = '$telemetryPath.tmp';
+    final tempFile = File(tempPath);
+    final encodedPayload = jsonEncode(payload);
+
+    await tempFile.writeAsString(encodedPayload, flush: true);
+
+    try {
+      if (await telemetryFile.exists()) {
+        await telemetryFile.delete();
+      }
+      await tempFile.rename(telemetryPath);
+    } catch (_) {
+      await tempFile.copy(telemetryPath);
+      if (await tempFile.exists()) {
+        await tempFile.delete();
+      }
+    }
   }
 
   bool _isPathInsideDirectory(String filePath, String directoryPath) {
