@@ -7,6 +7,7 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:path_provider/path_provider.dart';
 import 'dart:io';
 import 'dart:async';
+import 'dart:convert';
 
 enum RecordingState { idle, recording, paused, stopped }
 
@@ -32,9 +33,9 @@ class CameraProvider extends ChangeNotifier {
   CameraProvider({this.enableDebugLogging = false});
 
   static const platform = MethodChannel('com.example.motocam/media');
-  static const String _galleryRelativePath = 'Movies/MotoCam/Videos';
+  static const String _galleryRelativePath = 'Movies/MotoCam/Recordings';
   static const String _androidPublicGalleryDirectory =
-      '/storage/emulated/0/Movies/MotoCam/Videos';
+      '/storage/emulated/0/Movies/MotoCam/Recordings';
 
   CameraController? _controller;
   RecordingState _state = RecordingState.idle;
@@ -102,6 +103,7 @@ class CameraProvider extends ChangeNotifier {
   String get activeCameraName => _activeCameraName;
   List<CameraDescription> get discoveredCameras =>
       List.unmodifiable(_availableCameras);
+  int get segmentDurationSeconds => _segmentDuration.inSeconds;
   int get segmentDurationMinutes => _segmentDuration.inMinutes;
   int get maxRollingSegments => _maxRollingSegments;
   List<String> get lastSessionSegmentPaths =>
@@ -125,6 +127,7 @@ class CameraProvider extends ChangeNotifier {
           .toList(),
     );
   }
+
   Set<ResolutionPreset> get knownUnsupportedResolutionPresets {
     if (_activeCameraName.isEmpty) {
       return const <ResolutionPreset>{};
@@ -140,6 +143,24 @@ class CameraProvider extends ChangeNotifier {
     if (enableDebugLogging) {
       debugPrint('[MotoCam] $message');
     }
+  }
+
+  bool _isPermissionGranted(PermissionStatus status) {
+    return status.isGranted || status.isLimited;
+  }
+
+  Future<bool> _hasAndroidPublicStorageAccess() async {
+    if (!Platform.isAndroid) {
+      return true;
+    }
+
+    final manageStorageStatus = await Permission.manageExternalStorage.status;
+    if (manageStorageStatus.isGranted) {
+      return true;
+    }
+
+    final legacyStorageStatus = await Permission.storage.status;
+    return _isPermissionGranted(legacyStorageStatus);
   }
 
   static ResolutionPreset presetForResolution(int resolution) {
@@ -170,7 +191,8 @@ class CameraProvider extends ChangeNotifier {
     }
   }
 
-  ResolutionPreset resolvePresetForRequestedResolution(int requestedResolution) {
+  ResolutionPreset resolvePresetForRequestedResolution(
+      int requestedResolution) {
     final requestedPreset = presetForResolution(requestedResolution);
     final unsupported = knownUnsupportedResolutionPresets;
     if (!unsupported.contains(requestedPreset)) {
@@ -263,6 +285,7 @@ class CameraProvider extends ChangeNotifier {
     int? videoBitrateBps,
     bool? audioEnabled,
     String? preferredCameraName,
+    int? segmentDurationSeconds,
     int? segmentDurationMinutes,
     int? maxRollingSegments,
   }) async {
@@ -285,7 +308,10 @@ class CameraProvider extends ChangeNotifier {
       if (preferredCameraName != null) {
         _preferredCameraName = preferredCameraName.trim();
       }
-      if (segmentDurationMinutes != null) {
+      if (segmentDurationSeconds != null) {
+        _segmentDuration =
+            Duration(seconds: segmentDurationSeconds.clamp(5, 600));
+      } else if (segmentDurationMinutes != null) {
         _segmentDuration =
             Duration(minutes: segmentDurationMinutes.clamp(1, 10));
       }
@@ -315,14 +341,21 @@ class CameraProvider extends ChangeNotifier {
           ? await Permission.microphone.request()
           : PermissionStatus.granted;
       if (Platform.isAndroid) {
+        await Permission.manageExternalStorage.request();
+        await Permission.storage.request();
         await Permission.videos.request();
         await Permission.notification.request();
       } else {
         await Permission.storage.request();
       }
 
-      if (cameraStatus.isDenied || microphoneStatus.isDenied) {
-        _log('Camera or microphone permission denied');
+      final hasStoragePermission =
+          !Platform.isAndroid || await _hasAndroidPublicStorageAccess();
+
+      if (!_isPermissionGranted(cameraStatus) ||
+          !_isPermissionGranted(microphoneStatus) ||
+          !hasStoragePermission) {
+        _log('Camera, microphone, or public storage permission denied');
         _isInitialized = false;
         notifyListeners();
         return;
@@ -330,6 +363,12 @@ class CameraProvider extends ChangeNotifier {
 
       // Set up recordings directory
       await _setupRecordingsDirectory();
+      if (_recordingsDirectory == null || _recordingsDirectory!.isEmpty) {
+        _log('Recordings directory is unavailable; camera init aborted.');
+        _isInitialized = false;
+        notifyListeners();
+        return;
+      }
 
       final cameras = await getAvailableCameras(refresh: true);
       if (cameras.isEmpty) {
@@ -436,7 +475,7 @@ class CameraProvider extends ChangeNotifier {
     required int videoBitrateBps,
     required bool audioEnabled,
     required String preferredCameraName,
-    required int segmentDurationMinutes,
+    required int segmentDurationSeconds,
     required int maxRollingSegments,
   }) async {
     if (isRecording) {
@@ -447,10 +486,10 @@ class CameraProvider extends ChangeNotifier {
     final hasChanged = _resolutionPreset != resolutionPreset ||
         _recordingFps != recordingFps ||
         _videoBitrateBps != videoBitrateBps ||
-      _audioEnabled != audioEnabled ||
-      _preferredCameraName != preferredCameraName.trim() ||
-      _segmentDuration.inMinutes != segmentDurationMinutes ||
-      _maxRollingSegments != maxRollingSegments;
+        _audioEnabled != audioEnabled ||
+        _preferredCameraName != preferredCameraName.trim() ||
+        _segmentDuration.inSeconds != segmentDurationSeconds ||
+        _maxRollingSegments != maxRollingSegments;
 
     if (!hasChanged) {
       return true;
@@ -461,7 +500,7 @@ class CameraProvider extends ChangeNotifier {
     _videoBitrateBps = videoBitrateBps;
     _audioEnabled = audioEnabled;
     _preferredCameraName = preferredCameraName.trim();
-    _segmentDuration = Duration(minutes: segmentDurationMinutes.clamp(1, 10));
+    _segmentDuration = Duration(seconds: segmentDurationSeconds.clamp(5, 600));
     _maxRollingSegments = maxRollingSegments.clamp(1, 120);
     await initializeCamera();
     return _isInitialized;
@@ -483,7 +522,11 @@ class CameraProvider extends ChangeNotifier {
   ) {
     final startIndex = _resolutionFallbackOrder.indexOf(requested);
     if (startIndex < 0) {
-      return const <ResolutionPreset>[ResolutionPreset.high, ResolutionPreset.medium, ResolutionPreset.low];
+      return const <ResolutionPreset>[
+        ResolutionPreset.high,
+        ResolutionPreset.medium,
+        ResolutionPreset.low
+      ];
     }
     return _resolutionFallbackOrder.sublist(startIndex);
   }
@@ -497,16 +540,16 @@ class CameraProvider extends ChangeNotifier {
 
   void _markResolutionUnsupported(String cameraName, ResolutionPreset preset) {
     final key = _resolutionSupportCacheKey(cameraName);
-    final unsupported =
-        Set<ResolutionPreset>.from(_unsupportedResolutionCache[key] ?? <ResolutionPreset>{});
+    final unsupported = Set<ResolutionPreset>.from(
+        _unsupportedResolutionCache[key] ?? <ResolutionPreset>{});
     unsupported.add(preset);
     _unsupportedResolutionCache[key] = unsupported;
   }
 
   void _markResolutionSupported(String cameraName, ResolutionPreset preset) {
     final key = _resolutionSupportCacheKey(cameraName);
-    final unsupported =
-        Set<ResolutionPreset>.from(_unsupportedResolutionCache[key] ?? <ResolutionPreset>{});
+    final unsupported = Set<ResolutionPreset>.from(
+        _unsupportedResolutionCache[key] ?? <ResolutionPreset>{});
     if (unsupported.remove(preset)) {
       _unsupportedResolutionCache[key] = unsupported;
     }
@@ -545,7 +588,11 @@ class CameraProvider extends ChangeNotifier {
     );
     try {
       await controller.initialize();
-      await controller.lockCaptureOrientation(DeviceOrientation.portraitUp);
+      try {
+        await controller.lockCaptureOrientation(DeviceOrientation.portraitUp);
+      } catch (lockError) {
+        _log('Capture orientation lock skipped on this device: $lockError');
+      }
       return controller;
     } catch (e) {
       _log('Camera init failed for preset $preset at ${fps}fps: $e');
@@ -586,9 +633,35 @@ class CameraProvider extends ChangeNotifier {
 
   // Set up recordings directory
   Future<void> _setupRecordingsDirectory() async {
+    if (Platform.isAndroid) {
+      final hasStorageAccess = await _hasAndroidPublicStorageAccess();
+      if (!hasStorageAccess) {
+        _recordingsDirectory = null;
+        _log(
+            'Missing Android public storage access for $_androidPublicGalleryDirectory');
+        return;
+      }
+
+      try {
+        final recordingsDir = Directory(_androidPublicGalleryDirectory);
+        if (!await recordingsDir.exists()) {
+          await recordingsDir.create(recursive: true);
+          _log('Created Android recordings directory: ${recordingsDir.path}');
+        } else {
+          _log('Android recordings directory exists: ${recordingsDir.path}');
+        }
+        _recordingsDirectory = recordingsDir.path;
+        _log('Recordings directory set to: $_recordingsDirectory');
+      } catch (e) {
+        _recordingsDirectory = null;
+        _log('Failed to initialize Android recordings directory: $e');
+      }
+      return;
+    }
+
     try {
       final Directory baseDirectory;
-      if (Platform.isAndroid || Platform.isIOS) {
+      if (Platform.isIOS) {
         baseDirectory = await getApplicationDocumentsDirectory();
       } else {
         baseDirectory = await getApplicationSupportDirectory();
@@ -629,8 +702,8 @@ class CameraProvider extends ChangeNotifier {
   String _normalizePath(String path) {
     var normalized = path.replaceAll('\\', Platform.pathSeparator);
     normalized = normalized.replaceAll('/', Platform.pathSeparator);
-    while (normalized.length > 1 &&
-        normalized.endsWith(Platform.pathSeparator)) {
+    while (
+        normalized.length > 1 && normalized.endsWith(Platform.pathSeparator)) {
       normalized = normalized.substring(0, normalized.length - 1);
     }
     return Platform.isWindows ? normalized.toLowerCase() : normalized;
@@ -662,9 +735,8 @@ class CameraProvider extends ChangeNotifier {
         ? 'segment_${DateTime.now().millisecondsSinceEpoch}.mp4'
         : fileName;
     final dotIndex = resolvedName.lastIndexOf('.');
-    final baseName = dotIndex <= 0
-        ? resolvedName
-        : resolvedName.substring(0, dotIndex);
+    final baseName =
+        dotIndex <= 0 ? resolvedName : resolvedName.substring(0, dotIndex);
     final extension = dotIndex <= 0 ? '' : resolvedName.substring(dotIndex);
 
     var suffix = 0;
@@ -750,7 +822,8 @@ class CameraProvider extends ChangeNotifier {
       _elapsedTime = Duration.zero;
 
       _log('Starting recording...');
-      _log('Recording segments will be captured in ~5 minute chunks');
+      _log(
+          'Recording segments will be captured every ${_segmentDuration.inSeconds}s');
 
       final started = await _startVideoRecordingWithFallback();
       if (!started) {
@@ -793,7 +866,8 @@ class CameraProvider extends ChangeNotifier {
       await currentController.startVideoRecording();
       return true;
     } catch (e) {
-      _log('startVideoRecording failed at $_resolutionPreset/${_recordingFps}fps: $e');
+      _log(
+          'startVideoRecording failed at $_resolutionPreset/${_recordingFps}fps: $e');
     }
 
     final activeCamera = await _resolveActiveCameraDescription();
@@ -825,17 +899,20 @@ class CameraProvider extends ChangeNotifier {
       _resolutionPreset = candidatePreset;
       _recordingFps = candidateFps;
       _markResolutionSupported(activeCamera.name, candidatePreset);
-      if (previousController != null && !identical(previousController, candidateController)) {
+      if (previousController != null &&
+          !identical(previousController, candidateController)) {
         await previousController.dispose();
       }
       notifyListeners();
 
       try {
         await candidateController.startVideoRecording();
-        _log('Recording fallback succeeded at $_resolutionPreset/${_recordingFps}fps.');
+        _log(
+            'Recording fallback succeeded at $_resolutionPreset/${_recordingFps}fps.');
         return true;
       } catch (e) {
-        _log('Recording fallback failed at $candidatePreset/${candidateFps}fps: $e');
+        _log(
+            'Recording fallback failed at $candidatePreset/${candidateFps}fps: $e');
         _markResolutionUnsupported(activeCamera.name, candidatePreset);
       }
     }
@@ -877,7 +954,8 @@ class CameraProvider extends ChangeNotifier {
 
     _isRollingSegment = true;
     try {
-      _log('Rolling recording segment after ${_segmentDuration.inMinutes} minutes');
+      _log(
+          'Rolling recording segment after ${_segmentDuration.inSeconds} seconds');
       final file = await _controller!.stopVideoRecording();
       await _registerCompletedSegment(file.path);
       if (!_isStoppingRecording) {
@@ -954,8 +1032,8 @@ class CameraProvider extends ChangeNotifier {
     }
 
     while (_sessionSegmentPaths.length > _maxRollingSegments) {
-      final removableIndex =
-          _sessionSegmentPaths.indexWhere((path) => !_lockedSegmentPaths.contains(path));
+      final removableIndex = _sessionSegmentPaths
+          .indexWhere((path) => !_lockedSegmentPaths.contains(path));
       if (removableIndex < 0) {
         _log(
             'Loop limit exceeded, but all segments are locked. Skipping overwrite for safety.');
@@ -971,17 +1049,126 @@ class CameraProvider extends ChangeNotifier {
           await oldestFile.delete();
           _log('Deleted oldest segment due to rolling limit: $oldestPath');
         }
-        final dotIndex = oldestPath.lastIndexOf('.');
-        final telemetryPath = dotIndex <= 0
-            ? '$oldestPath.telemetry.json'
-            : '${oldestPath.substring(0, dotIndex)}.telemetry.json';
-        final telemetryFile = File(telemetryPath);
-        if (await telemetryFile.exists()) {
-          await telemetryFile.delete();
-          _log('Deleted telemetry for rolled-out segment: $telemetryPath');
-        }
       } catch (e) {
         _log('Failed deleting old rolling segment: $e');
+      }
+    }
+
+    if (Platform.isAndroid) {
+      unawaited(_scanMediaFile(persistedVideoPath));
+    }
+    await _enforceRecordingRetention();
+  }
+
+  bool _isVideoFilePath(String path) {
+    final lower = path.toLowerCase();
+    return lower.endsWith('.mp4') ||
+        lower.endsWith('.mov') ||
+        lower.endsWith('.mkv') ||
+        lower.endsWith('.avi');
+  }
+
+  Future<void> _enforceRecordingRetention() async {
+    final recordingsDirectoryPath = _recordingsDirectory;
+    if (recordingsDirectoryPath == null || recordingsDirectoryPath.isEmpty) {
+      return;
+    }
+
+    final recordingsDir = Directory(recordingsDirectoryPath);
+    if (!await recordingsDir.exists()) {
+      return;
+    }
+
+    final videoFiles = <File>[];
+    await for (final entity
+        in recordingsDir.list(recursive: true, followLinks: false)) {
+      if (entity is! File || !_isVideoFilePath(entity.path)) {
+        continue;
+      }
+      videoFiles.add(entity);
+    }
+
+    if (videoFiles.length > _maxRollingSegments) {
+      videoFiles.sort((a, b) {
+        final aTime = a.statSync().modified;
+        final bTime = b.statSync().modified;
+        return aTime.compareTo(bTime);
+      });
+
+      final removeCount = videoFiles.length - _maxRollingSegments;
+      final removedPaths = <String>{};
+
+      for (final file in videoFiles.take(removeCount)) {
+        final path = file.path;
+        try {
+          if (await file.exists()) {
+            await file.delete();
+            removedPaths.add(path);
+            _log('Deleted old recording due to retention policy: $path');
+          }
+        } catch (e) {
+          _log('Failed deleting old recording $path: $e');
+        }
+      }
+
+      if (removedPaths.isNotEmpty) {
+        _sessionSegmentPaths.removeWhere((path) => removedPaths.contains(path));
+        _lockedSegmentPaths.removeWhere((path) => removedPaths.contains(path));
+        _sessionSegmentTimeline
+            .removeWhere((entry) => removedPaths.contains(entry.path));
+        _pendingGalleryExports
+            .removeWhere((path) => removedPaths.contains(path));
+
+        final currentPath = _currentVideoPath;
+        if (currentPath != null && removedPaths.contains(currentPath)) {
+          _currentVideoPath = _sessionSegmentPaths.isNotEmpty
+              ? _sessionSegmentPaths.last
+              : null;
+        }
+      }
+    }
+
+    await _pruneOrphanTelemetryFiles(recordingsDir);
+  }
+
+  Future<void> _pruneOrphanTelemetryFiles(Directory recordingsDir) async {
+    await for (final entity
+        in recordingsDir.list(recursive: true, followLinks: false)) {
+      if (entity is! File ||
+          !entity.path.toLowerCase().endsWith('.telemetry.json')) {
+        continue;
+      }
+
+      try {
+        final raw = await entity.readAsString();
+        final json = jsonDecode(raw) as Map<String, dynamic>;
+        final segmentPaths =
+            (json['segmentPaths'] as List<dynamic>? ?? const <dynamic>[])
+                .map((value) => value.toString().trim())
+                .where((path) => path.isNotEmpty)
+                .toList();
+
+        if (segmentPaths.isEmpty) {
+          await entity.delete();
+          _log('Deleted telemetry with no segment paths: ${entity.path}');
+          continue;
+        }
+
+        var hasAnyExistingSegment = false;
+        for (final segmentPath in segmentPaths) {
+          if (await File(segmentPath).exists()) {
+            hasAnyExistingSegment = true;
+            break;
+          }
+        }
+
+        if (!hasAnyExistingSegment) {
+          await entity.delete();
+          _log(
+              'Deleted telemetry with no remaining segment files: ${entity.path}');
+        }
+      } catch (_) {
+        // Skip malformed telemetry cleanup to avoid accidental data loss.
       }
     }
   }
@@ -1015,7 +1202,23 @@ class CameraProvider extends ChangeNotifier {
       return;
     }
 
-    _pendingGalleryExports.addAll(segmentPaths);
+    for (final rawPath in segmentPaths) {
+      final sourcePath = rawPath.trim();
+      if (sourcePath.isEmpty) {
+        continue;
+      }
+
+      if (_isPathInsideDirectory(sourcePath, _androidPublicGalleryDirectory)) {
+        unawaited(_scanMediaFile(sourcePath));
+      } else {
+        _pendingGalleryExports.add(sourcePath);
+      }
+    }
+
+    if (_pendingGalleryExports.isEmpty) {
+      return;
+    }
+
     if (_isExportingToGallery) {
       return;
     }
@@ -1049,8 +1252,43 @@ class CameraProvider extends ChangeNotifier {
         _log('Deferred gallery export completed: $fileName');
       } catch (e) {
         _log('Deferred export failed, trying media scan fallback: $e');
-        await _scanMediaFile(sourcePath);
+        final fallbackPath =
+            await _copySegmentToAndroidPublicGallery(sourcePath);
+        if (fallbackPath != null) {
+          await _scanMediaFile(fallbackPath);
+        } else {
+          await _scanMediaFile(sourcePath);
+        }
       }
+    }
+  }
+
+  Future<String?> _copySegmentToAndroidPublicGallery(String sourcePath) async {
+    if (!Platform.isAndroid) {
+      return null;
+    }
+
+    final sourceFile = File(sourcePath);
+    if (!await sourceFile.exists()) {
+      return null;
+    }
+
+    try {
+      final galleryDirectory = Directory(_androidPublicGalleryDirectory);
+      if (!await galleryDirectory.exists()) {
+        await galleryDirectory.create(recursive: true);
+      }
+
+      final targetPath = await _buildUniqueSegmentPath(
+        galleryDirectory.path,
+        _fileNameFromPath(sourcePath),
+      );
+      final copied = await sourceFile.copy(targetPath);
+      _log('Copied segment to public gallery fallback: ${copied.path}');
+      return copied.path;
+    } catch (e) {
+      _log('Public gallery fallback copy failed: $e');
+      return null;
     }
   }
 
@@ -1088,27 +1326,63 @@ class CameraProvider extends ChangeNotifier {
       _timerStream?.cancel();
       _timerStream = null;
 
-      final file = await _controller!.stopVideoRecording();
+      String? cacheVideoPath;
+      try {
+        final file = await _controller!.stopVideoRecording();
+        cacheVideoPath = file.path;
+      } on CameraException catch (e) {
+        // Race safety: when recording already stopped at plugin level, preserve
+        // session continuity and let caller persist telemetry for known segments.
+        if (e.code == 'No video is recording') {
+          _log('stopVideoRecording race detected: ${e.description ?? e.code}');
+          if (_sessionSegmentPaths.isNotEmpty) {
+            cacheVideoPath = _sessionSegmentPaths.last;
+          } else {
+            cacheVideoPath = _currentVideoPath;
+          }
+        } else {
+          rethrow;
+        }
+      }
+
       _state = RecordingState.stopped;
       _recordingStartTime = null;
-      final cacheVideoPath = file.path;
 
-      _log('Video recorded to cache: $cacheVideoPath');
-      _log('File exists: ${await File(cacheVideoPath).exists()}');
+      if (cacheVideoPath != null && cacheVideoPath.isNotEmpty) {
+        _log('Video stop candidate path: $cacheVideoPath');
+        _log('File exists: ${await File(cacheVideoPath).exists()}');
 
-      await _registerCompletedSegment(cacheVideoPath);
-      final finalVideoPath = _currentVideoPath ?? cacheVideoPath;
+        if (!_sessionSegmentPaths.contains(cacheVideoPath)) {
+          await _registerCompletedSegment(cacheVideoPath);
+        } else {
+          _currentVideoPath = cacheVideoPath;
+        }
+      }
+
+      final finalVideoPath = _currentVideoPath ??
+          (cacheVideoPath?.isNotEmpty == true ? cacheVideoPath : null) ??
+          (_sessionSegmentPaths.isNotEmpty ? _sessionSegmentPaths.last : null);
       _log('Final persisted video path: $finalVideoPath');
 
       // Keep original output paths and export to gallery asynchronously.
-      _enqueueDeferredGalleryExport(List<String>.from(_sessionSegmentPaths));
+      if (_sessionSegmentPaths.isNotEmpty) {
+        _enqueueDeferredGalleryExport(List<String>.from(_sessionSegmentPaths));
+      }
+
+      await _enforceRecordingRetention();
 
       notifyListeners();
       return finalVideoPath;
     } catch (e) {
+      _state = RecordingState.stopped;
+      _recordingStartTime = null;
+      notifyListeners();
       _log('Error stopping recording: $e');
       _log('Stack trace: ${StackTrace.current}');
-      return null;
+      if (_sessionSegmentPaths.isNotEmpty) {
+        return _sessionSegmentPaths.last;
+      }
+      return _currentVideoPath;
     } finally {
       _isStoppingRecording = false;
     }
@@ -1129,27 +1403,6 @@ class CameraProvider extends ChangeNotifier {
         seenPaths: seenPaths,
         directoryPath: _recordingsDirectory,
       );
-
-      if (Platform.isAndroid) {
-        try {
-          final tempDir = await getTemporaryDirectory();
-          if (!_isPathInsideDirectory(tempDir.path, _recordingsDirectory!)) {
-            await _appendFilesFromDirectory(
-              files: files,
-              seenPaths: seenPaths,
-              directoryPath: tempDir.path,
-            );
-          }
-        } catch (_) {
-          // Best effort only for legacy temp recordings.
-        }
-
-        await _appendFilesFromDirectory(
-          files: files,
-          seenPaths: seenPaths,
-          directoryPath: _androidPublicGalleryDirectory,
-        );
-      }
 
       files.sort((a, b) => File(b.path)
           .statSync()
@@ -1177,7 +1430,8 @@ class CameraProvider extends ChangeNotifier {
         return;
       }
 
-      await for (final entity in dir.list(recursive: true, followLinks: false)) {
+      await for (final entity
+          in dir.list(recursive: true, followLinks: false)) {
         if (entity is! File) {
           continue;
         }

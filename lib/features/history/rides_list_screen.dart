@@ -33,63 +33,21 @@ class _RidesListScreenState extends State<RidesListScreen> {
 				.whereType<File>()
 				.where((file) => file.path.toLowerCase().endsWith('.telemetry.json'))
 				.toList();
-		final videoFiles = recordings
-				.whereType<File>()
-				.where((file) => _isVideoFile(file.path))
-				.toList();
 
 		final rides = <RideRecord>[];
-		final coveredVideoPaths = <String>{};
-		final coveredFileNames = <String>{};
 		for (final telemetryFile in telemetryFiles) {
 			try {
 				final ride = await RideRecord.fromTelemetryFile(telemetryFile);
 				if (ride != null) {
 					rides.add(ride);
-					coveredVideoPaths.add(ride.videoPath);
-					coveredVideoPaths.addAll(ride.segmentPaths);
-					coveredFileNames.add(_fileNameFromPath(ride.videoPath));
-					for (final segmentPath in ride.segmentPaths) {
-						coveredFileNames.add(_fileNameFromPath(segmentPath));
-					}
 				}
 			} catch (_) {
 				// Skip malformed telemetry entries and continue loading others.
 			}
 		}
 
-		for (final videoFile in videoFiles) {
-			final fileName = _fileNameFromPath(videoFile.path);
-			if (coveredVideoPaths.contains(videoFile.path) ||
-						coveredFileNames.contains(fileName)) {
-				continue;
-			}
-
-			final ride = await RideRecord.fromVideoFile(videoFile);
-			rides.add(ride);
-			coveredVideoPaths.add(videoFile.path);
-			coveredFileNames.add(fileName);
-		}
-
 		rides.sort((a, b) => b.createdAt.compareTo(a.createdAt));
 		return rides;
-	}
-
-	bool _isVideoFile(String path) {
-		final lower = path.toLowerCase();
-		return lower.endsWith('.mp4') ||
-				lower.endsWith('.mov') ||
-				lower.endsWith('.mkv') ||
-				lower.endsWith('.avi');
-	}
-
-	String _fileNameFromPath(String path) {
-		final normalized = path.replaceAll('\\', '/');
-		final parts = normalized.split('/');
-		if (parts.isEmpty) {
-			return normalized;
-		}
-		return parts.last;
 	}
 
 	String _formatDuration(Duration duration) {
@@ -175,7 +133,7 @@ class _RidesListScreenState extends State<RidesListScreen> {
 	}
 
 	Widget _buildRideCard(BuildContext context, RideRecord ride) {
-		final hasTelemetry = ride.samples.isNotEmpty;
+		final hasTelemetry = ride.telemetryPath != null;
 		final segmentCount = ride.segmentPaths.length;
 
 		return Card(

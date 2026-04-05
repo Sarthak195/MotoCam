@@ -23,6 +23,10 @@ class PermissionAuditResult {
 class AppPermissionService {
   const AppPermissionService();
 
+  bool _isPermissionGranted(PermissionStatus status) {
+    return status.isGranted || status.isLimited;
+  }
+
   Future<PermissionAuditResult> ensureRequiredPermissions({
     required bool audioEnabled,
   }) async {
@@ -36,7 +40,7 @@ class AppPermissionService {
       required bool required,
     }) async {
       var status = await permission.status;
-      if (status.isGranted || status.isLimited) {
+      if (_isPermissionGranted(status)) {
         return true;
       }
 
@@ -44,7 +48,7 @@ class AppPermissionService {
         status = await permission.request();
       }
 
-      final granted = status.isGranted || status.isLimited;
+      final granted = _isPermissionGranted(status);
       if (granted) {
         return true;
       }
@@ -88,12 +92,29 @@ class AppPermissionService {
         );
       }
 
-      final storagePermission = Platform.isAndroid
-          ? Permission.videos
-          : Permission.storage;
+      var manageStorageStatus = await Permission.manageExternalStorage.status;
+      var legacyStorageStatus = await Permission.storage.status;
+      var hasPublicStorageWrite = manageStorageStatus.isGranted ||
+          _isPermissionGranted(legacyStorageStatus);
+
+      if (!hasPublicStorageWrite) {
+        manageStorageStatus = await Permission.manageExternalStorage.request();
+        legacyStorageStatus = await Permission.storage.request();
+        hasPublicStorageWrite = manageStorageStatus.isGranted ||
+            _isPermissionGranted(legacyStorageStatus);
+      }
+
+      if (!hasPublicStorageWrite) {
+        if (manageStorageStatus.isPermanentlyDenied ||
+            legacyStorageStatus.isPermanentlyDenied) {
+          hasPermanentlyDenied = true;
+        }
+        missingRequired.add('Storage access (Movies/MotoCam/Recordings)');
+      }
+
       await ensure(
-        storagePermission,
-        'Media access (gallery export)',
+        Permission.videos,
+        'Media library access (history visibility)',
         required: false,
       );
 

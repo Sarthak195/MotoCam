@@ -47,11 +47,10 @@ class _RecordingScreenState extends State<RecordingScreen>
   bool _isFetchingDeviceStatus = false;
   bool _isNavigatingHistory = false;
   DeviceStatusSnapshot _deviceStatus = DeviceStatusSnapshot.empty;
-  final Stream<int> _pipBlinkStream =
-      Stream<int>.periodic(
-        const Duration(milliseconds: 700),
-        (tick) => tick,
-      ).asBroadcastStream();
+  final Stream<int> _pipBlinkStream = Stream<int>.periodic(
+    const Duration(milliseconds: 700),
+    (tick) => tick,
+  ).asBroadcastStream();
 
   @override
   void initState() {
@@ -76,56 +75,92 @@ class _RecordingScreenState extends State<RecordingScreen>
       return;
     }
 
-    await _handlePermissionAuditResult(permissionAudit);
-    if (!mounted || permissionAudit.hasBlockingIssues) {
+    final resolvedAudit = await _handlePermissionAuditResult(
+      permissionAudit,
+      audioEnabled: settings.audioEnabled,
+    );
+    if (!mounted || resolvedAudit.hasBlockingIssues) {
       return;
     }
 
     await _initializeCamera();
   }
 
-  Future<void> _handlePermissionAuditResult(
-    PermissionAuditResult audit,
-  ) async {
-    if (audit.hasPermanentlyDenied) {
-      final shouldOpenSettings = await showDialog<bool>(
-            context: context,
-            builder: (dialogContext) {
-              return AlertDialog(
-                title: const Text('Permissions Needed'),
-                content: const Text(
-                  'Some permissions are permanently denied. Open app settings and allow Camera, Location, and related permissions for full recording support.',
-                ),
-                actions: [
-                  TextButton(
-                    onPressed: () => Navigator.of(dialogContext).pop(false),
-                    child: const Text('Later'),
-                  ),
-                  TextButton(
-                    onPressed: () => Navigator.of(dialogContext).pop(true),
-                    child: const Text('Open Settings'),
-                  ),
-                ],
-              );
-            },
-          ) ??
-          false;
+  Future<PermissionAuditResult> _handlePermissionAuditResult(
+    PermissionAuditResult audit, {
+    required bool audioEnabled,
+  }) async {
+    var resolvedAudit = audit;
 
-      if (shouldOpenSettings) {
-        await openAppSettings();
+    if (resolvedAudit.hasBlockingIssues && mounted) {
+      final permissionAction = await showDialog<_PermissionRecoveryAction>(
+        context: context,
+        builder: (dialogContext) {
+          final missing = resolvedAudit.missingRequired.join(', ');
+          final permanentNote = resolvedAudit.hasPermanentlyDenied
+              ? '\n\nSome permissions are permanently denied. Use Open Settings to enable them.'
+              : '';
+          return AlertDialog(
+            title: const Text('Permissions Required'),
+            content: Text(
+              'Recording cannot start until these permissions are granted:\n$missing$permanentNote',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(dialogContext)
+                    .pop(_PermissionRecoveryAction.dismiss),
+                child: const Text('Later'),
+              ),
+              TextButton(
+                onPressed: () => Navigator.of(dialogContext)
+                    .pop(_PermissionRecoveryAction.retryRequest),
+                child: const Text('Request Again'),
+              ),
+              TextButton(
+                onPressed: () => Navigator.of(dialogContext)
+                    .pop(_PermissionRecoveryAction.openSettings),
+                child: const Text('Open Settings'),
+              ),
+            ],
+          );
+        },
+      );
+
+      if (!mounted) {
+        return resolvedAudit;
+      }
+
+      switch (permissionAction) {
+        case _PermissionRecoveryAction.retryRequest:
+          resolvedAudit = await _permissionService.ensureRequiredPermissions(
+            audioEnabled: audioEnabled,
+          );
+          break;
+        case _PermissionRecoveryAction.openSettings:
+          await openAppSettings();
+          if (!mounted) {
+            return resolvedAudit;
+          }
+          resolvedAudit = await _permissionService.ensureRequiredPermissions(
+            audioEnabled: audioEnabled,
+          );
+          break;
+        case _PermissionRecoveryAction.dismiss:
+        case null:
+          break;
       }
     }
 
-    if (!mounted || !audit.hasAnyIssue) {
-      return;
+    if (!mounted || !resolvedAudit.hasAnyIssue) {
+      return resolvedAudit;
     }
 
     final issues = <String>[
-      ...audit.missingRequired,
-      ...audit.missingRecommended,
+      ...resolvedAudit.missingRequired,
+      ...resolvedAudit.missingRecommended,
     ];
-    final message = audit.hasBlockingIssues
-        ? 'Required permissions missing: ${audit.missingRequired.join(', ')}'
+    final message = resolvedAudit.hasBlockingIssues
+        ? 'Required permissions missing: ${resolvedAudit.missingRequired.join(', ')}'
         : 'Recommended for reliable background recording: ${issues.join(', ')}';
 
     ScaffoldMessenger.of(context).showSnackBar(
@@ -134,6 +169,8 @@ class _RecordingScreenState extends State<RecordingScreen>
         duration: const Duration(seconds: 4),
       ),
     );
+
+    return resolvedAudit;
   }
 
   void _startDeviceStatusPolling() {
@@ -215,8 +252,7 @@ class _RecordingScreenState extends State<RecordingScreen>
 
     try {
       final recovered = await camera.recoverRecordingPipeline(
-        reason:
-            'resume-after-background-${backgroundDuration.inSeconds}s',
+        reason: 'resume-after-background-${backgroundDuration.inSeconds}s',
       );
       if (!mounted) {
         return;
@@ -307,8 +343,11 @@ class _RecordingScreenState extends State<RecordingScreen>
       return;
     }
 
-    await _handlePermissionAuditResult(permissionAudit);
-    if (permissionAudit.hasBlockingIssues) {
+    final resolvedAudit = await _handlePermissionAuditResult(
+      permissionAudit,
+      audioEnabled: settings.audioEnabled,
+    );
+    if (resolvedAudit.hasBlockingIssues) {
       return;
     }
 
@@ -382,8 +421,15 @@ class _RecordingScreenState extends State<RecordingScreen>
     }
 
     final hasBlockingIssue = checks.any(
-      (check) => check.isBlocking && check.status == _StartPreflightStatus.failed,
+      (check) =>
+          check.isBlocking && check.status == _StartPreflightStatus.failed,
     );
+    final allRequirementsMet = checks.every(
+      (check) => check.status == _StartPreflightStatus.ok,
+    );
+    if (allRequirementsMet && !hasBlockingIssue) {
+      return true;
+    }
 
     final proceed = await showModalBottomSheet<bool>(
           context: context,
@@ -414,7 +460,9 @@ class _RecordingScreenState extends State<RecordingScreen>
                           ? 'Fix blocking checks before recording.'
                           : 'Preflight checks look good. Start when ready.',
                       style: TextStyle(
-                        color: hasBlockingIssue ? Colors.redAccent : Colors.white70,
+                        color: hasBlockingIssue
+                            ? Colors.redAccent
+                            : Colors.white70,
                         fontSize: 13,
                       ),
                     ),
@@ -450,7 +498,8 @@ class _RecordingScreenState extends State<RecordingScreen>
                             ),
                             subtitle: Text(
                               check.detail,
-                              style: TextStyle(color: color.withValues(alpha: 0.95)),
+                              style: TextStyle(
+                                  color: color.withValues(alpha: 0.95)),
                             ),
                           );
                         },
@@ -507,16 +556,16 @@ class _RecordingScreenState extends State<RecordingScreen>
     final checks = <_StartPreflightCheck>[];
 
     final cameraPermissionStatus = await Permission.camera.status;
-    final hasCameraPermission = cameraPermissionStatus.isGranted ||
-        cameraPermissionStatus.isLimited;
+    final hasCameraPermission =
+        cameraPermissionStatus.isGranted || cameraPermissionStatus.isLimited;
     checks.add(
       _StartPreflightCheck(
         title: 'Camera Permission',
-        detail: hasCameraPermission
-            ? 'Granted'
-            : 'Camera permission is required',
-        status:
-            hasCameraPermission ? _StartPreflightStatus.ok : _StartPreflightStatus.failed,
+        detail:
+            hasCameraPermission ? 'Granted' : 'Camera permission is required',
+        status: hasCameraPermission
+            ? _StartPreflightStatus.ok
+            : _StartPreflightStatus.failed,
         isBlocking: true,
       ),
     );
@@ -582,13 +631,31 @@ class _RecordingScreenState extends State<RecordingScreen>
       ),
     );
 
-    final canWriteMedia = await _verifyRecordingDirectoryWritable(camera);
+    final hasAndroidPublicStorageAccess =
+        !Platform.isAndroid || await _hasAndroidPublicStorageAccess();
+    if (Platform.isAndroid) {
+      checks.add(
+        _StartPreflightCheck(
+          title: 'Storage Permission',
+          detail: hasAndroidPublicStorageAccess
+              ? 'Granted for Movies/MotoCam/Recordings'
+              : 'Grant storage access to save in Movies/MotoCam/Recordings',
+          status: hasAndroidPublicStorageAccess
+              ? _StartPreflightStatus.ok
+              : _StartPreflightStatus.failed,
+          isBlocking: true,
+        ),
+      );
+    }
+
+    final canWriteMedia = hasAndroidPublicStorageAccess &&
+        await _verifyRecordingDirectoryWritable(camera);
     checks.add(
       _StartPreflightCheck(
         title: 'Media Write Access',
         detail: canWriteMedia
             ? 'Recording storage path is writable'
-            : 'Unable to write to recording directory',
+            : 'Unable to write to Movies/MotoCam/Recordings',
         status: canWriteMedia
             ? _StartPreflightStatus.ok
             : _StartPreflightStatus.failed,
@@ -597,7 +664,8 @@ class _RecordingScreenState extends State<RecordingScreen>
     );
 
     if (Platform.isAndroid) {
-      final notificationsGranted = (await Permission.notification.status).isGranted;
+      final notificationsGranted =
+          (await Permission.notification.status).isGranted;
       checks.add(
         _StartPreflightCheck(
           title: 'Foreground Notification',
@@ -661,6 +729,20 @@ class _RecordingScreenState extends State<RecordingScreen>
     return checks;
   }
 
+  Future<bool> _hasAndroidPublicStorageAccess() async {
+    if (!Platform.isAndroid) {
+      return true;
+    }
+
+    final manageStorageStatus = await Permission.manageExternalStorage.status;
+    if (manageStorageStatus.isGranted) {
+      return true;
+    }
+
+    final legacyStorageStatus = await Permission.storage.status;
+    return legacyStorageStatus.isGranted || legacyStorageStatus.isLimited;
+  }
+
   Future<bool> _verifyRecordingDirectoryWritable(CameraProvider camera) async {
     final path = camera.recordingsDirectory;
     if (path == null || path.isEmpty) {
@@ -669,7 +751,11 @@ class _RecordingScreenState extends State<RecordingScreen>
 
     final directory = Directory(path);
     if (!await directory.exists()) {
-      return false;
+      try {
+        await directory.create(recursive: true);
+      } catch (_) {
+        return false;
+      }
     }
 
     final probeFile = File(
@@ -788,21 +874,46 @@ class _RecordingScreenState extends State<RecordingScreen>
 
     _isStoppingRecording = true;
     try {
+      final settings = context.read<AppSettingsProvider>();
+      final recordingSettings = <String, dynamic>{
+        'requestedResolution': settings.recordingResolution,
+        'requestedFps': settings.recordingFps,
+        'requestedBitrateMbps': settings.videoBitrateMbps,
+        'requestedSegmentDurationSeconds': settings.segmentDurationSeconds,
+        'requestedLoopSegmentCount': settings.loopSegmentCount,
+        'requestedAudioEnabled': settings.audioEnabled,
+        'requestedCameraName': settings.selectedCameraName,
+        'requestedIncidentSensitivity': settings.incidentSensitivity.name,
+        'requestedSpeedRefreshMs': settings.speedRefreshMs,
+        'appliedResolution':
+            AppSettingsProvider.fromResolutionPreset(camera.resolutionPreset),
+        'appliedFps': camera.recordingFps,
+        'appliedBitrateMbps': camera.videoBitrateMbps,
+        'appliedAudioEnabled': camera.audioEnabled,
+        'appliedSegmentDurationSeconds': camera.segmentDurationSeconds,
+        'appliedLoopSegmentCount': camera.maxRollingSegments,
+        'appliedCameraName': camera.activeCameraName,
+      };
+
       _recordingTimerSubscription?.cancel();
       _recordingTimerSubscription = null;
       await _backgroundRecordingService.stopForegroundRecording();
 
       final videoPath = await camera.stopRecording();
+      final sessionSegmentPaths = camera.lastSessionSegmentPaths;
+      final resolvedVideoPath = videoPath ??
+          (sessionSegmentPaths.isNotEmpty ? sessionSegmentPaths.last : null);
       if (!mounted) {
         return;
       }
 
-      if (videoPath != null) {
+      if (resolvedVideoPath != null) {
         final telemetryPath = await telemetry.stopRideSessionAndPersist(
-          videoPath,
-          segmentPaths: camera.lastSessionSegmentPaths,
+          resolvedVideoPath,
+          segmentPaths: sessionSegmentPaths,
           lockedSegmentPaths: camera.lockedSegmentPaths,
           segmentTimeline: camera.lastSessionSegmentTimeline,
+          recordingSettings: recordingSettings,
         );
         if (!mounted || !showSuccessMessage) {
           return;
@@ -812,8 +923,8 @@ class _RecordingScreenState extends State<RecordingScreen>
           SnackBar(
             content: Text(
               telemetryPath == null
-                  ? 'Video saved to:\n$videoPath'
-                  : 'Video saved:\n$videoPath\nTelemetry saved:\n$telemetryPath',
+                  ? 'Video saved to:\n$resolvedVideoPath'
+                  : 'Video saved:\n$resolvedVideoPath\nTelemetry saved:\n$telemetryPath',
             ),
             duration: const Duration(seconds: 4),
           ),
@@ -879,7 +990,7 @@ class _RecordingScreenState extends State<RecordingScreen>
       videoBitrateBps: settingsProvider.videoBitrateMbps * 1000 * 1000,
       audioEnabled: settingsProvider.audioEnabled,
       preferredCameraName: settingsProvider.selectedCameraName,
-      segmentDurationMinutes: settingsProvider.segmentMinutes,
+      segmentDurationSeconds: settingsProvider.segmentDurationSeconds,
       maxRollingSegments: settingsProvider.loopSegmentCount,
     );
 
@@ -1037,8 +1148,9 @@ class _RecordingScreenState extends State<RecordingScreen>
                         Text(
                           camera.isRecording ? 'REC' : 'IDLE',
                           style: TextStyle(
-                            color:
-                                camera.isRecording ? Colors.redAccent : Colors.white70,
+                            color: camera.isRecording
+                                ? Colors.redAccent
+                                : Colors.white70,
                             fontSize: 11,
                             fontWeight: FontWeight.w700,
                             letterSpacing: 0.8,
@@ -1133,7 +1245,7 @@ class _RecordingScreenState extends State<RecordingScreen>
     final initialCameraOptions =
         await cameraProvider.getAvailableCameras(refresh: true);
     final initialUnsupportedPresets =
-      cameraProvider.knownUnsupportedResolutionPresets;
+        cameraProvider.knownUnsupportedResolutionPresets;
 
     if (!mounted) {
       return;
@@ -1152,17 +1264,18 @@ class _RecordingScreenState extends State<RecordingScreen>
         int selectedBitrateMbps = settings.videoBitrateMbps;
         String selectedQualityProfileId = settings.qualityProfileId;
         QualityPresetTier selectedPresetTier =
-          AppSettingsProvider.profileById(settings.qualityProfileId)?.tier ??
-            QualityPresetTier.balanced;
+            AppSettingsProvider.profileById(settings.qualityProfileId)?.tier ??
+                QualityPresetTier.balanced;
         bool audioEnabled = settings.audioEnabled;
         int speedRefreshMs = settings.speedRefreshMs;
-        int segmentMinutes = settings.segmentMinutes;
+        int segmentDurationSeconds = settings.segmentDurationSeconds;
         int loopSegmentCount = settings.loopSegmentCount;
         IncidentSensitivity incidentSensitivity = settings.incidentSensitivity;
         List<int> availableFps = List<int>.from(initialFpsOptions);
         final unsupportedResolutionPresets =
             Set<ResolutionPreset>.from(initialUnsupportedPresets);
-        final cameraOptions = List<CameraDescription>.from(initialCameraOptions);
+        final cameraOptions =
+            List<CameraDescription>.from(initialCameraOptions);
         String selectedCameraName = settings.selectedCameraName;
         if (selectedCameraName.isEmpty) {
           selectedCameraName = cameraProvider.activeCameraName;
@@ -1225,7 +1338,8 @@ class _RecordingScreenState extends State<RecordingScreen>
                                 (tier) => DropdownMenuItem<QualityPresetTier>(
                                   value: tier,
                                   child: Text(
-                                      AppSettingsProvider.qualityTierLabel(tier)),
+                                      AppSettingsProvider.qualityTierLabel(
+                                          tier)),
                                 ),
                               )
                               .toList(),
@@ -1233,7 +1347,8 @@ class _RecordingScreenState extends State<RecordingScreen>
                             if (value == null) return;
 
                             final tierProfiles =
-                                AppSettingsProvider.qualityProfilesForTier(value);
+                                AppSettingsProvider.qualityProfilesForTier(
+                                    value);
                             if (tierProfiles.isEmpty) {
                               return;
                             }
@@ -1256,14 +1371,16 @@ class _RecordingScreenState extends State<RecordingScreen>
                               }
                               setModalState(() {
                                 selectedResolution = selectedProfile.resolution;
-                                selectedBitrateMbps = selectedProfile.bitrateMbps;
+                                selectedBitrateMbps =
+                                    selectedProfile.bitrateMbps;
                                 availableFps = List<int>.from(fpsOptions);
-                                if (availableFps.contains(selectedProfile.fps)) {
+                                if (availableFps
+                                    .contains(selectedProfile.fps)) {
                                   selectedFps = selectedProfile.fps;
                                 } else {
                                   selectedFps = availableFps.last;
-                                  selectedQualityProfileId =
-                                      AppSettingsProvider.customQualityProfileId;
+                                  selectedQualityProfileId = AppSettingsProvider
+                                      .customQualityProfileId;
                                 }
                               });
                             }();
@@ -1280,8 +1397,8 @@ class _RecordingScreenState extends State<RecordingScreen>
                               value: AppSettingsProvider.customQualityProfileId,
                               child: Text('Custom'),
                             ),
-                            ...AppSettingsProvider
-                                .qualityProfilesForTier(selectedPresetTier)
+                            ...AppSettingsProvider.qualityProfilesForTier(
+                                    selectedPresetTier)
                                 .map(
                               (profile) => DropdownMenuItem<String>(
                                 value: profile.id,
@@ -1291,19 +1408,22 @@ class _RecordingScreenState extends State<RecordingScreen>
                           ],
                           onChanged: (value) {
                             if (value == null) return;
-                            setModalState(() => selectedQualityProfileId = value);
+                            setModalState(
+                                () => selectedQualityProfileId = value);
 
                             if (value ==
                                 AppSettingsProvider.customQualityProfileId) {
                               return;
                             }
 
-                            final profile = AppSettingsProvider.profileById(value);
+                            final profile =
+                                AppSettingsProvider.profileById(value);
                             if (profile == null) {
                               return;
                             }
 
-                            setModalState(() => selectedPresetTier = profile.tier);
+                            setModalState(
+                                () => selectedPresetTier = profile.tier);
 
                             () async {
                               final fpsOptions = await cameraProvider
@@ -1323,8 +1443,8 @@ class _RecordingScreenState extends State<RecordingScreen>
                                   selectedFps = profile.fps;
                                 } else {
                                   selectedFps = availableFps.last;
-                                  selectedQualityProfileId =
-                                      AppSettingsProvider.customQualityProfileId;
+                                  selectedQualityProfileId = AppSettingsProvider
+                                      .customQualityProfileId;
                                 }
                               });
                             }();
@@ -1334,8 +1454,8 @@ class _RecordingScreenState extends State<RecordingScreen>
                         if (cameraOptions.isNotEmpty) ...[
                           _buildSettingsLabel('Camera lens'),
                           DropdownButtonFormField<String>(
-                            initialValue: cameraOptions
-                                    .any((camera) => camera.name == selectedCameraName)
+                            initialValue: cameraOptions.any((camera) =>
+                                    camera.name == selectedCameraName)
                                 ? selectedCameraName
                                 : cameraOptions.first.name,
                             dropdownColor: const Color(0xFF1B1B1B),
@@ -1344,7 +1464,8 @@ class _RecordingScreenState extends State<RecordingScreen>
                                 .map(
                                   (camera) => DropdownMenuItem<String>(
                                     value: camera.name,
-                                    child: Text(cameraProvider.cameraLabel(camera)),
+                                    child: Text(
+                                        cameraProvider.cameraLabel(camera)),
                                   ),
                                 )
                                 .toList(),
@@ -1360,34 +1481,32 @@ class _RecordingScreenState extends State<RecordingScreen>
                           initialValue: selectedResolution,
                           dropdownColor: const Color(0xFF1B1B1B),
                           decoration: _settingsInputDecoration(),
-                          items: AppSettingsProvider.resolutionOptions
-                              .map(
-                                (resolution) {
-                                  final isUnsupported =
-                                      unsupportedResolutionPresets.contains(
-                                    CameraProvider.presetForResolution(
-                                      resolution,
-                                    ),
-                                  );
-                                  final label = AppSettingsProvider
-                                      .resolutionLabel(resolution);
-                                  return DropdownMenuItem<int>(
-                                    value: resolution,
-                                    enabled: !isUnsupported,
-                                    child: Text(
-                                      isUnsupported
-                                          ? '$label (unsupported)'
-                                          : label,
-                                      style: TextStyle(
-                                        color: isUnsupported
-                                            ? Colors.white38
-                                            : Colors.white,
-                                      ),
-                                    ),
-                                  );
-                                },
-                              )
-                              .toList(),
+                          items: AppSettingsProvider.resolutionOptions.map(
+                            (resolution) {
+                              final isUnsupported =
+                                  unsupportedResolutionPresets.contains(
+                                CameraProvider.presetForResolution(
+                                  resolution,
+                                ),
+                              );
+                              final label = AppSettingsProvider.resolutionLabel(
+                                  resolution);
+                              return DropdownMenuItem<int>(
+                                value: resolution,
+                                enabled: !isUnsupported,
+                                child: Text(
+                                  isUnsupported
+                                      ? '$label (unsupported)'
+                                      : label,
+                                  style: TextStyle(
+                                    color: isUnsupported
+                                        ? Colors.white38
+                                        : Colors.white,
+                                  ),
+                                ),
+                              );
+                            },
+                          ).toList(),
                           onChanged: (value) {
                             if (value == null) return;
                             setModalState(() {
@@ -1399,7 +1518,8 @@ class _RecordingScreenState extends State<RecordingScreen>
                             () async {
                               final fpsOptions = await cameraProvider
                                   .getSupportedFpsOptionsForPreset(
-                                preset: CameraProvider.presetForResolution(value),
+                                preset:
+                                    CameraProvider.presetForResolution(value),
                               );
                               if (!mounted) {
                                 return;
@@ -1473,20 +1593,25 @@ class _RecordingScreenState extends State<RecordingScreen>
                         const SizedBox(height: 12),
                         _buildSettingsLabel('Segment length'),
                         DropdownButtonFormField<int>(
-                          initialValue: segmentMinutes,
+                          initialValue: segmentDurationSeconds,
                           dropdownColor: const Color(0xFF1B1B1B),
                           decoration: _settingsInputDecoration(),
-                          items: AppSettingsProvider.segmentMinutesOptions
+                          items: AppSettingsProvider
+                              .segmentDurationOptionsSeconds
                               .map(
-                                (minutes) => DropdownMenuItem<int>(
-                                  value: minutes,
-                                  child: Text('$minutes min per segment'),
+                                (seconds) => DropdownMenuItem<int>(
+                                  value: seconds,
+                                  child: Text(
+                                    AppSettingsProvider.segmentDurationLabel(
+                                      seconds,
+                                    ),
+                                  ),
                                 ),
                               )
                               .toList(),
                           onChanged: (value) {
                             if (value == null) return;
-                            setModalState(() => segmentMinutes = value);
+                            setModalState(() => segmentDurationSeconds = value);
                           },
                         ),
                         const SizedBox(height: 12),
@@ -1579,7 +1704,8 @@ class _RecordingScreenState extends State<RecordingScreen>
                                   audioEnabled: audioEnabled,
                                   speedRefreshMs: speedRefreshMs,
                                   cameraName: selectedCameraName,
-                                  segmentMinutes: segmentMinutes,
+                                  segmentDurationSeconds:
+                                      segmentDurationSeconds,
                                   loopSegmentCount: loopSegmentCount,
                                   incidentSensitivity: incidentSensitivity,
                                 ),
@@ -1630,7 +1756,9 @@ class _RecordingScreenState extends State<RecordingScreen>
       await settings.updateAudioEnabled(result.audioEnabled);
       await settings.updateSpeedRefreshMs(result.speedRefreshMs);
       await settings.updateSelectedCameraName(result.cameraName);
-      await settings.updateSegmentMinutes(result.segmentMinutes);
+      await settings.updateSegmentDurationSeconds(
+        result.segmentDurationSeconds,
+      );
       await settings.updateLoopSegmentCount(result.loopSegmentCount);
       await settings.updateIncidentSensitivity(result.incidentSensitivity);
 
@@ -1656,7 +1784,7 @@ class _RecordingScreenState extends State<RecordingScreen>
         videoBitrateBps: result.bitrateMbps * 1000 * 1000,
         audioEnabled: result.audioEnabled,
         preferredCameraName: result.cameraName,
-        segmentDurationMinutes: result.segmentMinutes,
+        segmentDurationSeconds: result.segmentDurationSeconds,
         maxRollingSegments: result.loopSegmentCount,
       );
 
@@ -1673,10 +1801,13 @@ class _RecordingScreenState extends State<RecordingScreen>
 
       final appliedResolution =
           AppSettingsProvider.fromResolutionPreset(camera.resolutionPreset);
+      final segmentDurationLabel = AppSettingsProvider.segmentDurationLabel(
+        result.segmentDurationSeconds,
+      );
       final message = applied
           ? (appliedResolution != result.resolution
-              ? 'Requested ${result.resolution}p is not supported on this device. Applied ${appliedResolution}p at ${camera.recordingFps} FPS, ${result.bitrateMbps}Mbps, ${result.segmentMinutes}m segments, loop ${result.loopSegmentCount} segments'
-              : 'Settings applied: ${appliedResolution}p, ${camera.recordingFps} FPS, ${result.bitrateMbps}Mbps, ${result.segmentMinutes}m segments, loop ${result.loopSegmentCount} segments')
+              ? 'Requested ${result.resolution}p is not supported on this device. Applied ${appliedResolution}p at ${camera.recordingFps} FPS, ${result.bitrateMbps}Mbps, $segmentDurationLabel, loop ${result.loopSegmentCount} segments'
+              : 'Settings applied: ${appliedResolution}p, ${camera.recordingFps} FPS, ${result.bitrateMbps}Mbps, $segmentDurationLabel, loop ${result.loopSegmentCount} segments')
           : (wasRecording
               ? 'Stop recording first to apply camera settings'
               : 'Unable to initialize camera with the selected settings on this device.');
@@ -1704,8 +1835,8 @@ class _RecordingScreenState extends State<RecordingScreen>
           _buildProfileChip('${settings.videoBitrateMbps} Mbps'),
           _buildProfileChip(settings.audioEnabled ? 'Audio On' : 'Audio Off'),
           _buildProfileChip(
-              '${settings.segmentMinutes}m x ${settings.loopSegmentCount} loop'),
-            _buildProfileChip(
+              '${AppSettingsProvider.segmentDurationLabel(settings.segmentDurationSeconds)} x ${settings.loopSegmentCount} loop'),
+          _buildProfileChip(
               'Incident ${settings.incidentSensitivity.name.toUpperCase()}'),
           _buildProfileChip('Speed ${settings.speedRefreshMs}ms'),
         ];
@@ -1812,7 +1943,12 @@ class _RecordingScreenState extends State<RecordingScreen>
             child: CircularProgressIndicator(color: Colors.white),
           );
         }
-        final portraitAspectRatio = 1 / controller.value.aspectRatio;
+        final rawAspectRatio = controller.value.aspectRatio;
+        final safeAspectRatio = rawAspectRatio.isFinite && rawAspectRatio > 0
+            ? rawAspectRatio
+            : (16 / 9);
+        final portraitAspectRatio =
+            safeAspectRatio > 1 ? (1 / safeAspectRatio) : safeAspectRatio;
 
         return Stack(
           key: ValueKey(
@@ -1885,75 +2021,78 @@ class _RecordingScreenState extends State<RecordingScreen>
           top: BorderSide(color: Colors.white.withValues(alpha: 0.1)),
         ),
       ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
+      child: Row(
         children: [
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceAround,
-            children: [
-              Selector<TelemetryProvider, String>(
-                selector: (_, telemetry) =>
-                    '${telemetry.currentData.speed.toStringAsFixed(0)} km/h',
-                builder: (context, speed, _) {
-                  return _buildStatItem(
-                    icon: Icons.speed,
-                    label: 'Speed',
-                    value: speed,
-                  );
-                },
-              ),
-              Consumer<CameraProvider>(
-                builder: (context, camera, _) {
-                  return StreamBuilder<Duration>(
-                    stream: camera.timerStream,
-                    initialData: camera.elapsedTime,
-                    builder: (context, snapshot) {
-                      final duration = snapshot.data ?? Duration.zero;
-                      final hours = duration.inHours;
-                      final minutes = duration.inMinutes.remainder(60);
-                      final seconds = duration.inSeconds.remainder(60);
-                      final formattedTime =
-                          '${hours.toString().padLeft(2, '0')}:${minutes.toString().padLeft(2, '0')}:${seconds.toString().padLeft(2, '0')}';
-
-                      return _buildStatItem(
-                        icon: Icons.timer,
-                        label: 'Duration',
-                        value: formattedTime,
-                      );
-                    },
-                  );
-                },
-              ),
-              Selector<TelemetryProvider, String>(
-                selector: (_, telemetry) =>
-                    '${telemetry.rideDistanceKm.toStringAsFixed(2)} km',
-                builder: (context, distance, _) {
-                  return _buildStatItem(
-                    icon: Icons.route,
-                    label: 'Distance',
-                    value: distance,
-                  );
-                },
-              ),
-            ],
+          Expanded(
+            child: Selector<TelemetryProvider, String>(
+              selector: (_, telemetry) =>
+                  '${telemetry.currentData.speed.toStringAsFixed(0)} km/h',
+              builder: (context, speed, _) {
+                return _buildStatItem(
+                  icon: Icons.speed,
+                  label: 'Speed',
+                  value: speed,
+                  compact: true,
+                );
+              },
+            ),
           ),
-          const SizedBox(height: 10),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceAround,
-            children: [
-              _buildStatItem(
-                icon: Icons.battery_std,
-                label: 'Battery',
-                value: batteryLevel == null ? '--' : '$batteryLevel%',
-              ),
-              _buildStatItem(
-                icon: Icons.device_thermostat,
-                label: 'Temp',
-                value: batteryTemp == null
-                    ? '--'
-                    : '${batteryTemp.toStringAsFixed(1)} C',
-              ),
-            ],
+          Expanded(
+            child: Consumer<CameraProvider>(
+              builder: (context, camera, _) {
+                return StreamBuilder<Duration>(
+                  stream: camera.timerStream,
+                  initialData: camera.elapsedTime,
+                  builder: (context, snapshot) {
+                    final duration = snapshot.data ?? Duration.zero;
+                    final hours = duration.inHours;
+                    final minutes = duration.inMinutes.remainder(60);
+                    final seconds = duration.inSeconds.remainder(60);
+                    final formattedTime =
+                        '${hours.toString().padLeft(2, '0')}:${minutes.toString().padLeft(2, '0')}:${seconds.toString().padLeft(2, '0')}';
+
+                    return _buildStatItem(
+                      icon: Icons.timer,
+                      label: 'Duration',
+                      value: formattedTime,
+                      compact: true,
+                    );
+                  },
+                );
+              },
+            ),
+          ),
+          Expanded(
+            child: Selector<TelemetryProvider, String>(
+              selector: (_, telemetry) =>
+                  '${telemetry.rideDistanceKm.toStringAsFixed(2)} km',
+              builder: (context, distance, _) {
+                return _buildStatItem(
+                  icon: Icons.route,
+                  label: 'Distance',
+                  value: distance,
+                  compact: true,
+                );
+              },
+            ),
+          ),
+          Expanded(
+            child: _buildStatItem(
+              icon: Icons.battery_std,
+              label: 'Battery',
+              value: batteryLevel == null ? '--' : '$batteryLevel%',
+              compact: true,
+            ),
+          ),
+          Expanded(
+            child: _buildStatItem(
+              icon: Icons.device_thermostat,
+              label: 'Temp',
+              value: batteryTemp == null
+                  ? '--'
+                  : '${batteryTemp.toStringAsFixed(1)} C',
+              compact: true,
+            ),
           ),
         ],
       ),
@@ -1964,25 +2103,37 @@ class _RecordingScreenState extends State<RecordingScreen>
     required IconData icon,
     required String label,
     required String value,
+    bool compact = false,
   }) {
+    final iconSize = compact ? 20.0 : 24.0;
+    final valueStyle = TextStyle(
+      color: Colors.white,
+      fontSize: compact ? 12 : 18,
+      fontWeight: FontWeight.bold,
+    );
+    final labelStyle = TextStyle(
+      color: Colors.grey[400],
+      fontSize: compact ? 10 : 12,
+    );
+
     return Column(
+      mainAxisSize: MainAxisSize.min,
       children: [
-        Icon(icon, color: Colors.blue, size: 24),
-        const SizedBox(height: 4),
+        Icon(icon, color: Colors.blue, size: iconSize),
+        SizedBox(height: compact ? 2 : 4),
         Text(
           value,
-          style: const TextStyle(
-            color: Colors.white,
-            fontSize: 18,
-            fontWeight: FontWeight.bold,
-          ),
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          textAlign: TextAlign.center,
+          style: valueStyle,
         ),
         Text(
           label,
-          style: TextStyle(
-            color: Colors.grey[400],
-            fontSize: 12,
-          ),
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          textAlign: TextAlign.center,
+          style: labelStyle,
         ),
       ],
     );
@@ -2000,8 +2151,7 @@ class _RecordingScreenState extends State<RecordingScreen>
               final selectedPreset = CameraProvider.presetForResolution(
                 settings.recordingResolution,
               );
-              final resolvedPreset =
-                  camera.resolvePresetForRequestedResolution(
+              final resolvedPreset = camera.resolvePresetForRequestedResolution(
                 settings.recordingResolution,
               );
               final isPresetUnsupported = !camera.isRecording &&
@@ -2012,14 +2162,15 @@ class _RecordingScreenState extends State<RecordingScreen>
                   isPresetUnsupported && resolvedPreset != selectedPreset;
               final supportedResolutions = AppSettingsProvider.resolutionOptions
                   .where(
-                    (resolution) => !camera.knownUnsupportedResolutionPresets
-                        .contains(
-                          CameraProvider.presetForResolution(resolution),
-                        ),
+                    (resolution) =>
+                        !camera.knownUnsupportedResolutionPresets.contains(
+                      CameraProvider.presetForResolution(resolution),
+                    ),
                   )
                   .toList();
-              final suggestedResolution =
-                  supportedResolutions.isEmpty ? null : supportedResolutions.last;
+              final suggestedResolution = supportedResolutions.isEmpty
+                  ? null
+                  : supportedResolutions.last;
 
               return Column(
                 mainAxisSize: MainAxisSize.min,
@@ -2196,7 +2347,7 @@ class _SettingsFormResult {
     required this.audioEnabled,
     required this.speedRefreshMs,
     required this.cameraName,
-    required this.segmentMinutes,
+    required this.segmentDurationSeconds,
     required this.loopSegmentCount,
     required this.incidentSensitivity,
   });
@@ -2207,10 +2358,12 @@ class _SettingsFormResult {
   final bool audioEnabled;
   final int speedRefreshMs;
   final String cameraName;
-  final int segmentMinutes;
+  final int segmentDurationSeconds;
   final int loopSegmentCount;
   final IncidentSensitivity incidentSensitivity;
 }
+
+enum _PermissionRecoveryAction { dismiss, retryRequest, openSettings }
 
 enum _StartPreflightStatus { ok, warning, failed }
 

@@ -10,9 +10,12 @@ class RideRecord {
     required this.lockedSegmentPaths,
     required this.createdAt,
     required this.telemetryPath,
+    required this.rideSessionId,
+    required this.isSessionComplete,
     required this.distanceKm,
     required this.maxSpeedKmh,
     required this.averageSpeedKmh,
+    required this.segmentTimeline,
     required this.samples,
   });
 
@@ -21,9 +24,12 @@ class RideRecord {
   final List<String> lockedSegmentPaths;
   final DateTime createdAt;
   final String? telemetryPath;
+  final String? rideSessionId;
+  final bool isSessionComplete;
   final double distanceKm;
   final double maxSpeedKmh;
   final double averageSpeedKmh;
+  final List<RideSegmentTimelineEntry> segmentTimeline;
   final List<TelemetryData> samples;
 
   String get fileName {
@@ -103,9 +109,12 @@ class RideRecord {
       lockedSegmentPaths: const <String>[],
       createdAt: (await videoFile.stat()).modified,
       telemetryPath: null,
+      rideSessionId: null,
+      isSessionComplete: true,
       distanceKm: 0,
       maxSpeedKmh: 0,
       averageSpeedKmh: 0,
+      segmentTimeline: const <RideSegmentTimelineEntry>[],
       samples: const <TelemetryData>[],
     );
 
@@ -116,12 +125,7 @@ class RideRecord {
     try {
       final raw = await telemetryFile.readAsString();
       final json = jsonDecode(raw) as Map<String, dynamic>;
-      final samplesJson = (json['samples'] as List<dynamic>? ?? const <dynamic>[]);
-      final samples = samplesJson
-          .whereType<Map>()
-          .map((raw) => raw.map((key, value) => MapEntry(key.toString(), value)))
-          .map(TelemetryData.fromJson)
-          .toList();
+      final samples = _readSamples(json);
 
       final segmentPaths = await _existingPathsInOrder(
         _readSegmentPaths(json, fallbackPath: videoFile.path),
@@ -129,6 +133,10 @@ class RideRecord {
       if (segmentPaths.isEmpty) {
         segmentPaths.add(videoFile.path);
       }
+      final segmentTimeline = _readSegmentTimeline(
+        json,
+        segmentPaths: segmentPaths,
+      );
 
       return RideRecord(
         videoPath: videoFile.path,
@@ -138,9 +146,16 @@ class RideRecord {
         createdAt: DateTime.tryParse(json['startedAt']?.toString() ?? '') ??
             (await videoFile.stat()).modified,
         telemetryPath: telemetryFile.path,
+        rideSessionId: _readOptionalString(json, 'rideSessionId'),
+        isSessionComplete: _readJsonBool(
+          json,
+          'sessionComplete',
+          defaultValue: true,
+        ),
         distanceKm: _readJsonDouble(json, 'distanceKm'),
         maxSpeedKmh: _readJsonDouble(json, 'maxSpeedKmh'),
         averageSpeedKmh: _readJsonDouble(json, 'averageSpeedKmh'),
+        segmentTimeline: segmentTimeline,
         samples: samples,
       );
     } catch (_) {
@@ -158,54 +173,64 @@ class RideRecord {
       final json = jsonDecode(raw) as Map<String, dynamic>;
       final videoPath = json['videoPath']?.toString() ?? '';
 
-      final candidateSegmentPaths = _readSegmentPaths(
+      final declaredSegmentPaths = _readSegmentPaths(
         json,
         fallbackPath: videoPath,
       );
-      final segmentPaths = await _existingPathsInOrder(candidateSegmentPaths);
+      final existingSegmentPaths = await _existingPathsInOrder(
+        declaredSegmentPaths,
+      );
 
-      if (segmentPaths.isEmpty) {
+      if (declaredSegmentPaths.isEmpty) {
         final recoveredPath = await _recoverVideoPathFromTelemetryFile(
           telemetryFile,
         );
         if (recoveredPath != null) {
-          segmentPaths.add(recoveredPath);
+          declaredSegmentPaths.add(recoveredPath);
+          existingSegmentPaths.add(recoveredPath);
         }
       }
 
       var resolvedVideoPath = videoPath;
-      if (resolvedVideoPath.isEmpty ||
-          !segmentPaths.contains(resolvedVideoPath)) {
-        if (segmentPaths.isNotEmpty) {
-          resolvedVideoPath = segmentPaths.last;
+      if (resolvedVideoPath.isEmpty) {
+        if (existingSegmentPaths.isNotEmpty) {
+          resolvedVideoPath = existingSegmentPaths.last;
+        } else if (declaredSegmentPaths.isNotEmpty) {
+          resolvedVideoPath = declaredSegmentPaths.last;
         }
       }
 
       if (resolvedVideoPath.isEmpty) {
         return null;
       }
-      if (segmentPaths.isEmpty) {
-        segmentPaths.add(resolvedVideoPath);
+      if (!declaredSegmentPaths.contains(resolvedVideoPath)) {
+        declaredSegmentPaths.add(resolvedVideoPath);
       }
 
-      final samplesJson = (json['samples'] as List<dynamic>? ?? const <dynamic>[]);
-      final samples = samplesJson
-          .whereType<Map>()
-          .map((raw) => raw.map((key, value) => MapEntry(key.toString(), value)))
-          .map(TelemetryData.fromJson)
-          .toList();
+      final samples = _readSamples(json);
+      final segmentTimeline = _readSegmentTimeline(
+        json,
+        segmentPaths: declaredSegmentPaths,
+      );
 
       return RideRecord(
         videoPath: resolvedVideoPath,
-        segmentPaths: segmentPaths,
+        segmentPaths: declaredSegmentPaths,
         lockedSegmentPaths:
-            _readLockedSegmentPaths(json, fallbackPaths: segmentPaths),
+            _readLockedSegmentPaths(json, fallbackPaths: declaredSegmentPaths),
         createdAt: DateTime.tryParse(json['startedAt']?.toString() ?? '') ??
             (await telemetryFile.stat()).modified,
         telemetryPath: telemetryFile.path,
+        rideSessionId: _readOptionalString(json, 'rideSessionId'),
+        isSessionComplete: _readJsonBool(
+          json,
+          'sessionComplete',
+          defaultValue: true,
+        ),
         distanceKm: _readJsonDouble(json, 'distanceKm'),
         maxSpeedKmh: _readJsonDouble(json, 'maxSpeedKmh'),
         averageSpeedKmh: _readJsonDouble(json, 'averageSpeedKmh'),
+        segmentTimeline: segmentTimeline,
         samples: samples,
       );
     } catch (_) {
@@ -259,16 +284,111 @@ class RideRecord {
   static double _readJsonDouble(Map<String, dynamic> json, String key) =>
       (json[key] as num?)?.toDouble() ?? 0;
 
+  static bool _readJsonBool(
+    Map<String, dynamic> json,
+    String key, {
+    required bool defaultValue,
+  }) {
+    final raw = json[key];
+    if (raw is bool) {
+      return raw;
+    }
+    if (raw is String) {
+      final normalized = raw.trim().toLowerCase();
+      if (normalized == 'true') {
+        return true;
+      }
+      if (normalized == 'false') {
+        return false;
+      }
+    }
+    if (raw is num) {
+      return raw != 0;
+    }
+    return defaultValue;
+  }
+
+  static String? _readOptionalString(Map<String, dynamic> json, String key) {
+    final raw = json[key]?.toString().trim();
+    if (raw == null || raw.isEmpty) {
+      return null;
+    }
+    return raw;
+  }
+
   static List<String> _readSegmentPaths(
     Map<String, dynamic> json, {
     required String fallbackPath,
   }) {
     final raw = (json['segmentPaths'] as List<dynamic>? ?? const []);
-    final paths = raw.map((e) => e.toString()).where((e) => e.isNotEmpty).toList();
+    final paths = <String>[];
+    final seen = <String>{};
+    for (final value in raw) {
+      final path = value.toString().trim();
+      if (path.isEmpty || !seen.add(path)) {
+        continue;
+      }
+      paths.add(path);
+    }
+
     if (paths.isEmpty) {
-      paths.add(fallbackPath);
+      final fallback = fallbackPath.trim();
+      if (fallback.isNotEmpty) {
+        paths.add(fallback);
+      }
     }
     return paths;
+  }
+
+  static List<TelemetryData> _readSamples(Map<String, dynamic> json) {
+    final samplesJson = (json['samples'] as List<dynamic>? ?? const <dynamic>[]);
+    final samples = <TelemetryData>[];
+
+    for (final raw in samplesJson.whereType<Map>()) {
+      try {
+        final normalized =
+            raw.map((key, value) => MapEntry(key.toString(), value));
+        samples.add(TelemetryData.fromJson(normalized));
+      } catch (_) {
+        // Keep loading the ride even if a single sample is malformed.
+      }
+    }
+
+    return samples;
+  }
+
+  static List<RideSegmentTimelineEntry> _readSegmentTimeline(
+    Map<String, dynamic> json, {
+    required List<String> segmentPaths,
+  }) {
+    final pathSet = segmentPaths.toSet();
+    final rawTimeline =
+        (json['segmentTimeline'] as List<dynamic>? ?? const <dynamic>[]);
+    final entries = <RideSegmentTimelineEntry>[];
+    final seenPaths = <String>{};
+
+    for (final rawEntry in rawTimeline.whereType<Map>()) {
+      final entry = rawEntry.map((key, value) => MapEntry(key.toString(), value));
+      final path = entry['path']?.toString() ?? '';
+      if (path.isEmpty || !pathSet.contains(path) || seenPaths.contains(path)) {
+        continue;
+      }
+
+      final startMs = (entry['startMs'] as num?)?.toInt() ?? 0;
+      final endMs = (entry['endMs'] as num?)?.toInt() ?? startMs;
+      final normalizedEndMs = endMs >= startMs ? endMs : startMs;
+      entries.add(
+        RideSegmentTimelineEntry(
+          path: path,
+          startMs: startMs,
+          endMs: normalizedEndMs,
+        ),
+      );
+      seenPaths.add(path);
+    }
+
+    entries.sort((a, b) => a.startMs.compareTo(b.startMs));
+    return entries;
   }
 
   static List<String> _readLockedSegmentPaths(
@@ -312,4 +432,16 @@ class RideRecord {
     }
     return '${videoPath.substring(0, dotIndex)}.telemetry.json';
   }
+}
+
+class RideSegmentTimelineEntry {
+  const RideSegmentTimelineEntry({
+    required this.path,
+    required this.startMs,
+    required this.endMs,
+  });
+
+  final String path;
+  final int startMs;
+  final int endMs;
 }
