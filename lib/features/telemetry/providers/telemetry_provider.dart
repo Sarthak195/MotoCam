@@ -43,6 +43,7 @@ class TelemetryProvider extends ChangeNotifier {
   double _filteredSpeedKmh = 0.0;
   int _stationaryFixStreak = 0;
   bool _isFallbackPolling = false;
+  String? _rideSessionId;
 
   TelemetryData get currentData => _currentData;
   List<TelemetryData> get telemetryHistory =>
@@ -290,6 +291,7 @@ class TelemetryProvider extends ChangeNotifier {
   void startRideSession() {
     _isRideActive = true;
     _rideStartTime = DateTime.now();
+    _rideSessionId = _buildRideSessionId(_rideStartTime!);
     _rideDistanceKm = 0.0;
     _maxSpeedKmh = 0.0;
     _averageSpeedKmh = 0.0;
@@ -347,10 +349,9 @@ class TelemetryProvider extends ChangeNotifier {
     List<String>? segmentPaths,
     List<String>? lockedSegmentPaths,
     List<Map<String, dynamic>>? segmentTimeline,
+    Map<String, dynamic>? recordingSettings,
   }) async {
-    if (!_isRideActive ||
-        _rideStartTime == null ||
-        _activeRideSamples.isEmpty) {
+    if (!_isRideActive || _rideStartTime == null) {
       _isRideActive = false;
       _sampleTimer?.cancel();
       _forceNotifyUi();
@@ -364,34 +365,51 @@ class TelemetryProvider extends ChangeNotifier {
     final DateTime rideEnd = DateTime.now();
     _rideStartTime = null;
 
-    final resolvedSegmentPaths =
-        (segmentPaths ?? const <String>[]).where((p) => p.isNotEmpty).toList();
-    if (!resolvedSegmentPaths.contains(videoPath)) {
-      resolvedSegmentPaths.add(videoPath);
+    final canonicalVideoPath = videoPath.trim();
+    final canonicalStorageDirectory = canonicalVideoPath.isEmpty
+        ? ''
+        : File(canonicalVideoPath).parent.path;
+    final normalizedSegmentPaths = _normalizeSegmentPaths(
+      segmentPaths: segmentPaths,
+      fallbackVideoPath: canonicalVideoPath,
+    );
+    var resolvedSegmentPaths = _filterPathsInDirectory(
+      paths: normalizedSegmentPaths,
+      directoryPath: canonicalStorageDirectory,
+    );
+    resolvedSegmentPaths = await _filterExistingPathsInOrder(
+      paths: resolvedSegmentPaths,
+    );
+    if (resolvedSegmentPaths.isEmpty && canonicalVideoPath.isNotEmpty) {
+      if (await File(canonicalVideoPath).exists()) {
+        resolvedSegmentPaths.add(canonicalVideoPath);
+      }
     }
-    final resolvedLockedPaths = (lockedSegmentPaths ?? const <String>[])
-        .where((p) => p.isNotEmpty)
-        .toList();
-    final resolvedSegmentTimeline = (segmentTimeline ?? const <Map<String, dynamic>>[])
-      .where((entry) =>
-        (entry['path']?.toString() ?? '').isNotEmpty &&
-        ((entry['endMs'] as num?)?.toInt() ?? 0) >=
-          ((entry['startMs'] as num?)?.toInt() ?? 0))
-      .map((entry) => {
-          'path': entry['path'].toString(),
-          'startMs': ((entry['startMs'] as num?)?.toInt() ?? 0),
-          'endMs': ((entry['endMs'] as num?)?.toInt() ?? 0),
-        })
-      .toList();
+    final resolvedLockedPaths = _normalizeLockedPaths(
+      lockedSegmentPaths: lockedSegmentPaths,
+      knownSegmentPaths: resolvedSegmentPaths,
+    );
+    final resolvedSegmentTimeline = _normalizeSegmentTimeline(
+      segmentTimeline: segmentTimeline,
+      knownSegmentPaths: resolvedSegmentPaths,
+    );
+    final effectiveRideSessionId = _rideSessionId ?? _buildRideSessionId(rideStart);
+    final normalizedRecordingSettings =
+        _normalizeRecordingSettings(recordingSettings);
 
     final telemetryPayload = {
       'schemaVersion': 2,
+      'rideSessionId': effectiveRideSessionId,
+      'sessionComplete': true,
+      'storagePolicy': 'public-folder-only',
+      'storageDirectory': canonicalStorageDirectory,
       'sampleRateMs': sampleInterval.inMilliseconds,
-      'videoPath': videoPath,
-      'videoFileName': _extractFileName(videoPath),
+      'videoPath': canonicalVideoPath,
+      'videoFileName': _extractFileName(canonicalVideoPath),
       'segmentPaths': resolvedSegmentPaths,
       'lockedSegmentPaths': resolvedLockedPaths,
       'segmentTimeline': resolvedSegmentTimeline,
+      'recordingSettings': normalizedRecordingSettings,
       'startedAt': rideStart.toIso8601String(),
       'endedAt': rideEnd.toIso8601String(),
       'distanceKm': _rideDistanceKm,
@@ -400,11 +418,18 @@ class TelemetryProvider extends ChangeNotifier {
       'samples': _activeRideSamples.map((sample) => sample.toJson()).toList(),
     };
 
-    final String telemetryPath = _telemetryPathForVideo(videoPath);
-    final telemetryFile = File(telemetryPath);
-    await telemetryFile.writeAsString(jsonEncode(telemetryPayload));
+    final String telemetryPath = _buildPrimaryTelemetryPath(
+      rideSessionId: effectiveRideSessionId,
+      canonicalVideoPath: canonicalVideoPath,
+      segmentPaths: resolvedSegmentPaths,
+    );
+    await _writeTelemetryAtomically(
+      telemetryPath: telemetryPath,
+      payload: telemetryPayload,
+    );
 
     _activeRideSamples.clear();
+    _rideSessionId = null;
     _forceNotifyUi();
     return telemetryPath;
   }
@@ -415,6 +440,7 @@ class TelemetryProvider extends ChangeNotifier {
     _sampleTimer?.cancel();
     _sampleTimer = null;
     _activeRideSamples.clear();
+    _rideSessionId = null;
     _rideDistanceKm = 0.0;
     _maxSpeedKmh = 0.0;
     _averageSpeedKmh = 0.0;
@@ -434,12 +460,217 @@ class TelemetryProvider extends ChangeNotifier {
     return parts.last;
   }
 
-  String _telemetryPathForVideo(String videoPath) {
-    final int dotIndex = videoPath.lastIndexOf('.');
-    if (dotIndex <= 0) {
-      return '$videoPath.telemetry.json';
+  String _buildRideSessionId(DateTime startTime) {
+    final timestamp = startTime.toUtc().millisecondsSinceEpoch;
+    final random = DateTime.now().microsecondsSinceEpoch % 1000000;
+    return '${timestamp}_$random';
+  }
+
+  List<String> _normalizeSegmentPaths({
+    required List<String>? segmentPaths,
+    required String fallbackVideoPath,
+  }) {
+    final ordered = <String>[];
+    final seen = <String>{};
+
+    for (final rawPath in segmentPaths ?? const <String>[]) {
+      final path = rawPath.trim();
+      if (path.isEmpty || !seen.add(path)) {
+        continue;
+      }
+      ordered.add(path);
     }
-    return '${videoPath.substring(0, dotIndex)}.telemetry.json';
+
+    if (fallbackVideoPath.isNotEmpty && seen.add(fallbackVideoPath)) {
+      ordered.add(fallbackVideoPath);
+    }
+
+    return ordered;
+  }
+
+  List<String> _normalizeLockedPaths({
+    required List<String>? lockedSegmentPaths,
+    required List<String> knownSegmentPaths,
+  }) {
+    final knownSet = knownSegmentPaths.toSet();
+    final ordered = <String>[];
+    final seen = <String>{};
+
+    for (final rawPath in lockedSegmentPaths ?? const <String>[]) {
+      final path = rawPath.trim();
+      if (path.isEmpty || !knownSet.contains(path) || !seen.add(path)) {
+        continue;
+      }
+      ordered.add(path);
+    }
+
+    return ordered;
+  }
+
+  List<Map<String, dynamic>> _normalizeSegmentTimeline({
+    required List<Map<String, dynamic>>? segmentTimeline,
+    required List<String> knownSegmentPaths,
+  }) {
+    final knownSet = knownSegmentPaths.toSet();
+    final normalized = <Map<String, dynamic>>[];
+    final seen = <String>{};
+
+    for (final entry in segmentTimeline ?? const <Map<String, dynamic>>[]) {
+      final path = (entry['path']?.toString() ?? '').trim();
+      if (path.isEmpty || !knownSet.contains(path) || !seen.add(path)) {
+        continue;
+      }
+
+      final startMs = (entry['startMs'] as num?)?.toInt() ?? 0;
+      final endMs = (entry['endMs'] as num?)?.toInt() ?? startMs;
+      final normalizedStartMs = startMs < 0 ? 0 : startMs;
+      final normalizedEndMs = endMs >= normalizedStartMs
+          ? endMs
+          : normalizedStartMs;
+
+      normalized.add({
+        'path': path,
+        'startMs': normalizedStartMs,
+        'endMs': normalizedEndMs,
+      });
+    }
+
+    normalized.sort((a, b) {
+      final aStart = (a['startMs'] as int?) ?? 0;
+      final bStart = (b['startMs'] as int?) ?? 0;
+      return aStart.compareTo(bStart);
+    });
+
+    return normalized;
+  }
+
+  List<String> _filterPathsInDirectory({
+    required List<String> paths,
+    required String directoryPath,
+  }) {
+    if (directoryPath.trim().isEmpty) {
+      return List<String>.from(paths);
+    }
+
+    final filtered = <String>[];
+    for (final path in paths) {
+      if (_isPathInsideDirectory(path, directoryPath)) {
+        filtered.add(path);
+      }
+    }
+    return filtered;
+  }
+
+  Future<List<String>> _filterExistingPathsInOrder({
+    required List<String> paths,
+  }) async {
+    final existing = <String>[];
+    for (final path in paths) {
+      if (await File(path).exists()) {
+        existing.add(path);
+      } else {
+        debugPrint('Telemetry: dropping missing segment path $path');
+      }
+    }
+    return existing;
+  }
+
+  Future<void> _writeTelemetryAtomically({
+    required String telemetryPath,
+    required Map<String, dynamic> payload,
+  }) async {
+    final telemetryFile = File(telemetryPath);
+    final parent = telemetryFile.parent;
+    if (!await parent.exists()) {
+      await parent.create(recursive: true);
+    }
+
+    final tempPath = '$telemetryPath.tmp';
+    final tempFile = File(tempPath);
+    final encodedPayload = jsonEncode(payload);
+
+    await tempFile.writeAsString(encodedPayload, flush: true);
+
+    try {
+      if (await telemetryFile.exists()) {
+        await telemetryFile.delete();
+      }
+      await tempFile.rename(telemetryPath);
+    } catch (_) {
+      await tempFile.copy(telemetryPath);
+      if (await tempFile.exists()) {
+        await tempFile.delete();
+      }
+    }
+  }
+
+  bool _isPathInsideDirectory(String filePath, String directoryPath) {
+    final normalizedFilePath = _normalizePath(filePath);
+    final normalizedDirectoryPath = _normalizePath(directoryPath);
+    if (normalizedFilePath == normalizedDirectoryPath) {
+      return true;
+    }
+    return normalizedFilePath
+        .startsWith('$normalizedDirectoryPath${Platform.pathSeparator}');
+  }
+
+  String _normalizePath(String path) {
+    var normalized = path.replaceAll('\\', Platform.pathSeparator);
+    normalized = normalized.replaceAll('/', Platform.pathSeparator);
+    while (normalized.length > 1 &&
+        normalized.endsWith(Platform.pathSeparator)) {
+      normalized = normalized.substring(0, normalized.length - 1);
+    }
+    return Platform.isWindows ? normalized.toLowerCase() : normalized;
+  }
+
+  Map<String, dynamic> _normalizeRecordingSettings(
+    Map<String, dynamic>? settings,
+  ) {
+    final source = settings ?? const <String, dynamic>{};
+    final normalized = <String, dynamic>{};
+
+    for (final entry in source.entries) {
+      final key = entry.key.trim();
+      if (key.isEmpty) {
+        continue;
+      }
+
+      final value = entry.value;
+      if (value == null ||
+          value is num ||
+          value is bool ||
+          value is String) {
+        normalized[key] = value;
+        continue;
+      }
+
+      normalized[key] = value.toString();
+    }
+
+    return normalized;
+  }
+
+  String _buildPrimaryTelemetryPath({
+    required String rideSessionId,
+    required String canonicalVideoPath,
+    required List<String> segmentPaths,
+  }) {
+    String? directoryPath;
+    if (segmentPaths.isNotEmpty) {
+      directoryPath = File(segmentPaths.first).parent.path;
+    } else if (canonicalVideoPath.isNotEmpty) {
+      directoryPath = File(canonicalVideoPath).parent.path;
+    }
+
+    final safeSessionId =
+        rideSessionId.replaceAll(RegExp(r'[^a-zA-Z0-9_-]'), '_');
+    final fileName = 'ride_$safeSessionId.telemetry.json';
+
+    if (directoryPath == null || directoryPath.isEmpty) {
+      return fileName;
+    }
+    return '$directoryPath${Platform.pathSeparator}$fileName';
   }
 
   void _detectCrash(double gForce) {

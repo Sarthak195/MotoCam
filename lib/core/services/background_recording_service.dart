@@ -60,16 +60,42 @@ class BackgroundRecordingService {
 
     _batteryOptimizationRequestAttempted = true;
     try {
-      final isIgnoring =
-          await _channel.invokeMethod<bool>('isIgnoringBatteryOptimizations') ??
-              true;
+      final isIgnoring = await isIgnoringBatteryOptimizations();
       if (isIgnoring) {
         return;
       }
 
-      await _channel.invokeMethod<void>('requestIgnoreBatteryOptimizations');
+      await requestIgnoreBatteryOptimizations();
     } catch (_) {
       // Best effort only: recording still proceeds with foreground service + wake lock.
+    }
+  }
+
+  Future<bool> isIgnoringBatteryOptimizations() async {
+    if (!Platform.isAndroid) {
+      return true;
+    }
+    await initialize();
+    try {
+      return await _channel
+              .invokeMethod<bool>('isIgnoringBatteryOptimizations') ??
+          true;
+    } catch (_) {
+      return true;
+    }
+  }
+
+  Future<bool> requestIgnoreBatteryOptimizations() async {
+    if (!Platform.isAndroid) {
+      return true;
+    }
+    await initialize();
+    try {
+      return await _channel
+              .invokeMethod<bool>('requestIgnoreBatteryOptimizations') ??
+          false;
+    } catch (_) {
+      return false;
     }
   }
 

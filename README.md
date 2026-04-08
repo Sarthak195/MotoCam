@@ -17,6 +17,46 @@ MotoCam is a mobile application that combines video recording with location trac
 
 ## Release Notes
 
+### v0.1.10 (2026-04-02)
+
+Highlights:
+
+- Fixed day-later recording visibility issues by moving recording retention to persistent app storage instead of relying on temporary paths.
+- Hardened multi-segment ride metadata handling so stale or malformed telemetry sidecars no longer hide valid video clips.
+- Added fallback history discovery for video-only recovered segments (including older gallery-visible clips) with de-duplication.
+- Added a clear `VIDEO ONLY (RECOVERED)` badge in ride history for clips that are playable but missing telemetry overlays.
+
+Release artifact:
+- `build/app/outputs/flutter-apk/app-release.apk`
+- SHA256: `C1173CE2F7B89840838360DE182DEB19D02D2D43FD73F73805257F65F4FAAFAD`
+- Size: `53,913,969 bytes (51.42 MiB)`
+
+### v0.1.9 (2026-03-31)
+
+Highlights:
+
+- Added a pre-recording checklist to validate permissions, location services, camera readiness, storage writability, and device health before recording starts.
+- Added an interactive route map to ride playback using OpenStreetMap tiles, with start/end/current markers and a collapsible panel state.
+- Added fullscreen playback mode to hide app chrome and focus on video during ride review.
+- Added playback timeline markers for incidents (high-G events) and locked segments, including tap-to-jump navigation.
+- Improved camera lifecycle when moving to and from ride history by releasing idle camera resources and reinitializing cleanly.
+
+Release artifact:
+- `build/app/outputs/flutter-apk/app-release.apk`
+
+### v0.1.8 (2026-03-28)
+
+Highlights:
+
+- Added runtime permission auditing for reliable camera, audio, location, and background recording behavior, with clearer in-app guidance for missing permissions.
+- Added Android device status bridge and live battery/temperature telemetry on the recording screen.
+- Hardened camera settings apply flow to reduce preview loss during resolution switches (interaction lock while applying, controller reset before re-init, preview texture refresh).
+- Implemented safer capability-aware resolution routing so requested quality falls back to the nearest known-supported level per device/camera instead of static assumptions.
+- Improved recording start and settings synchronization messaging so requested versus applied quality/FPS is transparent.
+
+Release artifact:
+- `build/app/outputs/flutter-apk/app-release.apk`
+
 ### v0.1.7 (2026-03-23)
 
 Highlights:

@@ -32,14 +32,26 @@ class AppSettingsProvider extends ChangeNotifier {
   static const _videoBitrateMbpsKey = 'video_bitrate_mbps';
   static const _audioEnabledKey = 'recording_audio_enabled';
   static const _speedRefreshMsKey = 'speed_refresh_ms';
+  static const _segmentDurationSecondsKey =
+      'dashcam_segment_duration_seconds';
   static const _segmentMinutesKey = 'dashcam_segment_minutes';
   static const _loopSegmentsKey = 'dashcam_loop_segment_count';
   static const _incidentSensitivityKey = 'incident_sensitivity';
   static const _cameraNameKey = 'camera_name';
 
   static const List<int> bitrateOptionsMbps = [4, 8, 12, 16];
-  static const List<int> resolutionOptions = [480, 720, 1080, 1440, 1600, 2160];
-  static const List<int> segmentMinutesOptions = [1, 2, 3, 5, 10];
+  static const List<int> resolutionOptions = [480, 720, 1080, 2160];
+  static const List<int> segmentDurationOptionsSeconds = [
+    5,
+    10,
+    15,
+    30,
+    60,
+    120,
+    180,
+    300,
+    600,
+  ];
   static const List<int> loopSegmentCountOptions = [6, 12, 18, 24, 36, 48];
   static const String customQualityProfileId = 'custom';
   static const List<RecordingQualityProfile> qualityProfiles = [
@@ -65,27 +77,6 @@ class AppSettingsProvider extends ChangeNotifier {
       tier: QualityPresetTier.balanced,
     ),
     RecordingQualityProfile(
-      id: '1440p_30_12',
-      resolution: 1440,
-      fps: 30,
-      bitrateMbps: 12,
-      tier: QualityPresetTier.highDetail,
-    ),
-    RecordingQualityProfile(
-      id: '1440p_60_16',
-      resolution: 1440,
-      fps: 60,
-      bitrateMbps: 16,
-      tier: QualityPresetTier.highDetail,
-    ),
-    RecordingQualityProfile(
-      id: '1600p_30_16',
-      resolution: 1600,
-      fps: 30,
-      bitrateMbps: 16,
-      tier: QualityPresetTier.highDetail,
-    ),
-    RecordingQualityProfile(
       id: '2160p_24_16',
       resolution: 2160,
       fps: 24,
@@ -100,7 +91,7 @@ class AppSettingsProvider extends ChangeNotifier {
   String _qualityProfileId = '1080p_30_8';
   bool _audioEnabled = true;
   int _speedRefreshMs = 100;
-  int _segmentMinutes = 5;
+  int _segmentDurationSeconds = 300;
   int _loopSegmentCount = 24;
   IncidentSensitivity _incidentSensitivity = IncidentSensitivity.medium;
   String _selectedCameraName = '';
@@ -114,7 +105,7 @@ class AppSettingsProvider extends ChangeNotifier {
       profileById(_qualityProfileId);
   bool get audioEnabled => _audioEnabled;
   int get speedRefreshMs => _speedRefreshMs;
-  int get segmentMinutes => _segmentMinutes;
+  int get segmentDurationSeconds => _segmentDurationSeconds;
   int get loopSegmentCount => _loopSegmentCount;
   IncidentSensitivity get incidentSensitivity => _incidentSensitivity;
   String get selectedCameraName => _selectedCameraName;
@@ -141,22 +132,41 @@ class AppSettingsProvider extends ChangeNotifier {
   }
   bool get isLoaded => _isLoaded;
 
-  static String resolutionLabel(int resolution) => '${resolution}p';
+  static String resolutionLabel(int resolution) {
+    if (resolution >= 2160) {
+      return '4K (2160p)';
+    }
+    return '${resolution}p';
+  }
 
   static ResolutionPreset toResolutionPreset(int resolution) {
     if (resolution <= 480) {
       return ResolutionPreset.low;
     }
     if (resolution <= 720) {
-      return ResolutionPreset.medium;
-    }
-    if (resolution <= 1080) {
       return ResolutionPreset.high;
     }
-    if (resolution <= 1440) {
+    if (resolution <= 1080) {
       return ResolutionPreset.veryHigh;
     }
     return ResolutionPreset.ultraHigh;
+  }
+
+  static int fromResolutionPreset(ResolutionPreset preset) {
+    switch (preset) {
+      case ResolutionPreset.low:
+        return 480;
+      case ResolutionPreset.medium:
+        return 480;
+      case ResolutionPreset.high:
+        return 720;
+      case ResolutionPreset.veryHigh:
+        return 1080;
+      case ResolutionPreset.ultraHigh:
+        return 2160;
+      case ResolutionPreset.max:
+        return 2160;
+    }
   }
 
   static RecordingQualityProfile? profileById(String id) {
@@ -180,6 +190,19 @@ class AppSettingsProvider extends ChangeNotifier {
       case QualityPresetTier.highDetail:
         return 'High Detail';
     }
+  }
+
+  static String segmentDurationLabel(int seconds) {
+    if (seconds < 60) {
+      return '$seconds sec per segment';
+    }
+    if (seconds % 60 == 0) {
+      final minutes = seconds ~/ 60;
+      return '$minutes min per segment';
+    }
+    final minutes = seconds ~/ 60;
+    final remainder = seconds % 60;
+    return '$minutes min $remainder sec per segment';
   }
 
   static String incidentSensitivityLabel(IncidentSensitivity sensitivity) {
@@ -226,8 +249,15 @@ class AppSettingsProvider extends ChangeNotifier {
         _clampSpeedRefreshMs(prefs.getInt(_speedRefreshMsKey) ?? 100);
     _qualityProfileId =
         prefs.getString(_qualityProfileIdKey) ?? customQualityProfileId;
-    _segmentMinutes =
-        _clampSegmentMinutes(prefs.getInt(_segmentMinutesKey) ?? 5);
+    final persistedSeconds = prefs.getInt(_segmentDurationSecondsKey);
+    if (persistedSeconds != null) {
+      _segmentDurationSeconds =
+          _clampSegmentDurationSeconds(persistedSeconds);
+    } else {
+      final legacyMinutes = prefs.getInt(_segmentMinutesKey) ?? 5;
+      _segmentDurationSeconds =
+          _clampSegmentDurationSeconds(legacyMinutes * 60);
+    }
     _loopSegmentCount =
         _clampLoopSegmentCount(prefs.getInt(_loopSegmentsKey) ?? 24);
     _incidentSensitivity = _incidentSensitivityFromName(
@@ -328,15 +358,20 @@ class AppSettingsProvider extends ChangeNotifier {
     await prefs.setInt(_speedRefreshMsKey, _speedRefreshMs);
   }
 
-  Future<void> updateSegmentMinutes(int minutes) async {
-    final clamped = _clampSegmentMinutes(minutes);
-    if (_segmentMinutes == clamped) {
+  Future<void> updateSegmentDurationSeconds(int seconds) async {
+    final clamped = _clampSegmentDurationSeconds(seconds);
+    if (_segmentDurationSeconds == clamped) {
       return;
     }
-    _segmentMinutes = clamped;
+    _segmentDurationSeconds = clamped;
     notifyListeners();
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setInt(_segmentMinutesKey, _segmentMinutes);
+    await prefs.setInt(_segmentDurationSecondsKey, _segmentDurationSeconds);
+    // Keep legacy key in sync for older builds reading minute-based values.
+    await prefs.setInt(
+      _segmentMinutesKey,
+      (_segmentDurationSeconds / 60).ceil(),
+    );
   }
 
   Future<void> updateLoopSegmentCount(int value) async {
@@ -359,7 +394,7 @@ class AppSettingsProvider extends ChangeNotifier {
       case 'high':
         return 1080;
       case 'veryHigh':
-        return 1440;
+        return 1080;
       case 'ultraHigh':
         return 2160;
       default:
@@ -393,11 +428,11 @@ class AppSettingsProvider extends ChangeNotifier {
     return 8;
   }
 
-  int _clampSegmentMinutes(int value) {
-    if (segmentMinutesOptions.contains(value)) {
+  int _clampSegmentDurationSeconds(int value) {
+    if (segmentDurationOptionsSeconds.contains(value)) {
       return value;
     }
-    return 5;
+    return 300;
   }
 
   int _clampLoopSegmentCount(int value) {

@@ -36,9 +36,13 @@ class _RidesListScreenState extends State<RidesListScreen> {
 
 		final rides = <RideRecord>[];
 		for (final telemetryFile in telemetryFiles) {
-			final ride = await RideRecord.fromTelemetryFile(telemetryFile);
-			if (ride != null) {
-				rides.add(ride);
+			try {
+				final ride = await RideRecord.fromTelemetryFile(telemetryFile);
+				if (ride != null) {
+					rides.add(ride);
+				}
+			} catch (_) {
+				// Skip malformed telemetry entries and continue loading others.
 			}
 		}
 
@@ -129,7 +133,7 @@ class _RidesListScreenState extends State<RidesListScreen> {
 	}
 
 	Widget _buildRideCard(BuildContext context, RideRecord ride) {
-		final hasTelemetry = ride.samples.isNotEmpty;
+		final hasTelemetry = ride.telemetryPath != null;
 		final segmentCount = ride.segmentPaths.length;
 
 		return Card(
@@ -138,6 +142,25 @@ class _RidesListScreenState extends State<RidesListScreen> {
 				title: Row(
 					children: [
 						Expanded(child: Text(ride.fileName)),
+						if (!hasTelemetry) ...[
+							Container(
+								padding:
+									const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+								decoration: BoxDecoration(
+									color: Colors.blueGrey.withValues(alpha: 0.2),
+									borderRadius: BorderRadius.circular(12),
+								),
+								child: const Text(
+									'VIDEO ONLY (RECOVERED)',
+									style: TextStyle(
+										color: Colors.blueGrey,
+										fontSize: 11,
+										fontWeight: FontWeight.w700,
+									),
+								),
+							),
+							const SizedBox(width: 6),
+						],
 						if (ride.isLocked)
 							Container(
 								padding:

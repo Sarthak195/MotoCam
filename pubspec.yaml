@@ -1,6 +1,6 @@
 name: motocam
 description: Navigation-enabled dashcam app for riders
-version: 0.1.7+7
+version: 0.1.11+11
 
 environment:
   sdk: '>=3.0.0 <4.0.0'
@@ -33,6 +33,10 @@ dependencies:
 
   # Playback
   video_player: ^2.10.0
+
+  # Maps
+  flutter_map: ^8.2.2
+  latlong2: ^0.9.1
 
 dev_dependencies:
   flutter_test:
