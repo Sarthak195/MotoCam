@@ -15,7 +15,7 @@ Desktop and web platform folders were intentionally removed.
 
 MotoCam is a mobile application that combines video recording with location tracking and ride telemetry. It is designed for motorcycle riders to capture journeys and review recorded GPS routes during playback.
 
-## Release Notes
+## Release NotesYYY
 
 ### v0.1.10 (2026-04-02)
 
