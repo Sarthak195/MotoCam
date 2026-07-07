@@ -21,7 +21,6 @@ class TelemetryProvider extends ChangeNotifier {
 
   final Duration sampleInterval;
   TelemetryData _currentData = TelemetryData.empty();
-  final List<TelemetryData> _telemetryHistory = [];
   final List<TelemetryData> _activeRideSamples = [];
 
   StreamSubscription<UserAccelerometerEvent>? _accelerometerSubscription;
@@ -53,8 +52,7 @@ class TelemetryProvider extends ChangeNotifier {
   String? _rideSessionId;
 
   TelemetryData get currentData => _currentData;
-  List<TelemetryData> get telemetryHistory =>
-      List.unmodifiable(_telemetryHistory);
+
   List<TelemetryData> get activeRideSamples =>
       List.unmodifiable(_activeRideSamples);
   bool get isRideActive => _isRideActive;
@@ -171,6 +169,10 @@ class TelemetryProvider extends ChangeNotifier {
   void _updateLocation(Position position) {
     final now = DateTime.now();
     _lastLocationUpdateAt = now;
+
+    if (_isRideActive && _rideStartTime != null && position.timestamp.isBefore(_rideStartTime!)) {
+      return;
+    }
 
     var gpsSpeedKmh = position.speed * 3.6; // m/s to km/h
     if (gpsSpeedKmh.isNaN || gpsSpeedKmh.isInfinite || gpsSpeedKmh < 0) {
@@ -314,6 +316,13 @@ class TelemetryProvider extends ChangeNotifier {
     _stationaryFixStreak = 0;
     _lastRidePosition = null;
     _activeRideSamples.clear();
+    _currentData = _currentData.copyWith(
+      speed: 0.0,
+      accelerationG: 0.0,
+      elapsedMs: 0,
+      distanceKm: 0.0,
+      timestamp: DateTime.now(),
+    );
 
     _sampleTimer?.cancel();
     _captureSample();
@@ -336,7 +345,6 @@ class TelemetryProvider extends ChangeNotifier {
     );
 
     _activeRideSamples.add(sample);
-    _telemetryHistory.add(sample);
 
     if (sample.speed > _maxSpeedKmh) {
       _maxSpeedKmh = sample.speed;
@@ -479,8 +487,11 @@ class TelemetryProvider extends ChangeNotifier {
 
   String _buildRideSessionId(DateTime startTime) {
     final timestamp = startTime.toUtc().millisecondsSinceEpoch;
-    final random = DateTime.now().microsecondsSinceEpoch % 1000000;
-    return '${timestamp}_$random';
+    final secureRandom = math.Random.secure();
+    final r1 = secureRandom.nextInt(1 << 30);
+    final r2 = secureRandom.nextInt(1 << 30);
+    final randomHex = '${r1.toRadixString(16).padLeft(8, '0')}${r2.toRadixString(16).padLeft(8, '0')}';
+    return '${timestamp}_$randomHex';
   }
 
   List<String> _normalizeSegmentPaths({
@@ -700,7 +711,6 @@ class TelemetryProvider extends ChangeNotifier {
   }
 
   void clearHistory() {
-    _telemetryHistory.clear();
     _activeRideSamples.clear();
     _rideDistanceKm = 0.0;
     _maxSpeedKmh = 0.0;
@@ -710,6 +720,7 @@ class TelemetryProvider extends ChangeNotifier {
     _lastLocationUpdateAt = null;
     _filteredSpeedKmh = 0.0;
     _stationaryFixStreak = 0;
+    _currentData = TelemetryData.empty();
     _forceNotifyUi();
   }
 
@@ -736,5 +747,38 @@ class TelemetryProvider extends ChangeNotifier {
     _accelerometerSubscription?.cancel();
     _positionSubscription?.cancel();
     super.dispose();
+  }
+
+  @visibleForTesting
+  void updateLocationForTesting(Position position) {
+    _updateLocation(position);
+  }
+
+  @visibleForTesting
+  void updateAccelerometerForTesting(double x, double y, double z) {
+    final double rawLinearAccelerationG =
+        math.sqrt(x * x + y * y + z * z) / 9.81;
+    const smoothingAlpha = 0.30;
+    _smoothedLinearAccelerationG = _smoothedLinearAccelerationG == 0.0
+        ? rawLinearAccelerationG
+        : (_smoothedLinearAccelerationG * (1.0 - smoothingAlpha)) +
+            (rawLinearAccelerationG * smoothingAlpha);
+
+    _currentData = _currentData.copyWith(
+      accelerationG: _smoothedLinearAccelerationG,
+      timestamp: DateTime.now(),
+    );
+
+    if (_smoothedLinearAccelerationG >= _incidentTriggerGForce) {
+      _consecutiveIncidentHits++;
+      if (_consecutiveIncidentHits >= 2) {
+        _detectCrash(_smoothedLinearAccelerationG);
+        _consecutiveIncidentHits = 0;
+      }
+    } else {
+      _consecutiveIncidentHits = 0;
+    }
+
+    _notifyUiIfNeeded();
   }
 }

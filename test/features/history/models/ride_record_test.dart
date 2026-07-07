@@ -70,12 +70,21 @@ void main() {
         }),
       );
 
-      final ride = await RideRecord.fromTelemetryFile(telemetryFile);
-      expect(ride, isNotNull);
-      expect(ride!.integrity.status, RideIntegrityStatus.verified);
-      expect(ride.hasQuarantinedSegments, isFalse);
-      expect(ride.segmentPaths, <String>[segmentFile.path]);
-      expect(ride.integrity.isVerified, isTrue);
+      final rideLazy = await RideRecord.fromTelemetryFile(telemetryFile);
+      expect(rideLazy, isNotNull);
+      expect(rideLazy!.integrity.status, RideIntegrityStatus.verified);
+      expect(rideLazy.hasQuarantinedSegments, isFalse);
+      expect(rideLazy.segmentPaths, <String>[segmentFile.path]);
+      expect(rideLazy.integrity.isVerified, isTrue);
+
+      final rideFull = await RideRecord.fromTelemetryFile(telemetryFile, verifySegments: true);
+      expect(rideFull, isNotNull);
+      expect(rideFull!.integrity.status, RideIntegrityStatus.verified);
+      expect(rideFull.integrity.isVerified, isTrue);
+
+      final rideVerifiedOnDemand = await rideLazy.verifySegmentIntegrity();
+      expect(rideVerifiedOnDemand.integrity.status, RideIntegrityStatus.verified);
+      expect(rideVerifiedOnDemand.integrity.isVerified, isTrue);
     });
 
     test('quarantines out-of-scope paths and blocks lock-state updates', () async {

@@ -23,6 +23,7 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
     with WidgetsBindingObserver {
   static const String _showRouteMapPrefKey = 'ride_playback_show_route_map';
 
+  late RideRecord _activeRide;
   VideoPlayerController? _controller;
   bool _isLoading = true;
   bool _isDisposing = false;
@@ -53,10 +54,23 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
   @override
   void initState() {
     super.initState();
+    _activeRide = widget.ride;
     WidgetsBinding.instance.addObserver(this);
     unawaited(_loadPlaybackPreferences());
     _showIntegrityWarningIfNeeded();
+    unawaited(_verifySegmentsAsync());
     _initializePlayback();
+  }
+
+  Future<void> _verifySegmentsAsync() async {
+    final verifiedRide = await _activeRide.verifySegmentIntegrity();
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _activeRide = verifiedRide;
+    });
+    _showIntegrityWarningIfNeeded();
   }
 
   void _showIntegrityWarningIfNeeded() {
@@ -65,21 +79,21 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
     }
 
     final hasIntegrityWarning =
-        widget.ride.integrity.status == RideIntegrityStatus.modified ||
-            widget.ride.hasQuarantinedSegments;
+        _activeRide.integrity.status == RideIntegrityStatus.modified ||
+            _activeRide.hasQuarantinedSegments;
     if (!hasIntegrityWarning) {
       return;
     }
 
     _hasShownIntegrityWarning = true;
     final notes = <String>[];
-    final integrityIssueCount = widget.ride.integrity.issues.length;
+    final integrityIssueCount = _activeRide.integrity.issues.length;
     if (integrityIssueCount > 0) {
       notes.add(
           '$integrityIssueCount integrity issue${integrityIssueCount == 1 ? '' : 's'}');
     }
 
-    final quarantinedCount = widget.ride.quarantinedSegmentPaths.length;
+    final quarantinedCount = _activeRide.quarantinedSegmentPaths.length;
     if (quarantinedCount > 0) {
       notes.add('$quarantinedCount quarantined path${quarantinedCount == 1 ? '' : 's'}');
     }

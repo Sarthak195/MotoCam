@@ -16,6 +16,8 @@ import '../../core/services/pip_service.dart';
 import '../camera/providers/camera_provider.dart';
 import '../telemetry/providers/telemetry_provider.dart';
 import '../history/rides_list_screen.dart';
+import 'widgets/recording_settings_sheet.dart';
+import 'widgets/start_preflight_sheet.dart';
 
 class RecordingScreen extends StatefulWidget {
   const RecordingScreen({super.key});
@@ -56,6 +58,7 @@ class _RecordingScreenState extends State<RecordingScreen>
     const Duration(milliseconds: 700),
     (tick) => tick,
   ).asBroadcastStream();
+  TelemetryProvider? _telemetryProvider;
 
   @override
   void initState() {
@@ -65,6 +68,24 @@ class _RecordingScreenState extends State<RecordingScreen>
     _initializeBackgroundRecordingBridge();
     _startDeviceStatusPolling();
     unawaited(_bootstrapRuntimePrerequisites());
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final telemetry = Provider.of<TelemetryProvider>(context, listen: false);
+    if (_telemetryProvider != telemetry) {
+      _telemetryProvider?.removeListener(_onTelemetryChanged);
+      _telemetryProvider = telemetry;
+      _telemetryProvider?.addListener(_onTelemetryChanged);
+    }
+  }
+
+  void _onTelemetryChanged() {
+    if (!mounted) return;
+    final telemetry = context.read<TelemetryProvider>();
+    final camera = context.read<CameraProvider>();
+    _handleIncidentAutoLock(camera: camera, telemetry: telemetry);
   }
 
   Future<void> _bootstrapRuntimePrerequisites() async {
@@ -513,10 +534,10 @@ class _RecordingScreenState extends State<RecordingScreen>
 
     final hasBlockingIssue = checks.any(
       (check) =>
-          check.isBlocking && check.status == _StartPreflightStatus.failed,
+          check.isBlocking && check.status == StartPreflightStatus.failed,
     );
     final allRequirementsMet = checks.every(
-      (check) => check.status == _StartPreflightStatus.ok,
+      (check) => check.status == StartPreflightStatus.ok,
     );
     if (allRequirementsMet && !hasBlockingIssue) {
       return true;
@@ -530,104 +551,9 @@ class _RecordingScreenState extends State<RecordingScreen>
             borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
           ),
           builder: (context) {
-            return SafeArea(
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(16, 16, 16, 12),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text(
-                      'Ready To Record?',
-                      style: TextStyle(
-                        color: Colors.white,
-                        fontSize: 20,
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      hasBlockingIssue
-                          ? 'Fix blocking checks before recording.'
-                          : 'Preflight checks look good. Start when ready.',
-                      style: TextStyle(
-                        color: hasBlockingIssue
-                            ? Colors.redAccent
-                            : Colors.white70,
-                        fontSize: 13,
-                      ),
-                    ),
-                    const SizedBox(height: 14),
-                    ConstrainedBox(
-                      constraints: const BoxConstraints(maxHeight: 340),
-                      child: ListView.separated(
-                        shrinkWrap: true,
-                        itemCount: checks.length,
-                        separatorBuilder: (_, __) => Divider(
-                          color: Colors.white.withValues(alpha: 0.08),
-                          height: 1,
-                        ),
-                        itemBuilder: (context, index) {
-                          final check = checks[index];
-                          final color = _preflightStatusColor(check.status);
-                          return ListTile(
-                            dense: true,
-                            contentPadding: const EdgeInsets.symmetric(
-                              horizontal: 4,
-                              vertical: 2,
-                            ),
-                            leading: Icon(
-                              _preflightStatusIcon(check.status),
-                              color: color,
-                            ),
-                            title: Text(
-                              check.title,
-                              style: const TextStyle(
-                                color: Colors.white,
-                                fontWeight: FontWeight.w600,
-                              ),
-                            ),
-                            subtitle: Text(
-                              check.detail,
-                              style: TextStyle(
-                                  color: color.withValues(alpha: 0.95)),
-                            ),
-                          );
-                        },
-                      ),
-                    ),
-                    const SizedBox(height: 10),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: OutlinedButton(
-                            onPressed: () => Navigator.of(context).pop(false),
-                            style: OutlinedButton.styleFrom(
-                              side: BorderSide(
-                                color: Colors.white.withValues(alpha: 0.25),
-                              ),
-                            ),
-                            child: const Text('Cancel'),
-                          ),
-                        ),
-                        const SizedBox(width: 10),
-                        Expanded(
-                          child: ElevatedButton(
-                            onPressed: hasBlockingIssue
-                                ? null
-                                : () => Navigator.of(context).pop(true),
-                            style: ElevatedButton.styleFrom(
-                              backgroundColor: Colors.blue,
-                              disabledBackgroundColor: Colors.grey.shade800,
-                            ),
-                            child: const Text('Start Recording'),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-              ),
+            return StartPreflightSheet(
+              checks: checks,
+              hasBlockingIssue: hasBlockingIssue,
             );
           },
         ) ??
@@ -636,7 +562,7 @@ class _RecordingScreenState extends State<RecordingScreen>
     return proceed && !hasBlockingIssue;
   }
 
-  Future<List<_StartPreflightCheck>> _buildStartPreflightChecks({
+  Future<List<StartPreflightCheck>> _buildStartPreflightChecks({
     required CameraProvider camera,
     required AppSettingsProvider settings,
   }) async {
@@ -644,19 +570,19 @@ class _RecordingScreenState extends State<RecordingScreen>
       await _initializeCamera();
     }
 
-    final checks = <_StartPreflightCheck>[];
+    final checks = <StartPreflightCheck>[];
 
     final cameraPermissionStatus = await Permission.camera.status;
     final hasCameraPermission =
         cameraPermissionStatus.isGranted || cameraPermissionStatus.isLimited;
     checks.add(
-      _StartPreflightCheck(
+      StartPreflightCheck(
         title: 'Camera Permission',
         detail:
             hasCameraPermission ? 'Granted' : 'Camera permission is required',
         status: hasCameraPermission
-            ? _StartPreflightStatus.ok
-            : _StartPreflightStatus.failed,
+            ? StartPreflightStatus.ok
+            : StartPreflightStatus.failed,
         isBlocking: true,
       ),
     );
@@ -665,12 +591,12 @@ class _RecordingScreenState extends State<RecordingScreen>
       final micStatus = await Permission.microphone.status;
       final micGranted = micStatus.isGranted || micStatus.isLimited;
       checks.add(
-        _StartPreflightCheck(
+        StartPreflightCheck(
           title: 'Microphone Permission',
           detail: micGranted ? 'Granted' : 'Microphone is required for audio',
           status: micGranted
-              ? _StartPreflightStatus.ok
-              : _StartPreflightStatus.failed,
+              ? StartPreflightStatus.ok
+              : StartPreflightStatus.failed,
           isBlocking: true,
         ),
       );
@@ -680,28 +606,28 @@ class _RecordingScreenState extends State<RecordingScreen>
     final hasLocationPermission = locationPermissionStatus.isGranted ||
         locationPermissionStatus.isLimited;
     checks.add(
-      _StartPreflightCheck(
+      StartPreflightCheck(
         title: 'Location Permission',
         detail: hasLocationPermission
             ? 'Granted'
             : 'Required for speed, distance, and route telemetry',
         status: hasLocationPermission
-            ? _StartPreflightStatus.ok
-            : _StartPreflightStatus.failed,
+            ? StartPreflightStatus.ok
+            : StartPreflightStatus.failed,
         isBlocking: true,
       ),
     );
 
     final locationEnabled = await Geolocator.isLocationServiceEnabled();
     checks.add(
-      _StartPreflightCheck(
+      StartPreflightCheck(
         title: 'Location Services',
         detail: locationEnabled
             ? 'Enabled'
             : 'Turn ON location services in system settings',
         status: locationEnabled
-            ? _StartPreflightStatus.ok
-            : _StartPreflightStatus.failed,
+            ? StartPreflightStatus.ok
+            : StartPreflightStatus.failed,
         isBlocking: true,
       ),
     );
@@ -710,28 +636,28 @@ class _RecordingScreenState extends State<RecordingScreen>
         camera.controller != null &&
         camera.controller!.value.isInitialized;
     checks.add(
-      _StartPreflightCheck(
+      StartPreflightCheck(
         title: 'Camera Ready',
         detail: cameraReady
             ? 'Preview and encoder are initialized'
             : 'Camera initialization failed, retry from Recording screen',
         status: cameraReady
-            ? _StartPreflightStatus.ok
-            : _StartPreflightStatus.failed,
+            ? StartPreflightStatus.ok
+            : StartPreflightStatus.failed,
         isBlocking: true,
       ),
     );
 
     final canWriteMedia = await _verifyRecordingDirectoryWritable(camera);
     checks.add(
-      _StartPreflightCheck(
+      StartPreflightCheck(
         title: 'Media Write Access',
         detail: canWriteMedia
             ? 'App recording storage is writable'
             : 'Unable to write to app recording storage',
         status: canWriteMedia
-            ? _StartPreflightStatus.ok
-            : _StartPreflightStatus.failed,
+            ? StartPreflightStatus.ok
+            : StartPreflightStatus.failed,
         isBlocking: true,
       ),
     );
@@ -740,14 +666,14 @@ class _RecordingScreenState extends State<RecordingScreen>
       final notificationsGranted =
           (await Permission.notification.status).isGranted;
       checks.add(
-        _StartPreflightCheck(
+        StartPreflightCheck(
           title: 'Foreground Notification',
           detail: notificationsGranted
               ? 'Allowed'
               : 'Recommended so background recording status stays visible',
           status: notificationsGranted
-              ? _StartPreflightStatus.ok
-              : _StartPreflightStatus.warning,
+              ? StartPreflightStatus.ok
+              : StartPreflightStatus.warning,
           isBlocking: false,
         ),
       );
@@ -755,14 +681,14 @@ class _RecordingScreenState extends State<RecordingScreen>
       final ignoresBatteryOptimization =
           await _backgroundRecordingService.isIgnoringBatteryOptimizations();
       checks.add(
-        _StartPreflightCheck(
+        StartPreflightCheck(
           title: 'Battery Optimization Exemption',
           detail: ignoresBatteryOptimization
               ? 'Enabled'
               : 'Recommended for stable screen-off recording',
           status: ignoresBatteryOptimization
-              ? _StartPreflightStatus.ok
-              : _StartPreflightStatus.warning,
+              ? StartPreflightStatus.ok
+              : StartPreflightStatus.warning,
           isBlocking: false,
         ),
       );
@@ -772,12 +698,12 @@ class _RecordingScreenState extends State<RecordingScreen>
     if (batteryLevel != null) {
       final lowBattery = batteryLevel < 15;
       checks.add(
-        _StartPreflightCheck(
+        StartPreflightCheck(
           title: 'Battery Level',
           detail: '$batteryLevel%${lowBattery ? ' (low for long rides)' : ''}',
           status: lowBattery
-              ? _StartPreflightStatus.warning
-              : _StartPreflightStatus.ok,
+              ? StartPreflightStatus.warning
+              : StartPreflightStatus.ok,
           isBlocking: false,
         ),
       );
@@ -787,13 +713,13 @@ class _RecordingScreenState extends State<RecordingScreen>
     if (batteryTemp != null) {
       final hotDevice = batteryTemp >= 43.0;
       checks.add(
-        _StartPreflightCheck(
+        StartPreflightCheck(
           title: 'Device Temperature',
           detail:
               '${batteryTemp.toStringAsFixed(1)} C${hotDevice ? ' (high temperature)' : ''}',
           status: hotDevice
-              ? _StartPreflightStatus.warning
-              : _StartPreflightStatus.ok,
+              ? StartPreflightStatus.warning
+              : StartPreflightStatus.ok,
           isBlocking: false,
         ),
       );
@@ -828,28 +754,6 @@ class _RecordingScreenState extends State<RecordingScreen>
       return true;
     } catch (_) {
       return false;
-    }
-  }
-
-  IconData _preflightStatusIcon(_StartPreflightStatus status) {
-    switch (status) {
-      case _StartPreflightStatus.ok:
-        return Icons.check_circle;
-      case _StartPreflightStatus.warning:
-        return Icons.warning_amber_rounded;
-      case _StartPreflightStatus.failed:
-        return Icons.cancel;
-    }
-  }
-
-  Color _preflightStatusColor(_StartPreflightStatus status) {
-    switch (status) {
-      case _StartPreflightStatus.ok:
-        return Colors.lightGreenAccent;
-      case _StartPreflightStatus.warning:
-        return Colors.orangeAccent;
-      case _StartPreflightStatus.failed:
-        return Colors.redAccent;
     }
   }
 
@@ -1371,7 +1275,7 @@ class _RecordingScreenState extends State<RecordingScreen>
       return;
     }
 
-    final result = await showModalBottomSheet<_SettingsFormResult>(
+    final result = await showModalBottomSheet<RecordingSettingsFormResult>(
       context: context,
       isScrollControlled: true,
       backgroundColor: const Color(0xFF111111),
@@ -1379,475 +1283,10 @@ class _RecordingScreenState extends State<RecordingScreen>
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
       builder: (context) {
-        int selectedResolution = settings.recordingResolution;
-        int selectedFps = settings.recordingFps;
-        int selectedBitrateMbps = settings.videoBitrateMbps;
-        String selectedQualityProfileId = settings.qualityProfileId;
-        QualityPresetTier selectedPresetTier =
-            AppSettingsProvider.profileById(settings.qualityProfileId)?.tier ??
-                QualityPresetTier.balanced;
-        bool audioEnabled = settings.audioEnabled;
-        int speedRefreshMs = settings.speedRefreshMs;
-        int segmentDurationSeconds = settings.segmentDurationSeconds;
-        int loopSegmentCount = settings.loopSegmentCount;
-        IncidentSensitivity incidentSensitivity = settings.incidentSensitivity;
-        List<int> availableFps = List<int>.from(initialFpsOptions);
-        final unsupportedResolutionPresets =
-            Set<ResolutionPreset>.from(initialUnsupportedPresets);
-        final cameraOptions =
-            List<CameraDescription>.from(initialCameraOptions);
-        String selectedCameraName = settings.selectedCameraName;
-        if (selectedCameraName.isEmpty) {
-          selectedCameraName = cameraProvider.activeCameraName;
-        }
-        if (selectedCameraName.isEmpty && cameraOptions.isNotEmpty) {
-          selectedCameraName = cameraOptions.first.name;
-        }
-        final resolutionIsUnsupported = unsupportedResolutionPresets.contains(
-          CameraProvider.presetForResolution(selectedResolution),
-        );
-        if (resolutionIsUnsupported) {
-          final fallbackResolutions = AppSettingsProvider.resolutionOptions
-              .where(
-                (resolution) => !unsupportedResolutionPresets.contains(
-                  CameraProvider.presetForResolution(resolution),
-                ),
-              )
-              .toList();
-          if (fallbackResolutions.isNotEmpty) {
-            selectedResolution = fallbackResolutions.last;
-            selectedQualityProfileId =
-                AppSettingsProvider.customQualityProfileId;
-          }
-        }
-
-        return StatefulBuilder(
-          builder: (context, setModalState) {
-            final maxSheetHeight = MediaQuery.of(context).size.height * 0.88;
-            return SafeArea(
-              child: ConstrainedBox(
-                constraints: BoxConstraints(maxHeight: maxSheetHeight),
-                child: Padding(
-                  padding: EdgeInsets.only(
-                    left: 16,
-                    right: 16,
-                    top: 16,
-                    bottom: MediaQuery.of(context).viewInsets.bottom + 12,
-                  ),
-                  child: SingleChildScrollView(
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        const Text(
-                          'Recording Settings',
-                          style: TextStyle(
-                            color: Colors.white,
-                            fontSize: 20,
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
-                        const SizedBox(height: 16),
-                        _buildSettingsLabel('Quality group'),
-                        DropdownButtonFormField<QualityPresetTier>(
-                          initialValue: selectedPresetTier,
-                          dropdownColor: const Color(0xFF1B1B1B),
-                          decoration: _settingsInputDecoration(),
-                          items: QualityPresetTier.values
-                              .map(
-                                (tier) => DropdownMenuItem<QualityPresetTier>(
-                                  value: tier,
-                                  child: Text(
-                                      AppSettingsProvider.qualityTierLabel(
-                                          tier)),
-                                ),
-                              )
-                              .toList(),
-                          onChanged: (value) {
-                            if (value == null) return;
-
-                            final tierProfiles =
-                                AppSettingsProvider.qualityProfilesForTier(
-                                    value);
-                            if (tierProfiles.isEmpty) {
-                              return;
-                            }
-
-                            final selectedProfile = tierProfiles.first;
-                            setModalState(() {
-                              selectedPresetTier = value;
-                              selectedQualityProfileId = selectedProfile.id;
-                            });
-
-                            () async {
-                              final fpsOptions = await cameraProvider
-                                  .getSupportedFpsOptionsForPreset(
-                                preset: CameraProvider.presetForResolution(
-                                  selectedProfile.resolution,
-                                ),
-                              );
-                              if (!mounted) {
-                                return;
-                              }
-                              setModalState(() {
-                                selectedResolution = selectedProfile.resolution;
-                                selectedBitrateMbps =
-                                    selectedProfile.bitrateMbps;
-                                availableFps = List<int>.from(fpsOptions);
-                                if (availableFps
-                                    .contains(selectedProfile.fps)) {
-                                  selectedFps = selectedProfile.fps;
-                                } else {
-                                  selectedFps = availableFps.last;
-                                  selectedQualityProfileId = AppSettingsProvider
-                                      .customQualityProfileId;
-                                }
-                              });
-                            }();
-                          },
-                        ),
-                        const SizedBox(height: 12),
-                        _buildSettingsLabel('Recording quality preset'),
-                        DropdownButtonFormField<String>(
-                          initialValue: selectedQualityProfileId,
-                          dropdownColor: const Color(0xFF1B1B1B),
-                          decoration: _settingsInputDecoration(),
-                          items: [
-                            const DropdownMenuItem<String>(
-                              value: AppSettingsProvider.customQualityProfileId,
-                              child: Text('Custom'),
-                            ),
-                            ...AppSettingsProvider.qualityProfilesForTier(
-                                    selectedPresetTier)
-                                .map(
-                              (profile) => DropdownMenuItem<String>(
-                                value: profile.id,
-                                child: Text(profile.label),
-                              ),
-                            ),
-                          ],
-                          onChanged: (value) {
-                            if (value == null) return;
-                            setModalState(
-                                () => selectedQualityProfileId = value);
-
-                            if (value ==
-                                AppSettingsProvider.customQualityProfileId) {
-                              return;
-                            }
-
-                            final profile =
-                                AppSettingsProvider.profileById(value);
-                            if (profile == null) {
-                              return;
-                            }
-
-                            setModalState(
-                                () => selectedPresetTier = profile.tier);
-
-                            () async {
-                              final fpsOptions = await cameraProvider
-                                  .getSupportedFpsOptionsForPreset(
-                                preset: CameraProvider.presetForResolution(
-                                  profile.resolution,
-                                ),
-                              );
-                              if (!mounted) {
-                                return;
-                              }
-                              setModalState(() {
-                                selectedResolution = profile.resolution;
-                                selectedBitrateMbps = profile.bitrateMbps;
-                                availableFps = List<int>.from(fpsOptions);
-                                if (availableFps.contains(profile.fps)) {
-                                  selectedFps = profile.fps;
-                                } else {
-                                  selectedFps = availableFps.last;
-                                  selectedQualityProfileId = AppSettingsProvider
-                                      .customQualityProfileId;
-                                }
-                              });
-                            }();
-                          },
-                        ),
-                        const SizedBox(height: 12),
-                        if (cameraOptions.isNotEmpty) ...[
-                          _buildSettingsLabel('Camera lens'),
-                          DropdownButtonFormField<String>(
-                            initialValue: cameraOptions.any((camera) =>
-                                    camera.name == selectedCameraName)
-                                ? selectedCameraName
-                                : cameraOptions.first.name,
-                            dropdownColor: const Color(0xFF1B1B1B),
-                            decoration: _settingsInputDecoration(),
-                            items: cameraOptions
-                                .map(
-                                  (camera) => DropdownMenuItem<String>(
-                                    value: camera.name,
-                                    child: Text(
-                                        cameraProvider.cameraLabel(camera)),
-                                  ),
-                                )
-                                .toList(),
-                            onChanged: (value) {
-                              if (value == null) return;
-                              setModalState(() => selectedCameraName = value);
-                            },
-                          ),
-                          const SizedBox(height: 12),
-                        ],
-                        _buildSettingsLabel('Recording resolution'),
-                        DropdownButtonFormField<int>(
-                          initialValue: selectedResolution,
-                          dropdownColor: const Color(0xFF1B1B1B),
-                          decoration: _settingsInputDecoration(),
-                          items: AppSettingsProvider.resolutionOptions.map(
-                            (resolution) {
-                              final isUnsupported =
-                                  unsupportedResolutionPresets.contains(
-                                CameraProvider.presetForResolution(
-                                  resolution,
-                                ),
-                              );
-                              final label = AppSettingsProvider.resolutionLabel(
-                                  resolution);
-                              return DropdownMenuItem<int>(
-                                value: resolution,
-                                enabled: !isUnsupported,
-                                child: Text(
-                                  isUnsupported
-                                      ? '$label (unsupported)'
-                                      : label,
-                                  style: TextStyle(
-                                    color: isUnsupported
-                                        ? Colors.white38
-                                        : Colors.white,
-                                  ),
-                                ),
-                              );
-                            },
-                          ).toList(),
-                          onChanged: (value) {
-                            if (value == null) return;
-                            setModalState(() {
-                              selectedResolution = value;
-                              selectedQualityProfileId =
-                                  AppSettingsProvider.customQualityProfileId;
-                            });
-
-                            () async {
-                              final fpsOptions = await cameraProvider
-                                  .getSupportedFpsOptionsForPreset(
-                                preset:
-                                    CameraProvider.presetForResolution(value),
-                              );
-                              if (!mounted) {
-                                return;
-                              }
-                              setModalState(() {
-                                availableFps = List<int>.from(fpsOptions);
-                                if (!availableFps.contains(selectedFps)) {
-                                  selectedFps = availableFps.last;
-                                }
-                              });
-                            }();
-                          },
-                        ),
-                        if (unsupportedResolutionPresets.isNotEmpty) ...[
-                          const SizedBox(height: 6),
-                          Text(
-                            'Known unsupported on this device: ${AppSettingsProvider.resolutionOptions.where((resolution) => unsupportedResolutionPresets.contains(CameraProvider.presetForResolution(resolution))).map(AppSettingsProvider.resolutionLabel).join(', ')}',
-                            style: const TextStyle(
-                              color: Colors.orange,
-                              fontSize: 11,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                        ],
-                        const SizedBox(height: 12),
-                        _buildSettingsLabel('Frame rate (FPS)'),
-                        DropdownButtonFormField<int>(
-                          initialValue: selectedFps,
-                          dropdownColor: const Color(0xFF1B1B1B),
-                          decoration: _settingsInputDecoration(),
-                          items: availableFps
-                              .map(
-                                (fps) => DropdownMenuItem<int>(
-                                  value: fps,
-                                  child: Text('$fps FPS'),
-                                ),
-                              )
-                              .toList(),
-                          onChanged: (value) {
-                            if (value == null) return;
-                            setModalState(() {
-                              selectedFps = value;
-                              selectedQualityProfileId =
-                                  AppSettingsProvider.customQualityProfileId;
-                            });
-                          },
-                        ),
-                        const SizedBox(height: 12),
-                        _buildSettingsLabel('Video bitrate'),
-                        DropdownButtonFormField<int>(
-                          initialValue: selectedBitrateMbps,
-                          dropdownColor: const Color(0xFF1B1B1B),
-                          decoration: _settingsInputDecoration(),
-                          items: AppSettingsProvider.bitrateOptionsMbps
-                              .map(
-                                (mbps) => DropdownMenuItem<int>(
-                                  value: mbps,
-                                  child: Text('$mbps Mbps'),
-                                ),
-                              )
-                              .toList(),
-                          onChanged: (value) {
-                            if (value == null) return;
-                            setModalState(() {
-                              selectedBitrateMbps = value;
-                              selectedQualityProfileId =
-                                  AppSettingsProvider.customQualityProfileId;
-                            });
-                          },
-                        ),
-                        const SizedBox(height: 12),
-                        _buildSettingsLabel('Segment length'),
-                        DropdownButtonFormField<int>(
-                          initialValue: segmentDurationSeconds,
-                          dropdownColor: const Color(0xFF1B1B1B),
-                          decoration: _settingsInputDecoration(),
-                          items: AppSettingsProvider
-                              .segmentDurationOptionsSeconds
-                              .map(
-                                (seconds) => DropdownMenuItem<int>(
-                                  value: seconds,
-                                  child: Text(
-                                    AppSettingsProvider.segmentDurationLabel(
-                                      seconds,
-                                    ),
-                                  ),
-                                ),
-                              )
-                              .toList(),
-                          onChanged: (value) {
-                            if (value == null) return;
-                            setModalState(() => segmentDurationSeconds = value);
-                          },
-                        ),
-                        const SizedBox(height: 12),
-                        _buildSettingsLabel('Loop buffer size'),
-                        DropdownButtonFormField<int>(
-                          initialValue: loopSegmentCount,
-                          dropdownColor: const Color(0xFF1B1B1B),
-                          decoration: _settingsInputDecoration(),
-                          items: AppSettingsProvider.loopSegmentCountOptions
-                              .map(
-                                (segments) => DropdownMenuItem<int>(
-                                  value: segments,
-                                  child: Text('$segments segments'),
-                                ),
-                              )
-                              .toList(),
-                          onChanged: (value) {
-                            if (value == null) return;
-                            setModalState(() => loopSegmentCount = value);
-                          },
-                        ),
-                        const SizedBox(height: 12),
-                        _buildSettingsLabel('Speed UI refresh'),
-                        DropdownButtonFormField<int>(
-                          initialValue: speedRefreshMs,
-                          dropdownColor: const Color(0xFF1B1B1B),
-                          decoration: _settingsInputDecoration(),
-                          items: const [100, 200, 300, 500]
-                              .map(
-                                (ms) => DropdownMenuItem<int>(
-                                  value: ms,
-                                  child: Text('$ms ms'),
-                                ),
-                              )
-                              .toList(),
-                          onChanged: (value) {
-                            if (value == null) return;
-                            setModalState(() => speedRefreshMs = value);
-                          },
-                        ),
-                        const SizedBox(height: 12),
-                        _buildSettingsLabel('Incident sensitivity'),
-                        DropdownButtonFormField<IncidentSensitivity>(
-                          initialValue: incidentSensitivity,
-                          dropdownColor: const Color(0xFF1B1B1B),
-                          decoration: _settingsInputDecoration(),
-                          items: IncidentSensitivity.values
-                              .map(
-                                (sensitivity) =>
-                                    DropdownMenuItem<IncidentSensitivity>(
-                                  value: sensitivity,
-                                  child: Text(AppSettingsProvider
-                                      .incidentSensitivityLabel(sensitivity)),
-                                ),
-                              )
-                              .toList(),
-                          onChanged: (value) {
-                            if (value == null) return;
-                            setModalState(() => incidentSensitivity = value);
-                          },
-                        ),
-                        const SizedBox(height: 8),
-                        SwitchListTile.adaptive(
-                          contentPadding: EdgeInsets.zero,
-                          activeThumbColor: Colors.blue,
-                          activeTrackColor: Colors.blue.withValues(alpha: 0.35),
-                          value: audioEnabled,
-                          title: const Text(
-                            'Record audio',
-                            style: TextStyle(color: Colors.white),
-                          ),
-                          subtitle: const Text(
-                            'Disable for lower CPU and storage usage',
-                            style: TextStyle(color: Colors.white70),
-                          ),
-                          onChanged: (value) {
-                            setModalState(() => audioEnabled = value);
-                          },
-                        ),
-                        const SizedBox(height: 8),
-                        SizedBox(
-                          width: double.infinity,
-                          child: ElevatedButton(
-                            onPressed: () {
-                              Navigator.of(context).pop(
-                                _SettingsFormResult(
-                                  resolution: selectedResolution,
-                                  fps: selectedFps,
-                                  bitrateMbps: selectedBitrateMbps,
-                                  audioEnabled: audioEnabled,
-                                  speedRefreshMs: speedRefreshMs,
-                                  cameraName: selectedCameraName,
-                                  segmentDurationSeconds:
-                                      segmentDurationSeconds,
-                                  loopSegmentCount: loopSegmentCount,
-                                  incidentSensitivity: incidentSensitivity,
-                                ),
-                              );
-                            },
-                            style: ElevatedButton.styleFrom(
-                              minimumSize: const Size(double.infinity, 52),
-                              backgroundColor: Colors.blue,
-                            ),
-                            child: const Text(
-                              'SAVE SETTINGS',
-                              style: TextStyle(fontWeight: FontWeight.bold),
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
-            );
-          },
+        return RecordingSettingsSheet(
+          initialFpsOptions: initialFpsOptions,
+          initialCameraOptions: initialCameraOptions,
+          initialUnsupportedPresets: initialUnsupportedPresets,
         );
       },
     );
@@ -2023,30 +1462,6 @@ class _RecordingScreenState extends State<RecordingScreen>
     );
   }
 
-  InputDecoration _settingsInputDecoration() {
-    return InputDecoration(
-      filled: true,
-      fillColor: const Color(0xFF1B1B1B),
-      border: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(12),
-        borderSide: BorderSide.none,
-      ),
-    );
-  }
-
-  Widget _buildSettingsLabel(String text) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 6),
-      child: Text(
-        text,
-        style: const TextStyle(
-          color: Colors.white70,
-          fontSize: 13,
-          fontWeight: FontWeight.w600,
-        ),
-      ),
-    );
-  }
 
   Widget _buildCameraPreview() {
     return Consumer<CameraProvider>(
@@ -2271,7 +1686,6 @@ class _RecordingScreenState extends State<RecordingScreen>
         children: [
           Consumer3<CameraProvider, TelemetryProvider, AppSettingsProvider>(
             builder: (context, camera, telemetry, settings, _) {
-              _handleIncidentAutoLock(camera: camera, telemetry: telemetry);
               final selectedPreset = CameraProvider.presetForResolution(
                 settings.recordingResolution,
               );
@@ -2449,6 +1863,7 @@ class _RecordingScreenState extends State<RecordingScreen>
 
   @override
   void dispose() {
+    _telemetryProvider?.removeListener(_onTelemetryChanged);
     WidgetsBinding.instance.removeObserver(this);
     _blackoutExitHoldTimer?.cancel();
     _inAppNoticeTimer?.cancel();
@@ -2461,44 +1876,4 @@ class _RecordingScreenState extends State<RecordingScreen>
   }
 }
 
-class _SettingsFormResult {
-  const _SettingsFormResult({
-    required this.resolution,
-    required this.fps,
-    required this.bitrateMbps,
-    required this.audioEnabled,
-    required this.speedRefreshMs,
-    required this.cameraName,
-    required this.segmentDurationSeconds,
-    required this.loopSegmentCount,
-    required this.incidentSensitivity,
-  });
-
-  final int resolution;
-  final int fps;
-  final int bitrateMbps;
-  final bool audioEnabled;
-  final int speedRefreshMs;
-  final String cameraName;
-  final int segmentDurationSeconds;
-  final int loopSegmentCount;
-  final IncidentSensitivity incidentSensitivity;
-}
-
 enum _PermissionRecoveryAction { dismiss, retryRequest, openSettings }
-
-enum _StartPreflightStatus { ok, warning, failed }
-
-class _StartPreflightCheck {
-  const _StartPreflightCheck({
-    required this.title,
-    required this.detail,
-    required this.status,
-    required this.isBlocking,
-  });
-
-  final String title;
-  final String detail;
-  final _StartPreflightStatus status;
-  final bool isBlocking;
-}
