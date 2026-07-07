@@ -1,6 +1,6 @@
 name: motocam
 description: Navigation-enabled dashcam app for riders
-version: 0.1.11+11
+version: 1.0.1+13
 
 environment:
   sdk: '>=3.0.0 <4.0.0'
@@ -30,6 +30,7 @@ dependencies:
   # Utilities
   intl: ^0.20.2
   shared_preferences: ^2.5.3
+  crypto: ^3.0.6
 
   # Playback
   video_player: ^2.10.0

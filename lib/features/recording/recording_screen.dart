@@ -722,31 +722,13 @@ class _RecordingScreenState extends State<RecordingScreen>
       ),
     );
 
-    final hasAndroidPublicStorageAccess =
-        !Platform.isAndroid || await _hasAndroidPublicStorageAccess();
-    if (Platform.isAndroid) {
-      checks.add(
-        _StartPreflightCheck(
-          title: 'Storage Permission',
-          detail: hasAndroidPublicStorageAccess
-              ? 'Granted for Movies/MotoCam/Recordings'
-              : 'Grant storage access to save in Movies/MotoCam/Recordings',
-          status: hasAndroidPublicStorageAccess
-              ? _StartPreflightStatus.ok
-              : _StartPreflightStatus.failed,
-          isBlocking: true,
-        ),
-      );
-    }
-
-    final canWriteMedia = hasAndroidPublicStorageAccess &&
-        await _verifyRecordingDirectoryWritable(camera);
+    final canWriteMedia = await _verifyRecordingDirectoryWritable(camera);
     checks.add(
       _StartPreflightCheck(
         title: 'Media Write Access',
         detail: canWriteMedia
-            ? 'Recording storage path is writable'
-            : 'Unable to write to Movies/MotoCam/Recordings',
+            ? 'App recording storage is writable'
+            : 'Unable to write to app recording storage',
         status: canWriteMedia
             ? _StartPreflightStatus.ok
             : _StartPreflightStatus.failed,
@@ -818,20 +800,6 @@ class _RecordingScreenState extends State<RecordingScreen>
     }
 
     return checks;
-  }
-
-  Future<bool> _hasAndroidPublicStorageAccess() async {
-    if (!Platform.isAndroid) {
-      return true;
-    }
-
-    final manageStorageStatus = await Permission.manageExternalStorage.status;
-    if (manageStorageStatus.isGranted) {
-      return true;
-    }
-
-    final legacyStorageStatus = await Permission.storage.status;
-    return legacyStorageStatus.isGranted || legacyStorageStatus.isLimited;
   }
 
   Future<bool> _verifyRecordingDirectoryWritable(CameraProvider camera) async {
@@ -2482,10 +2450,6 @@ class _RecordingScreenState extends State<RecordingScreen>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    final camera = context.read<CameraProvider>();
-    if (_isBlackoutMode) {
-      unawaited(camera.controller?.resumePreview());
-    }
     _blackoutExitHoldTimer?.cancel();
     _inAppNoticeTimer?.cancel();
     _recordingTimerSubscription?.cancel();

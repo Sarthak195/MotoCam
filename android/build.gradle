@@ -13,6 +13,18 @@ subprojects {
     project.evaluationDependsOn(':app')
 }
 
+subprojects { subproject ->
+    def addConcurrentFuturesDependency = {
+        subproject.dependencies.add(
+                'implementation',
+                'androidx.concurrent:concurrent-futures:1.1.0'
+        )
+    }
+
+    subproject.pluginManager.withPlugin('com.android.application', addConcurrentFuturesDependency)
+    subproject.pluginManager.withPlugin('com.android.library', addConcurrentFuturesDependency)
+}
+
 tasks.register("clean", Delete) {
     delete rootProject.buildDir
 }

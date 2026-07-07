@@ -3,12 +3,19 @@
 import 'package:flutter/foundation.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:sensors_plus/sensors_plus.dart';
+import '../../../core/utils/path_utils.dart' as path_utils;
+import '../../../core/utils/integrity_utils.dart' as integrity_utils;
 import '../models/telemetry_data.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
 
+/// Collects and manages real-time ride telemetry (GPS, speed, acceleration)
+/// and persists completed ride sessions as JSON alongside video segments.
+///
+/// This provider owns the accelerometer and location stream subscriptions and
+/// should be disposed when no longer needed.
 class TelemetryProvider extends ChangeNotifier {
   TelemetryProvider({this.sampleInterval = const Duration(seconds: 1)});
 
@@ -397,11 +404,12 @@ class TelemetryProvider extends ChangeNotifier {
     final normalizedRecordingSettings =
         _normalizeRecordingSettings(recordingSettings);
 
-    final telemetryPayload = {
+    final telemetryPayloadCore = {
       'schemaVersion': 2,
       'rideSessionId': effectiveRideSessionId,
       'sessionComplete': true,
-      'storagePolicy': 'public-folder-only',
+      'storagePolicy': 'hybrid-private-primary',
+      'publicExportRelativePath': 'Movies/MotoCam/Recordings',
       'storageDirectory': canonicalStorageDirectory,
       'sampleRateMs': sampleInterval.inMilliseconds,
       'videoPath': canonicalVideoPath,
@@ -416,6 +424,15 @@ class TelemetryProvider extends ChangeNotifier {
       'maxSpeedKmh': _maxSpeedKmh,
       'averageSpeedKmh': _averageSpeedKmh,
       'samples': _activeRideSamples.map((sample) => sample.toJson()).toList(),
+    };
+
+    final integrity = await _buildIntegrityMetadata(
+      payload: telemetryPayloadCore,
+      segmentPaths: resolvedSegmentPaths,
+    );
+    final telemetryPayload = {
+      ...telemetryPayloadCore,
+      'integrity': integrity,
     };
 
     final String telemetryPath = _buildPrimaryTelemetryPath(
@@ -580,49 +597,16 @@ class TelemetryProvider extends ChangeNotifier {
     required Map<String, dynamic> payload,
   }) async {
     final telemetryFile = File(telemetryPath);
-    final parent = telemetryFile.parent;
-    if (!await parent.exists()) {
-      await parent.create(recursive: true);
-    }
-
-    final tempPath = '$telemetryPath.tmp';
-    final tempFile = File(tempPath);
     final encodedPayload = jsonEncode(payload);
-
-    await tempFile.writeAsString(encodedPayload, flush: true);
-
-    try {
-      if (await telemetryFile.exists()) {
-        await telemetryFile.delete();
-      }
-      await tempFile.rename(telemetryPath);
-    } catch (_) {
-      await tempFile.copy(telemetryPath);
-      if (await tempFile.exists()) {
-        await tempFile.delete();
-      }
-    }
+    await integrity_utils.writeTelemetryAtomically(
+      telemetryFile: telemetryFile,
+      content: encodedPayload,
+    );
   }
 
-  bool _isPathInsideDirectory(String filePath, String directoryPath) {
-    final normalizedFilePath = _normalizePath(filePath);
-    final normalizedDirectoryPath = _normalizePath(directoryPath);
-    if (normalizedFilePath == normalizedDirectoryPath) {
-      return true;
-    }
-    return normalizedFilePath
-        .startsWith('$normalizedDirectoryPath${Platform.pathSeparator}');
-  }
-
-  String _normalizePath(String path) {
-    var normalized = path.replaceAll('\\', Platform.pathSeparator);
-    normalized = normalized.replaceAll('/', Platform.pathSeparator);
-    while (normalized.length > 1 &&
-        normalized.endsWith(Platform.pathSeparator)) {
-      normalized = normalized.substring(0, normalized.length - 1);
-    }
-    return Platform.isWindows ? normalized.toLowerCase() : normalized;
-  }
+  // Path utilities delegate to shared module.
+  bool _isPathInsideDirectory(String filePath, String directoryPath) =>
+      path_utils.isPathInsideDirectory(filePath, directoryPath);
 
   Map<String, dynamic> _normalizeRecordingSettings(
     Map<String, dynamic>? settings,
@@ -650,6 +634,35 @@ class TelemetryProvider extends ChangeNotifier {
 
     return normalized;
   }
+
+  Future<Map<String, dynamic>> _buildIntegrityMetadata({
+    required Map<String, dynamic> payload,
+    required List<String> segmentPaths,
+  }) async {
+    final segmentHashes = <String, String>{};
+    for (final segmentPath in segmentPaths) {
+      final hash = await _hashFileSha256(segmentPath);
+      if (hash == null) {
+        continue;
+      }
+      segmentHashes[segmentPath] = hash;
+    }
+
+    return {
+      'algo': 'sha256',
+      'payloadHash': _hashJsonCanonical(payload),
+      'segmentCount': segmentPaths.length,
+      'hashedSegmentCount': segmentHashes.length,
+      'segmentHashes': segmentHashes,
+      'generatedAt': DateTime.now().toIso8601String(),
+    };
+  }
+
+  String _hashJsonCanonical(Map<String, dynamic> payload) =>
+      integrity_utils.hashJsonCanonical(payload);
+
+  Future<String?> _hashFileSha256(String path) =>
+      integrity_utils.hashFileSha256(path);
 
   String _buildPrimaryTelemetryPath({
     required String rideSessionId,

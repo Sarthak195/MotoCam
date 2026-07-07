@@ -27,6 +27,8 @@ class MainActivity: FlutterActivity() {
     private val MEDIA_CHANNEL = "com.example.motocam/media"
     private val DEVICE_STATUS_CHANNEL = "com.example.motocam/device_status"
     private val BACKGROUND_RECORDING_CHANNEL = "com.example.motocam/background_recording"
+    private fun internalBroadcastPermission(): String =
+        "$packageName.permission.INTERNAL_BROADCAST"
     private var pipMethodChannel: MethodChannel? = null
     private var backgroundRecordingMethodChannel: MethodChannel? = null
     private var isRecordingActive = false
@@ -329,10 +331,21 @@ class MainActivity: FlutterActivity() {
         super.onStart()
         val filter = IntentFilter(BackgroundRecordingService.ACTION_STOP_REQUESTED)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(backgroundStopReceiver, filter, RECEIVER_NOT_EXPORTED)
+            registerReceiver(
+                backgroundStopReceiver,
+                filter,
+                internalBroadcastPermission(),
+                null,
+                RECEIVER_NOT_EXPORTED,
+            )
         } else {
             @Suppress("DEPRECATION")
-            registerReceiver(backgroundStopReceiver, filter)
+            registerReceiver(
+                backgroundStopReceiver,
+                filter,
+                internalBroadcastPermission(),
+                null,
+            )
         }
     }
 

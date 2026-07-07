@@ -1,6 +1,8 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
+/// A point-in-time snapshot of battery level, temperature, and thermal
+/// throttling state obtained from the Android platform.
 class DeviceStatusSnapshot {
   const DeviceStatusSnapshot({
     this.batteryLevelPercent,
@@ -45,6 +47,11 @@ class DeviceStatusSnapshot {
       );
 }
 
+/// Reads battery and thermal status from the native Android platform via
+/// a method channel.
+///
+/// Returns [DeviceStatusSnapshot.empty] on non-Android platforms or when
+/// the native call fails.
 class DeviceStatusService {
   static const MethodChannel _channel =
       MethodChannel('com.example.motocam/device_status');

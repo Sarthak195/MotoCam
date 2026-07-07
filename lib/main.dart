@@ -57,7 +57,7 @@ class MotoCamApp extends StatelessWidget {
         title: 'MotoCam',
         debugShowCheckedModeBanner: false,
         theme: ThemeData(
-          primarySwatch: Colors.blue,
+          colorSchemeSeed: Colors.blue,
           brightness: Brightness.dark,
           useMaterial3: true,
         ),

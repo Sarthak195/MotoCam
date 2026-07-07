@@ -1,13 +1,32 @@
-// lib/features/telemetry/models/telemetry_data.dart
-
+/// A single telemetry sample captured during a ride.
+///
+/// Each sample records the device's GPS position, speed, heading, linear
+/// acceleration (with gravity removed), and the elapsed time since ride
+/// start.  Samples are serialised to JSON and persisted alongside video
+/// segments when a ride session ends.
 class TelemetryData {
+  /// GPS latitude in decimal degrees (WGS 84).
   final double latitude;
+
+  /// GPS longitude in decimal degrees (WGS 84).
   final double longitude;
-  final double speed; // km/h
-  final double bearing; // degrees
+
+  /// Filtered ground speed in **km/h**.
+  final double speed;
+
+  /// GPS bearing / heading in degrees (0–360).
+  final double bearing;
+
+  /// Smoothed linear acceleration magnitude in **g** (gravity removed).
   final double accelerationG;
+
+  /// Milliseconds elapsed since the ride session started.
   final int elapsedMs;
+
+  /// Cumulative ride distance in **km** at the time of this sample.
   final double distanceKm;
+
+  /// Wall-clock time when this sample was captured.
   final DateTime timestamp;
 
   TelemetryData({
@@ -21,6 +40,7 @@ class TelemetryData {
     required this.timestamp,
   });
 
+  /// Creates a zero-value sample anchored to the current time.
   factory TelemetryData.empty() {
     return TelemetryData(
       latitude: 0.0,
@@ -34,6 +54,7 @@ class TelemetryData {
     );
   }
 
+  /// Returns a copy of this sample with the specified fields replaced.
   TelemetryData copyWith({
     double? latitude,
     double? longitude,
@@ -56,6 +77,7 @@ class TelemetryData {
     );
   }
 
+  /// Serialises this sample to a JSON-compatible map.
   Map<String, dynamic> toJson() {
     return {
       'latitude': latitude,
@@ -69,6 +91,10 @@ class TelemetryData {
     };
   }
 
+  /// Deserialises a sample from a JSON-compatible map.
+  ///
+  /// Falls back to sensible defaults (`0.0`, `DateTime.now()`) when fields
+  /// are missing or malformed.
   factory TelemetryData.fromJson(Map<String, dynamic> json) {
     return TelemetryData(
       latitude: (json['latitude'] as num?)?.toDouble() ?? 0.0,
@@ -78,7 +104,8 @@ class TelemetryData {
       accelerationG: (json['accelerationG'] as num?)?.toDouble() ?? 0.0,
       elapsedMs: (json['elapsedMs'] as num?)?.toInt() ?? 0,
       distanceKm: (json['distanceKm'] as num?)?.toDouble() ?? 0.0,
-      timestamp: DateTime.parse(json['timestamp']),
+      timestamp: DateTime.tryParse(json['timestamp']?.toString() ?? '') ??
+          DateTime.now(),
     );
   }
 }

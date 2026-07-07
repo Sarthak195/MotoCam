@@ -19,10 +19,36 @@ class _RidesListScreenState extends State<RidesListScreen> {
 	late Future<List<RideRecord>> _ridesFuture;
 	bool _isOpeningRide = false;
 
+	Widget _buildStatusBadge({
+		required String label,
+		required Color color,
+	}) {
+		return Container(
+			padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+			decoration: BoxDecoration(
+				color: color.withValues(alpha: 0.2),
+				borderRadius: BorderRadius.circular(12),
+			),
+			child: Text(
+				label,
+				style: TextStyle(
+					color: color,
+					fontSize: 11,
+					fontWeight: FontWeight.w700,
+				),
+			),
+		);
+	}
+
+	bool _hasLoadedRides = false;
+
 	@override
-	void initState() {
-		super.initState();
-		_ridesFuture = _loadRides();
+	void didChangeDependencies() {
+		super.didChangeDependencies();
+		if (!_hasLoadedRides) {
+			_hasLoadedRides = true;
+			_ridesFuture = _loadRides();
+		}
 	}
 
 	Future<List<RideRecord>> _loadRides() async {
@@ -135,6 +161,12 @@ class _RidesListScreenState extends State<RidesListScreen> {
 	Widget _buildRideCard(BuildContext context, RideRecord ride) {
 		final hasTelemetry = ride.telemetryPath != null;
 		final segmentCount = ride.segmentPaths.length;
+		final integrityIsModified =
+			ride.integrity.status == RideIntegrityStatus.modified;
+		final integrityIsVerified =
+			ride.integrity.status == RideIntegrityStatus.verified;
+		final canToggleLockState =
+			!integrityIsModified && !ride.hasQuarantinedSegments;
 
 		return Card(
 			child: ListTile(
@@ -161,23 +193,27 @@ class _RidesListScreenState extends State<RidesListScreen> {
 							),
 							const SizedBox(width: 6),
 						],
-						if (ride.isLocked)
-							Container(
-								padding:
-									const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-								decoration: BoxDecoration(
-									color: Colors.orange.withValues(alpha: 0.2),
-									borderRadius: BorderRadius.circular(12),
-								),
-								child: const Text(
-									'LOCKED',
-									style: TextStyle(
-										color: Colors.orange,
-										fontSize: 11,
-										fontWeight: FontWeight.w700,
-									),
-								),
+						if (integrityIsModified) ...[
+							_buildStatusBadge(
+								label: 'INTEGRITY WARNING',
+								color: Colors.redAccent,
 							),
+							const SizedBox(width: 6),
+						] else if (integrityIsVerified) ...[
+							_buildStatusBadge(
+								label: 'VERIFIED',
+								color: Colors.lightGreen,
+							),
+							const SizedBox(width: 6),
+						],
+						if (ride.hasQuarantinedSegments)
+							_buildStatusBadge(
+								label:
+									'QUARANTINED ${ride.quarantinedSegmentPaths.length}',
+								color: Colors.deepOrangeAccent,
+							),
+						if (ride.isLocked)
+							_buildStatusBadge(label: 'LOCKED', color: Colors.orange),
 					],
 				),
 				subtitle: Column(
@@ -193,6 +229,12 @@ class _RidesListScreenState extends State<RidesListScreen> {
 						Text('Avg speed: ${ride.averageSpeedKmh.toStringAsFixed(1)} km/h'),
 						Text('Segments: $segmentCount'),
 						Text('Samples: ${ride.samples.length}'),
+						Text('Integrity: ${ride.integrityLabel}'),
+						if (ride.hasQuarantinedSegments)
+							Text(
+								'Quarantined paths: ${ride.quarantinedSegmentPaths.length}',
+								style: const TextStyle(color: Colors.deepOrangeAccent),
+							),
 						Text(hasTelemetry ? 'Telemetry: Available' : 'Telemetry: Not available'),
 					],
 				),
@@ -204,14 +246,18 @@ class _RidesListScreenState extends State<RidesListScreen> {
 						children: [
 							if (ride.isLocked)
 								IconButton(
-									tooltip: 'Unlock clip',
+									tooltip: canToggleLockState
+										? 'Unlock clip'
+										: 'Integrity warning: lock state changes disabled',
 									padding: EdgeInsets.zero,
 									constraints: const BoxConstraints(
 										minWidth: 28,
 										minHeight: 28,
 									),
 									iconSize: 20,
-									onPressed: () async {
+									onPressed: !canToggleLockState
+										? null
+										: () async {
 										final messenger = ScaffoldMessenger.of(context);
 										await ride.setLockState(false);
 										if (!mounted) return;

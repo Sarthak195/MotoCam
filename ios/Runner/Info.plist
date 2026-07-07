@@ -21,15 +21,6 @@
     <array>
         <string>location</string>
         <string>audio</string>
-        <string>processing</string>
-    </array>
-
-    <key>NSLocalNetworkUsageDescription</key>
-    <string>MotoCam needs access to local network for data synchronization</string>
-
-    <key>NSBonjourServiceTypes</key>
-    <array>
-        <string>_motocam._tcp</string>
     </array>
 </dict>
 </plist>

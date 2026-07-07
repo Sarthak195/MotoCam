@@ -24,6 +24,12 @@ class RecordingQualityProfile {
   String get label => '$resolution''p / $fps FPS / $bitrateMbps Mbps';
 }
 
+/// Persisted user preferences for recording quality, segment duration,
+/// incident sensitivity, and camera selection.
+///
+/// Settings are backed by [SharedPreferences] and are loaded asynchronously
+/// via [load].  The [isLoaded] flag indicates whether the initial read has
+/// completed; UI code should wait for this before reading values.
 class AppSettingsProvider extends ChangeNotifier {
   static const _qualityKey = 'recording_quality';
   static const _qualityProfileIdKey = 'recording_quality_profile_id';

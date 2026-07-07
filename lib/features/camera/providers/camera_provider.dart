@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:camera/camera.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:path_provider/path_provider.dart';
+import '../../../core/utils/path_utils.dart' as path_utils;
 import 'dart:io';
 import 'dart:async';
 import 'dart:convert';
@@ -29,12 +30,19 @@ class SegmentTimelineEntry {
       };
 }
 
+/// Manages the device camera lifecycle, segmented video recording, rolling
+/// retention, gallery export, and resolution/FPS fallback negotiation.
+///
+/// This provider is intended to be instantiated once via [ChangeNotifierProvider]
+/// at the root of the widget tree.  It exposes the active [CameraController],
+/// recording state, and session segment metadata to the UI layer.
 class CameraProvider extends ChangeNotifier {
   CameraProvider({this.enableDebugLogging = false});
 
   static const platform = MethodChannel('com.example.motocam/media');
   static const String _galleryRelativePath = 'Movies/MotoCam/Recordings';
-  static const String _androidPublicGalleryDirectory =
+  static const String _recordingsDirectoryName = 'MotoCam Recordings';
+  static const String _androidPublicExportDirectory =
       '/storage/emulated/0/Movies/MotoCam/Recordings';
 
   CameraController? _controller;
@@ -186,20 +194,6 @@ class CameraProvider extends ChangeNotifier {
 
   bool _isPermissionGranted(PermissionStatus status) {
     return status.isGranted || status.isLimited;
-  }
-
-  Future<bool> _hasAndroidPublicStorageAccess() async {
-    if (!Platform.isAndroid) {
-      return true;
-    }
-
-    final manageStorageStatus = await Permission.manageExternalStorage.status;
-    if (manageStorageStatus.isGranted) {
-      return true;
-    }
-
-    final legacyStorageStatus = await Permission.storage.status;
-    return _isPermissionGranted(legacyStorageStatus);
   }
 
   static ResolutionPreset presetForResolution(int resolution) {
@@ -380,21 +374,12 @@ class CameraProvider extends ChangeNotifier {
           ? await Permission.microphone.request()
           : PermissionStatus.granted;
       if (Platform.isAndroid) {
-        await Permission.manageExternalStorage.request();
-        await Permission.storage.request();
-        await Permission.videos.request();
         await Permission.notification.request();
-      } else {
-        await Permission.storage.request();
       }
 
-      final hasStoragePermission =
-          !Platform.isAndroid || await _hasAndroidPublicStorageAccess();
-
       if (!_isPermissionGranted(cameraStatus) ||
-          !_isPermissionGranted(microphoneStatus) ||
-          !hasStoragePermission) {
-        _log('Camera, microphone, or public storage permission denied');
+          !_isPermissionGranted(microphoneStatus)) {
+        _log('Camera or microphone permission denied');
         _isInitialized = false;
         notifyListeners();
         return;
@@ -672,42 +657,19 @@ class CameraProvider extends ChangeNotifier {
 
   // Set up recordings directory
   Future<void> _setupRecordingsDirectory() async {
-    if (Platform.isAndroid) {
-      final hasStorageAccess = await _hasAndroidPublicStorageAccess();
-      if (!hasStorageAccess) {
-        _recordingsDirectory = null;
-        _log(
-            'Missing Android public storage access for $_androidPublicGalleryDirectory');
-        return;
-      }
-
-      try {
-        final recordingsDir = Directory(_androidPublicGalleryDirectory);
-        if (!await recordingsDir.exists()) {
-          await recordingsDir.create(recursive: true);
-          _log('Created Android recordings directory: ${recordingsDir.path}');
-        } else {
-          _log('Android recordings directory exists: ${recordingsDir.path}');
-        }
-        _recordingsDirectory = recordingsDir.path;
-        _log('Recordings directory set to: $_recordingsDirectory');
-      } catch (e) {
-        _recordingsDirectory = null;
-        _log('Failed to initialize Android recordings directory: $e');
-      }
-      return;
-    }
-
     try {
       final Directory baseDirectory;
-      if (Platform.isIOS) {
+      if (Platform.isAndroid) {
+        baseDirectory = (await getExternalStorageDirectory()) ??
+            await getApplicationDocumentsDirectory();
+      } else if (Platform.isIOS) {
         baseDirectory = await getApplicationDocumentsDirectory();
       } else {
         baseDirectory = await getApplicationSupportDirectory();
       }
 
       final recordingsDir = Directory(
-        '${baseDirectory.path}${Platform.pathSeparator}MotoCam Recordings',
+        '${baseDirectory.path}${Platform.pathSeparator}$_recordingsDirectoryName',
       );
 
       if (!await recordingsDir.exists()) {
@@ -725,7 +687,7 @@ class CameraProvider extends ChangeNotifier {
       try {
         final cacheDir = await getApplicationCacheDirectory();
         final fallbackDir = Directory(
-          '${cacheDir.path}${Platform.pathSeparator}MotoCam Recordings',
+          '${cacheDir.path}${Platform.pathSeparator}$_recordingsDirectoryName',
         );
         if (!await fallbackDir.exists()) {
           await fallbackDir.create(recursive: true);
@@ -738,33 +700,11 @@ class CameraProvider extends ChangeNotifier {
     }
   }
 
-  String _normalizePath(String path) {
-    var normalized = path.replaceAll('\\', Platform.pathSeparator);
-    normalized = normalized.replaceAll('/', Platform.pathSeparator);
-    while (
-        normalized.length > 1 && normalized.endsWith(Platform.pathSeparator)) {
-      normalized = normalized.substring(0, normalized.length - 1);
-    }
-    return Platform.isWindows ? normalized.toLowerCase() : normalized;
-  }
-
-  bool _isPathInsideDirectory(String filePath, String directoryPath) {
-    final normalizedFilePath = _normalizePath(filePath);
-    final normalizedDirectoryPath = _normalizePath(directoryPath);
-    if (normalizedFilePath == normalizedDirectoryPath) {
-      return true;
-    }
-    return normalizedFilePath
-        .startsWith('$normalizedDirectoryPath${Platform.pathSeparator}');
-  }
-
-  String _fileNameFromPath(String path) {
-    final parts = path.split(Platform.pathSeparator);
-    if (parts.isEmpty) {
-      return path;
-    }
-    return parts.last;
-  }
+  // Path utilities delegate to shared module.
+  String _normalizePath(String path) => path_utils.normalizePath(path);
+  bool _isPathInsideDirectory(String filePath, String directoryPath) =>
+      path_utils.isPathInsideDirectory(filePath, directoryPath);
+  String _fileNameFromPath(String path) => path_utils.fileNameFromPath(path);
 
   Future<String> _buildUniqueSegmentPath(
     String directoryPath,
@@ -1267,10 +1207,14 @@ class CameraProvider extends ChangeNotifier {
     }
 
     if (videoFiles.length > _maxRollingSegments) {
+      // Pre-fetch modification times asynchronously to avoid blocking the
+      // UI thread with synchronous I/O.
+      final modTimes = <File, DateTime>{};
+      for (final file in videoFiles) {
+        modTimes[file] = (await file.stat()).modified;
+      }
       videoFiles.sort((a, b) {
-        final aTime = a.statSync().modified;
-        final bTime = b.statSync().modified;
-        return aTime.compareTo(bTime);
+        return modTimes[a]!.compareTo(modTimes[b]!);
       });
 
       final removeCount = videoFiles.length - _maxRollingSegments;
@@ -1377,6 +1321,20 @@ class CameraProvider extends ChangeNotifier {
     notifyListeners();
   }
 
+  List<String> _segmentsSelectedForPublicExport() {
+    if (_lockedSegmentPaths.isEmpty) {
+      return const <String>[];
+    }
+
+    final exportCandidates = <String>[];
+    for (final path in _sessionSegmentPaths) {
+      if (_lockedSegmentPaths.contains(path)) {
+        exportCandidates.add(path);
+      }
+    }
+    return exportCandidates;
+  }
+
   void _enqueueDeferredGalleryExport(Iterable<String> segmentPaths) {
     if (!Platform.isAndroid) {
       return;
@@ -1388,7 +1346,7 @@ class CameraProvider extends ChangeNotifier {
         continue;
       }
 
-      if (_isPathInsideDirectory(sourcePath, _androidPublicGalleryDirectory)) {
+      if (_isPathInsideDirectory(sourcePath, _androidPublicExportDirectory)) {
         unawaited(_scanMediaFile(sourcePath));
       } else {
         _pendingGalleryExports.add(sourcePath);
@@ -1454,7 +1412,7 @@ class CameraProvider extends ChangeNotifier {
     }
 
     try {
-      final galleryDirectory = Directory(_androidPublicGalleryDirectory);
+      final galleryDirectory = Directory(_androidPublicExportDirectory);
       if (!await galleryDirectory.exists()) {
         await galleryDirectory.create(recursive: true);
       }
@@ -1544,9 +1502,14 @@ class CameraProvider extends ChangeNotifier {
       );
       _log('Final persisted video path: $finalVideoPath');
 
-      // Keep original output paths and export to gallery asynchronously.
+      // In hybrid mode, only explicitly protected clips are auto-exported.
       if (_sessionSegmentPaths.isNotEmpty) {
-        _enqueueDeferredGalleryExport(List<String>.from(_sessionSegmentPaths));
+        final exportCandidates = _segmentsSelectedForPublicExport();
+        if (exportCandidates.isNotEmpty) {
+          _enqueueDeferredGalleryExport(exportCandidates);
+        } else {
+          _log('No locked segments selected for automatic public export.');
+        }
       }
 
       await _enforceRecordingRetention(includeTelemetryPrune: true);

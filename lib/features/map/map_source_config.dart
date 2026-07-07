@@ -1,3 +1,7 @@
+/// Centralized tile-provider configuration for all map widgets.
+///
+/// Switching map providers (e.g. OpenStreetMap → Mapbox) requires changing
+/// only the constants in this class.
 class MapSourceConfig {
   const MapSourceConfig._();
 

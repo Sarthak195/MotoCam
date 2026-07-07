@@ -30,6 +30,9 @@ class BackgroundRecordingService : Service() {
 
     private var wakeLock: PowerManager.WakeLock? = null
 
+    private fun internalBroadcastPermission(): String =
+        "$packageName.permission.INTERNAL_BROADCAST"
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -50,7 +53,10 @@ class BackgroundRecordingService : Service() {
                 stopSelf()
             }
             ACTION_STOP_FROM_NOTIFICATION -> {
-                sendBroadcast(Intent(ACTION_STOP_REQUESTED).setPackage(packageName))
+                sendBroadcast(
+                    Intent(ACTION_STOP_REQUESTED).setPackage(packageName),
+                    internalBroadcastPermission(),
+                )
                 releaseWakeLockIfHeld()
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()

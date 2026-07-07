@@ -1,0 +1,12 @@
+## Key properties template — DO NOT COMMIT
+# Copy this file to android/key.properties and fill with real values.
+
+# Path to the keystore file, relative to the repo root or absolute.
+storeFile=android/release.keystore
+storePassword=REPLACE_WITH_STORE_PASSWORD
+keyAlias=REPLACE_WITH_KEY_ALIAS
+keyPassword=REPLACE_WITH_KEY_PASSWORD
+
+# Notes:
+# - Do NOT commit your real `android/key.properties` or the keystore file.
+# - Use CI secret storage to provide `MOTOCAM_KEYSTORE_*` env vars in automation.

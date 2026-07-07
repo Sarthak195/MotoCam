@@ -3,8 +3,14 @@ import 'dart:io';
 
 import 'package:flutter/services.dart';
 
+/// Events broadcast by [BackgroundRecordingService] to the Flutter side.
 enum BackgroundRecordingEvent { stopRequested }
 
+/// Flutter-side bridge for the native Android foreground-service that keeps
+/// recording alive when the app is backgrounded or the screen is off.
+///
+/// This is a singleton accessed via [instance]. Call [initialize] early in
+/// the app lifecycle to register the method-channel handler.
 class BackgroundRecordingService {
   BackgroundRecordingService._();
 

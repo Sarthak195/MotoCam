@@ -4,6 +4,12 @@ import 'package:permission_handler/permission_handler.dart';
 
 import 'background_recording_service.dart';
 
+/// The result of [AppPermissionService.ensureRequiredPermissions].
+///
+/// Separates missing permissions into [missingRequired] (camera, mic,
+/// location) and [missingRecommended] (notifications, background location,
+/// battery optimisation).  [hasPermanentlyDenied] is `true` when at least
+/// one permission has been permanently denied by the user.
 class PermissionAuditResult {
   const PermissionAuditResult({
     required this.missingRequired,
@@ -20,6 +26,10 @@ class PermissionAuditResult {
       missingRequired.isNotEmpty || missingRecommended.isNotEmpty;
 }
 
+/// Requests and audits all runtime permissions needed by the app.
+///
+/// Call [ensureRequiredPermissions] at startup.  Missing required permissions
+/// block recording; missing recommended ones generate advisory warnings.
 class AppPermissionService {
   const AppPermissionService();
 
@@ -91,32 +101,6 @@ class AppPermissionService {
           required: false,
         );
       }
-
-      var manageStorageStatus = await Permission.manageExternalStorage.status;
-      var legacyStorageStatus = await Permission.storage.status;
-      var hasPublicStorageWrite = manageStorageStatus.isGranted ||
-          _isPermissionGranted(legacyStorageStatus);
-
-      if (!hasPublicStorageWrite) {
-        manageStorageStatus = await Permission.manageExternalStorage.request();
-        legacyStorageStatus = await Permission.storage.request();
-        hasPublicStorageWrite = manageStorageStatus.isGranted ||
-            _isPermissionGranted(legacyStorageStatus);
-      }
-
-      if (!hasPublicStorageWrite) {
-        if (manageStorageStatus.isPermanentlyDenied ||
-            legacyStorageStatus.isPermanentlyDenied) {
-          hasPermanentlyDenied = true;
-        }
-        missingRequired.add('Storage access (Movies/MotoCam/Recordings)');
-      }
-
-      await ensure(
-        Permission.videos,
-        'Media library access (history visibility)',
-        required: false,
-      );
 
       final backgroundService = BackgroundRecordingService.instance;
       final isIgnoringBatteryOptimizations =

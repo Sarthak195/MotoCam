@@ -45,3 +45,10 @@ app.*.map.json
 /android/app/release
 /android/.gradle/
 /ios/Pods/
+
+# Android signing material
+/android/key.properties
+/android/app/*.jks
+/android/app/*.keystore
+/android/*.jks
+/android/*.keystore

@@ -15,73 +15,14 @@ Desktop and web platform folders were intentionally removed.
 
 MotoCam is a mobile application that combines video recording with location tracking and ride telemetry. It is designed for motorcycle riders to capture journeys and review recorded GPS routes during playback.
 
+
 ## Release Notes
 
-### v0.1.10 (2026-04-02)
+All release notes are maintained in the `release-notes/` directory. See the latest entry:
 
-Highlights:
+- v0.1.13 (latest): [release-notes/v0.1.13.md](release-notes/v0.1.13.md)
 
-- Fixed day-later recording visibility issues by moving recording retention to persistent app storage instead of relying on temporary paths.
-- Hardened multi-segment ride metadata handling so stale or malformed telemetry sidecars no longer hide valid video clips.
-- Added fallback history discovery for video-only recovered segments (including older gallery-visible clips) with de-duplication.
-- Added a clear `VIDEO ONLY (RECOVERED)` badge in ride history for clips that are playable but missing telemetry overlays.
-
-Release artifact:
-- `build/app/outputs/flutter-apk/app-release.apk`
-- SHA256: `C1173CE2F7B89840838360DE182DEB19D02D2D43FD73F73805257F65F4FAAFAD`
-- Size: `53,913,969 bytes (51.42 MiB)`
-
-### v0.1.9 (2026-03-31)
-
-Highlights:
-
-- Added a pre-recording checklist to validate permissions, location services, camera readiness, storage writability, and device health before recording starts.
-- Added an interactive route map to ride playback using OpenStreetMap tiles, with start/end/current markers and a collapsible panel state.
-- Added fullscreen playback mode to hide app chrome and focus on video during ride review.
-- Added playback timeline markers for incidents (high-G events) and locked segments, including tap-to-jump navigation.
-- Improved camera lifecycle when moving to and from ride history by releasing idle camera resources and reinitializing cleanly.
-
-Release artifact:
-- `build/app/outputs/flutter-apk/app-release.apk`
-
-### v0.1.8 (2026-03-28)
-
-Highlights:
-
-- Added runtime permission auditing for reliable camera, audio, location, and background recording behavior, with clearer in-app guidance for missing permissions.
-- Added Android device status bridge and live battery/temperature telemetry on the recording screen.
-- Hardened camera settings apply flow to reduce preview loss during resolution switches (interaction lock while applying, controller reset before re-init, preview texture refresh).
-- Implemented safer capability-aware resolution routing so requested quality falls back to the nearest known-supported level per device/camera instead of static assumptions.
-- Improved recording start and settings synchronization messaging so requested versus applied quality/FPS is transparent.
-
-Release artifact:
-- `build/app/outputs/flutter-apk/app-release.apk`
-
-### v0.1.7 (2026-03-23)
-
-Highlights:
-
-- Faster and more stable speed telemetry updates with jitter filtering and stale-update fallback polling.
-- Ride playback upgrades: speed graph, smoother segment transitions, timeline scrubbing improvements, and telemetry continuity fixes.
-- Camera selector support with persisted lens preference.
-- Android background recording improvements with a foreground notification (elapsed timer and stop action).
-- Recording PiP refinements with a minimal compact UI and a blinking REC indicator.
-
-Release artifact:
-- `build/app/outputs/flutter-apk/app-release.apk`
-
-### v0.1.5 (2026-03-22)
-
-- Removed Mappls SDK integration to resolve startup configuration failures.
-- Added persistent recording profile settings for quality, FPS, bitrate, audio, and speed refresh interval.
-- Added active profile chips to the recording screen.
-- Added FPS fallback handling for unsupported device and quality combinations.
-- Added a static GPS route viewer in playback using recorded latitude/longitude samples.
-- Enabled Android release shrinking/minification with ProGuard (R8).
-- Improved telemetry refresh throttling for smoother UI performance.
-
-Release artifact:
-- `build/app/outputs/flutter-apk/app-release.apk`
+To view detailed changes and artifacts for prior releases, open the corresponding file in `release-notes/`.
 
 ## Features
 
@@ -108,10 +49,69 @@ Release artifact:
 
 ```
 lib/
-├── main.dart                 # Application entry point
-├── core/                     # Core utilities and constants
-└── features/                 # Feature modules
+├── main.dart                              # Application entry point & Provider setup
+├── core/
+│   ├── providers/
+│   │   └── app_settings_provider.dart     # Persisted user preferences (SharedPreferences)
+│   ├── services/
+│   │   ├── app_permission_service.dart     # Runtime permission audit & recovery
+│   │   ├── background_recording_service.dart  # Android foreground-service bridge
+│   │   ├── device_status_service.dart      # Battery / thermal status via MethodChannel
+│   │   ├── location_service.dart           # GPS tracking wrapper (Geolocator)
+│   │   └── pip_service.dart               # Picture-in-Picture bridge
+│   └── utils/
+│       ├── integrity_utils.dart            # SHA-256 hashing & atomic file writes
+│       └── path_utils.dart                # Cross-platform path normalisation
+└── features/
+    ├── camera/
+    │   ├── providers/
+    │   │   └── camera_provider.dart        # Camera lifecycle, segments, retention
+    │   └── widgets/
+    │       └── camera_preview_pip.dart     # Compact camera preview widget
+    ├── history/
+    │   ├── models/
+    │   │   └── ride_record.dart            # Ride session model + integrity checks
+    │   ├── widgets/
+    │   │   └── route_map_view.dart         # Interactive flutter_map route viewer
+    │   ├── ride_playback_screen.dart       # Video + telemetry playback
+    │   └── rides_list_screen.dart          # Ride history list
+    ├── map/
+    │   ├── map_source_config.dart          # Tile-provider constants
+    │   └── widgets/
+    │       └── static_map_viewer.dart      # CustomPaint fallback map
+    ├── recording/
+    │   └── recording_screen.dart           # Main recording UI & coordination
+    └── telemetry/
+        ├── models/
+        │   └── telemetry_data.dart         # Per-sample data model
+        └── providers/
+            └── telemetry_provider.dart     # GPS + accelerometer collection
 ```
+
+## Architecture Overview
+
+### State Management
+
+The app uses **Provider** (`ChangeNotifierProvider`) for reactive state management. Three providers form the core:
+
+| Provider | Responsibility |
+|---|---|
+| `AppSettingsProvider` | Persists user preferences via SharedPreferences |
+| `CameraProvider` | Camera lifecycle, segmented recording, rolling retention |
+| `TelemetryProvider` | GPS + accelerometer sampling, incident detection, telemetry persistence |
+
+### Native Bridges (Method Channels)
+
+| Channel | Purpose |
+|---|---|
+| `com.example.motocam/pip` | Enter/detect Picture-in-Picture mode |
+| `com.example.motocam/background_recording` | Android foreground service for screen-off recording |
+| `com.example.motocam/device_status` | Battery level, temperature, thermal throttling |
+| `com.example.motocam/media` | MediaScanner integration and gallery export |
+
+### Integrity Pipeline
+
+Each ride session is protected by a SHA-256 integrity envelope stored in the telemetry JSON. On playback, the `RideRecord` model verifies both the payload hash and per-segment file hashes, surfacing "VERIFIED", "MODIFIED", or "QUARANTINED" statuses to the user.
 
 ## Getting Started
 
@@ -155,7 +155,8 @@ The app requires the following permissions:
 - **Camera**: To record video
 - **Location**: For GPS tracking and navigation
 - **Sensor Access**: To collect motion and orientation data
-- **File Storage**: To save recorded videos
+- **App Storage (private-first)**: To store recordings and telemetry in app-scoped directories
+- **Optional Public Export**: To export selected clips to gallery-compatible public folders
 
 These permissions are managed automatically by the `permission_handler` package.
 
@@ -171,18 +172,50 @@ flutter test
 
 **Android**:
 ```bash
+pwsh ./scripts/release-security-precheck.ps1
 flutter build apk --release
 ```
+
+The release precheck accepts signing credentials from either `android/key.properties` or `MOTOCAM_KEYSTORE_*` environment variables. When both are present, environment variables take precedence.
+The Android version name and version code come from `pubspec.yaml` and are propagated through Flutter's generated `android/local.properties`.
 
 **iOS**:
 ```bash
 flutter build ios --release
 ```
 
+The release precheck is Android-specific for now.
+
 ## Notes
 
 - If Android SDK licenses are pending, run `flutter doctor --android-licenses`.
 - If dependencies change, run `flutter pub get` again.
+- For release builds, run `pwsh ./scripts/release-security-precheck.ps1` before packaging Android artifacts.
+- Use `android/key.properties` for local signing or `MOTOCAM_KEYSTORE_*` in CI and automation.
+
+### Local signing (recommended for open-source development)
+
+If you want to build a signed APK for distribution (not Play Store), generate a local keystore and keep it out of source control.
+
+1. Generate a keystore locally (interactive):
+
+```powershell
+pwsh ./scripts/generate-keystore.ps1
+```
+
+2. Copy `android/key.properties.template` to `android/key.properties` and fill the values.
+
+3. Build a signed release APK:
+
+```bash
+flutter pub get
+pwsh ./scripts/release-security-precheck.ps1
+flutter build apk --release
+```
+
+Notes:
+- The repository `.gitignore` already excludes `android/key.properties` and keystore files. Do not commit them.
+- For Play Store distribution in future, consider enrolling in Play App Signing and using an upload key rather than exposing the app signing key.
 
 ## Dependencies
 

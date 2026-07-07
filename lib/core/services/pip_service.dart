@@ -4,6 +4,11 @@ import 'dart:async';
 
 import 'package:flutter/services.dart';
 
+/// Flutter-side bridge for Android Picture-in-Picture mode.
+///
+/// This singleton listens for PiP mode-change callbacks from the native
+/// activity and exposes them as a [Stream<bool>]. Call [initialize] once
+/// during app startup to wire the method-channel handler.
 class PipService {
   PipService._();
 

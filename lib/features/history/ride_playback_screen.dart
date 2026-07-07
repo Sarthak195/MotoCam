@@ -46,6 +46,7 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
       const <_MissingSegmentRange>[];
   bool _hasShownInitializationWarning = false;
   bool _hasShownRuntimeTrailingWarning = false;
+  bool _hasShownIntegrityWarning = false;
   Offset? _timelineTapStartLocal;
   bool _timelineTapMoved = false;
 
@@ -54,7 +55,51 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     unawaited(_loadPlaybackPreferences());
+    _showIntegrityWarningIfNeeded();
     _initializePlayback();
+  }
+
+  void _showIntegrityWarningIfNeeded() {
+    if (_hasShownIntegrityWarning) {
+      return;
+    }
+
+    final hasIntegrityWarning =
+        widget.ride.integrity.status == RideIntegrityStatus.modified ||
+            widget.ride.hasQuarantinedSegments;
+    if (!hasIntegrityWarning) {
+      return;
+    }
+
+    _hasShownIntegrityWarning = true;
+    final notes = <String>[];
+    final integrityIssueCount = widget.ride.integrity.issues.length;
+    if (integrityIssueCount > 0) {
+      notes.add(
+          '$integrityIssueCount integrity issue${integrityIssueCount == 1 ? '' : 's'}');
+    }
+
+    final quarantinedCount = widget.ride.quarantinedSegmentPaths.length;
+    if (quarantinedCount > 0) {
+      notes.add('$quarantinedCount quarantined path${quarantinedCount == 1 ? '' : 's'}');
+    }
+
+    final detail =
+        notes.isEmpty ? 'modified telemetry metadata' : notes.join(', ');
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Security warning: this ride shows $detail. Playback continues with trusted segments only.',
+          ),
+          duration: const Duration(seconds: 5),
+        ),
+      );
+    });
   }
 
   Future<void> _loadPlaybackPreferences() async {
