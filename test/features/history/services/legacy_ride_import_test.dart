@@ -328,6 +328,26 @@ void main() {
     expect(summary.importedDocuments, isEmpty);
   });
 
+  test('an unlocked ride with no video left stays in the old folder; a '
+      'locked one is imported', () async {
+    writeV012Ride('gone', <String>['x.mp4'], missing: <String>['x.mp4']);
+    writeV012Ride(
+      'kept',
+      <String>['y.mp4'],
+      locked: <String>['y.mp4'],
+      missing: <String>['y.mp4'],
+    );
+    final summary = await importer(_FakeSource(public)).run();
+    expect(summary.withoutVideos, 1);
+    expect(summary.skipped.single.name, 'ride_gone.telemetry.json');
+    expect(summary.imported, 1);
+    expect(rootNames(), <String>['ride_kept.telemetry.json']);
+    expect(summary.importedDocuments.map((d) => d.name), <String>[
+      'ride_kept.telemetry.json',
+    ]);
+    expect(summary.message, contains('1 ride left in the old folder'));
+  });
+
   test('a JSON of the same size but other bytes is a collision', () async {
     final json = writeV012Ride('r5', <String>['f.mp4']);
     final bytes = json.readAsBytesSync().toList();

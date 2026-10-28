@@ -39,6 +39,11 @@ enum LegacyImportSkipReason {
 
   /// A file could not be copied or its copy did not match.
   copyFailed,
+
+  /// The ride JSON is unlocked and none of its videos is in the folder or
+  /// in private storage. In private storage the orphan prune would delete
+  /// it, so it stays in the old folder (as the migration does).
+  noVideoFiles,
 }
 
 /// A ride (by its JSON name, or a lone video's name) that was not imported.
@@ -140,6 +145,11 @@ class LegacyImportSummary {
       .where((skip) => skip.reason == LegacyImportSkipReason.copyFailed)
       .length;
 
+  /// Unlocked ride files left out because none of their videos is left.
+  int get withoutVideos => skipped
+      .where((skip) => skip.reason == LegacyImportSkipReason.noVideoFiles)
+      .length;
+
   /// Rider-facing summary, for example 'Imported 3 rides. 1 ride was
   /// skipped: a different file with the same name is already in private
   /// storage.'.
@@ -166,6 +176,12 @@ class LegacyImportSummary {
     if (failed > 0) {
       sentences.add('${rides(failed)} failed: a file could not be copied');
     }
+    if (withoutVideos > 0) {
+      sentences.add(
+        '${rides(withoutVideos)} left in the old folder: no video files are '
+        'left',
+      );
+    }
     switch (outcome) {
       case LegacyImportOutcome.paused:
         sentences.add(
@@ -186,11 +202,19 @@ class LegacyImportSummary {
 
 /// A ride (its videos, then its JSON) or a lone video in the folder.
 class _ImportUnit {
-  _ImportUnit({required this.name, required this.videos, this.json});
+  _ImportUnit({
+    required this.name,
+    required this.videos,
+    this.json,
+    this.skipReason,
+  });
 
   final String name;
   final List<LegacyRideDocument> videos;
   final LegacyRideDocument? json;
+
+  /// Set when the unit is known to stay in the folder.
+  final LegacyImportSkipReason? skipReason;
 
   List<LegacyRideDocument> get documents => <LegacyRideDocument>[
     ...videos,
@@ -357,6 +381,13 @@ class LegacyRideImporter {
         outcome = LegacyImportOutcome.paused;
         break;
       }
+      final presetReason = unit.skipReason;
+      if (presetReason != null) {
+        skipped.add(LegacyImportSkip(name: unit.name, reason: presetReason));
+        done++;
+        onProgress?.call(LegacyImportProgress(done: done, total: total));
+        continue;
+      }
       onProgress?.call(
         LegacyImportProgress(
           done: done,
@@ -444,15 +475,32 @@ class LegacyRideImporter {
       final json = byName[name]!;
       claimed.add(name);
       final videos = <LegacyRideDocument>[];
-      for (final videoName in await _declaredVideoNames(json)) {
+      final declared = await _declaredVideos(json);
+      var anyVideoInRoot = false;
+      for (final videoName in declared.names) {
         final video = byName[videoName];
         if (video != null &&
             ride_codec.isRideVideoFilePath(videoName) &&
             claimed.add(videoName)) {
           videos.add(video);
         }
+        if (video == null &&
+            !anyVideoInRoot &&
+            await File(_destinationFor(videoName)).exists()) {
+          anyVideoInRoot = true;
+        }
       }
-      units.add(_ImportUnit(name: name, videos: videos, json: json));
+      units.add(
+        _ImportUnit(
+          name: name,
+          videos: videos,
+          json: json,
+          skipReason:
+              videos.isEmpty && !anyVideoInRoot && !declared.keepWithoutVideo
+              ? LegacyImportSkipReason.noVideoFiles
+              : null,
+        ),
+      );
     }
     for (final name in names) {
       if (ride_codec.isRideVideoFilePath(name) && claimed.add(name)) {
@@ -471,16 +519,27 @@ class LegacyRideImporter {
     return units;
   }
 
-  /// File names the ride JSON [json] declares as its videos, in order; an
-  /// unreadable JSON declares none (it is still imported, as it is).
-  Future<List<String>> _declaredVideoNames(LegacyRideDocument json) async {
+  /// File names the ride JSON [json] declares as its videos, in order, and
+  /// whether it is imported even with no video left: when it locks a
+  /// segment (the orphan prune keeps it) or cannot be read (it is imported
+  /// as it is, with no declared videos).
+  Future<({List<String> names, bool keepWithoutVideo})> _declaredVideos(
+    LegacyRideDocument json,
+  ) async {
     final staged = File(_stagingFor(json.name));
     final names = <String>[];
+    var keepWithoutVideo = true;
     try {
       await Directory(_stagingPath).create(recursive: true);
       await _copyWithPause(json, staged.path);
       final decoded = await ride_codec.readRideFileJson(staged);
       if (decoded != null) {
+        final rawLocked = decoded['lockedSegmentPaths'];
+        keepWithoutVideo = ride_codec
+            .normalizeSegmentPathList(
+              rawLocked is List ? rawLocked : const <Object?>[],
+            )
+            .isNotEmpty;
         final rawSegments = decoded['segmentPaths'];
         final declared = ride_codec.normalizeSegmentPathList(
           rawSegments is List ? rawSegments : const <Object?>[],
@@ -514,7 +573,7 @@ class LegacyRideImporter {
         names.add(candidate);
       }
     }
-    return names;
+    return (names: names, keepWithoutVideo: keepWithoutVideo);
   }
 
   Future<_UnitResult> _importUnit(_ImportUnit unit) async {

@@ -2057,7 +2057,9 @@ class CameraProvider extends ChangeNotifier {
       _logError('Storage budget run failed: $e');
     } finally {
       _isStorageBudgetRunning = false;
-      notifyListeners();
+      if (!_isDisposed) {
+        notifyListeners();
+      }
       // The migration may have been waiting for this run (after a stop).
       _maybeStartRecordingsMigration();
     }
