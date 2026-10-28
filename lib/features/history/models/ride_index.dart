@@ -320,6 +320,10 @@ class RideIndexStore {
   RideIndex? _memory;
   Future<RideIndex>? _loading;
 
+  /// The in-memory index, or `null` until [read] has loaded it. It can be
+  /// newer than the file while a write is queued.
+  RideIndex? get loaded => _memory;
+
   static Future<RideIndexStore?>? _shared;
 
   /// The app's store at

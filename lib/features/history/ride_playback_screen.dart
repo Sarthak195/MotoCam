@@ -1,4 +1,3 @@
-import 'dart:collection';
 import 'dart:io';
 import 'dart:isolate';
 import 'dart:math' as math;
@@ -11,7 +10,9 @@ import 'package:video_player/video_player.dart';
 import '../../core/utils/format_utils.dart';
 import '../map/map_source_config.dart';
 import '../telemetry/models/telemetry_data.dart';
+import 'models/ride_index.dart';
 import 'models/ride_record.dart';
+import 'models/segment_verifier.dart';
 import 'widgets/playback_seekbar_track_shape.dart';
 import 'widgets/playback_timeline.dart';
 import 'widgets/route_map_view.dart';
@@ -21,14 +22,19 @@ import 'widgets/route_map_view.dart';
 /// footage, integrity-check failures, incidents and locked segments, and an
 /// optional online route map.
 ///
-/// Segment integrity is checked in the background after the screen opens;
-/// segments that cannot be confirmed unmodified since recording are marked on
-/// the seekbar.
+/// A sample-less [ride] (from Ride History) is first loaded in full on a
+/// background isolate. Segment integrity is then checked in the background,
+/// one segment at a time starting with the one about to play; results are
+/// stored in the ride index, so an unchanged segment is not hashed again,
+/// and leaving the screen stops the check after the segment in flight.
+/// Segments that cannot be confirmed unmodified since recording are marked
+/// on the seekbar.
 class RidePlaybackScreen extends StatefulWidget {
   /// Creates a playback screen for [ride].
   const RidePlaybackScreen({super.key, required this.ride});
 
-  /// The ride to play.
+  /// The ride to play; it may be sample-less ([RideRecord.samplesLoaded]
+  /// `false`).
   final RideRecord ride;
 
   @override
@@ -44,16 +50,6 @@ class _PendingSeek {
   final bool shouldResume;
 }
 
-class _SegmentIntegrityResult {
-  const _SegmentIntegrityResult({
-    required this.issues,
-    required this.quarantinedCount,
-  });
-
-  final List<String> issues;
-  final int quarantinedCount;
-}
-
 class _RidePlaybackScreenState extends State<RidePlaybackScreen>
     with WidgetsBindingObserver {
   static const String _showRouteMapPrefKey = 'ride_playback_show_route_map';
@@ -64,13 +60,13 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
   /// marker.
   static const double _markerTapTolerancePx = 18;
 
-  /// Segment-integrity results of recently opened rides, keyed by the
-  /// telemetry path and the size and modification time of every file, so
-  /// re-opening an unchanged ride does not hash its segments again and
-  /// concurrent opens share one job.
-  static final LinkedHashMap<String, Future<_SegmentIntegrityResult>>
-  _integrityJobs = LinkedHashMap<String, Future<_SegmentIntegrityResult>>();
-  static const int _maxCachedIntegrityJobs = 16;
+  /// The ride being played: [RidePlaybackScreen.ride] until its samples
+  /// are loaded.
+  late RideRecord _ride;
+
+  /// Stops the running segment check; replaced by each new check.
+  SegmentCheckToken? _segmentCheckToken;
+  bool _isCheckingSegments = false;
 
   VideoPlayerController? _controller;
   bool _isLoading = true;
@@ -116,24 +112,58 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
   @override
   void initState() {
     super.initState();
+    _ride = widget.ride;
     final lifecycle = WidgetsBinding.instance.lifecycleState;
     _isAppInForeground =
         lifecycle == null || lifecycle == AppLifecycleState.resumed;
     WidgetsBinding.instance.addObserver(this);
-    for (final sample in widget.ride.samples) {
+    unawaited(_loadPlaybackPreferences());
+    unawaited(_start());
+  }
+
+  /// Loads the samples (Ride History passes a sample-less ride), shows the
+  /// load-time notices, builds the playlist and loads the first segment,
+  /// then checks the segment files, starting with the one about to play.
+  Future<void> _start() async {
+    if (!_ride.samplesLoaded) {
+      final ride = await _loadFullRide(_ride);
+      if (!mounted || _isDisposing) {
+        return;
+      }
+      setState(() {
+        _ride = ride;
+      });
+    }
+    for (final sample in _ride.samples) {
       _maxSampleSpeed = math.max(_maxSampleSpeed, sample.speed);
     }
-    unawaited(_loadPlaybackPreferences());
     _showInitialIntegrityWarning();
+    await _initializePlayback();
+    if (!mounted || _isDisposing) {
+      return;
+    }
     unawaited(_verifySegmentsAsync());
-    unawaited(_initializePlayback());
+  }
+
+  /// Reads the ride with its samples on a background isolate (on this one
+  /// if that fails). A ride that cannot be re-read plays without telemetry.
+  static Future<RideRecord> _loadFullRide(RideRecord ride) async {
+    try {
+      return await Isolate.run(ride.loadSamples);
+    } catch (_) {
+      try {
+        return await ride.loadSamples();
+      } catch (_) {
+        return ride;
+      }
+    }
   }
 
   /// Shows what the payload-level check done when loading the ride found,
   /// that a ride without an integrity record cannot be checked, and that
   /// its GPS came from a simulated location provider.
   void _showInitialIntegrityWarning() {
-    final ride = widget.ride;
+    final ride = _ride;
     final integrityNotice = describeIntegrityIssues(
       issues: ride.integrity.issues,
       quarantinedCount: ride.quarantinedSegmentPaths.length,
@@ -148,7 +178,8 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
         'GPS in this ride came from a simulated (mock) location provider.',
     ];
     // Segments without a recorded hash are known before any hashing, so the
-    // seekbar can mark them right away; the background check refines this.
+    // seekbar can mark them right away; the background check adds the
+    // segments whose hash differs.
     _integrityFailedPaths = segmentPathsFailingIntegrity(ride.integrity.issues);
     if (notices.isEmpty) {
       return;
@@ -162,33 +193,105 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
     });
   }
 
-  Future<void> _verifySegmentsAsync() async {
-    final _SegmentIntegrityResult result;
-    try {
-      result = await _segmentIntegrityFor(widget.ride);
-    } catch (_) {
-      return;
-    }
-    if (!mounted || _isDisposing) {
+  /// Checks the segment files against the hashes in the ride's envelope,
+  /// one at a time: the segment about to play first, then the others in
+  /// timeline order. Results stored in the ride index are reused unless
+  /// [ignoreCache]; every new result is stored. A failed segment is marked
+  /// on the seekbar as soon as it is found. With [announce] (the 'Check
+  /// videos again' action) the outcome is always reported.
+  Future<void> _verifySegmentsAsync({
+    bool ignoreCache = false,
+    bool announce = false,
+  }) async {
+    _segmentCheckToken?.cancel();
+    final token = SegmentCheckToken();
+    _segmentCheckToken = token;
+    final ride = _ride;
+    final activePath =
+        _activeSegmentIndex >= 0 && _activeSegmentIndex < _segmentPaths.length
+        ? _segmentPaths[_activeSegmentIndex]
+        : null;
+    final targets = orderSegmentsForCheck(
+      timelineOrder: <String>[
+        for (final entry in _timelineEntries) entry.path,
+        ...ride.segmentPaths,
+      ],
+      expectedHashes: ride.expectedSegmentHashes,
+      missing: ride.missingSegmentPaths.toSet(),
+      first: activePath,
+    );
+    if (targets.isEmpty) {
+      if (announce) {
+        _showMessage(
+          'This ride has no recorded video hashes to check.',
+          replaceCurrent: true,
+        );
+      }
       return;
     }
 
-    final failedPaths = segmentPathsFailingIntegrity(result.issues);
+    final verifier = SegmentVerifier(store: await RideIndexStore.shared());
+    if (token.isCancelled || !mounted || _isDisposing) {
+      return;
+    }
     setState(() {
-      _integrityFailedPaths = failedPaths;
-      _failedCheckRanges = rangesForPaths(
-        timeline: _timelineEntries,
-        paths: _integrityFailedPaths,
+      _isCheckingSegments = true;
+    });
+    final hashIssues = <String>[];
+    try {
+      await verifier.verify(
+        targets,
+        token: token,
+        ignoreCache: ignoreCache,
+        onResult: (result) {
+          final issue = result.issue;
+          if (issue == null) {
+            return;
+          }
+          hashIssues.add(issue);
+          if (token.isCancelled || !mounted || _isDisposing) {
+            return;
+          }
+          setState(() {
+            _integrityFailedPaths = <String>{
+              ..._integrityFailedPaths,
+              result.path,
+            };
+            _failedCheckRanges = rangesForPaths(
+              timeline: _timelineEntries,
+              paths: _integrityFailedPaths,
+            );
+          });
+        },
       );
+    } catch (_) {
+      // The check is advisory; playback continues without it.
+    }
+    if (token.isCancelled || !mounted || _isDisposing) {
+      return;
+    }
+    setState(() {
+      _isCheckingSegments = false;
     });
 
-    if (failedPaths.isEmpty && _hasShownIntegrityWarning) {
+    final issues = <String>[...ride.integrity.issues, ...hashIssues];
+    final notice = describeIntegrityIssues(
+      issues: issues,
+      quarantinedCount: ride.quarantinedSegmentPaths.length,
+    );
+    if (announce) {
+      _showMessage(
+        notice ??
+            'Videos checked: all ${targets.length} segment(s) match the '
+                'recording.',
+        duration: const Duration(seconds: 6),
+        replaceCurrent: true,
+      );
       return;
     }
-    final notice = describeIntegrityIssues(
-      issues: result.issues,
-      quarantinedCount: result.quarantinedCount,
-    );
+    if (hashIssues.isEmpty && _hasShownIntegrityWarning) {
+      return;
+    }
     // Do not repeat the notice already shown from the load-time check.
     if (notice == null || notice == _shownIntegrityNotice) {
       return;
@@ -198,73 +301,21 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
     _showMessage(notice, duration: const Duration(seconds: 6));
   }
 
-  static Future<_SegmentIntegrityResult> _segmentIntegrityFor(
-    RideRecord ride,
-  ) async {
-    final key = await _integrityCacheKey(ride);
-    final cached = _integrityJobs.remove(key);
-    if (cached != null) {
-      _integrityJobs[key] = cached;
-      return cached;
-    }
-
-    final job = _verifySegmentsOffUiIsolate(ride);
-    _integrityJobs[key] = job;
-    while (_integrityJobs.length > _maxCachedIntegrityJobs) {
-      unawaited(_integrityJobs.remove(_integrityJobs.keys.first));
-    }
-    unawaited(
-      job.catchError((Object _) {
-        unawaited(_integrityJobs.remove(key));
-        return const _SegmentIntegrityResult(
-          issues: <String>[],
-          quarantinedCount: 0,
-        );
-      }),
-    );
-    return job;
-  }
-
-  /// Hashes the ride's segments on a background isolate so playback and the
-  /// UI stay responsive; falls back to the current isolate if that fails.
-  ///
-  /// Only the issue list and the quarantine count come back from the
-  /// isolate, not the whole ride with its telemetry samples.
-  static Future<_SegmentIntegrityResult> _verifySegmentsOffUiIsolate(
-    RideRecord ride,
-  ) async {
-    Future<_SegmentIntegrityResult> verify() async {
-      final verified = await ride.verifySegmentIntegrity();
-      return _SegmentIntegrityResult(
-        issues: List<String>.of(verified.integrity.issues),
-        quarantinedCount: verified.quarantinedSegmentPaths.length,
+  /// The 'Check videos again' action: hashes every segment again, ignoring
+  /// stored results.
+  void _checkVideosAgain() {
+    _segmentCheckToken?.cancel();
+    setState(() {
+      _integrityFailedPaths = segmentPathsFailingIntegrity(
+        _ride.integrity.issues,
       );
-    }
-
-    try {
-      return await Isolate.run(verify);
-    } catch (_) {
-      return verify();
-    }
-  }
-
-  static Future<String> _integrityCacheKey(RideRecord ride) async {
-    final buffer = StringBuffer(ride.telemetryPath ?? ride.videoPath);
-    final paths = <String>[
-      if (ride.telemetryPath != null) ride.telemetryPath!,
-      ...ride.segmentPaths,
-    ];
-    for (final path in paths) {
-      final stat = await FileStat.stat(path);
-      buffer
-        ..write('|')
-        ..write(path)
-        ..write(':')
-        ..write(stat.size)
-        ..write(':')
-        ..write(stat.modified.millisecondsSinceEpoch);
-    }
-    return buffer.toString();
+      _failedCheckRanges = rangesForPaths(
+        timeline: _timelineEntries,
+        paths: _integrityFailedPaths,
+      );
+    });
+    _showMessage('Checking the videos again...', replaceCurrent: true);
+    unawaited(_verifySegmentsAsync(ignoreCache: true, announce: true));
   }
 
   void _showMessage(
@@ -359,11 +410,11 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
 
   Future<void> _initializePlayback() async {
     final declaredPaths = orderedDeclaredSegmentPaths(
-      segmentPaths: widget.ride.segmentPaths,
-      videoPath: widget.ride.videoPath,
+      segmentPaths: _ride.segmentPaths,
+      videoPath: _ride.videoPath,
     );
     final storedTimelinePaths = <String>{
-      for (final entry in widget.ride.segmentTimeline)
+      for (final entry in _ride.segmentTimeline)
         if (entry.endMs - entry.startMs >= minPlaybackSegmentMs)
           entry.path.trim(),
     };
@@ -421,7 +472,7 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
 
     final timeline = buildEffectiveTimeline(
       declaredPaths: declaredPaths,
-      storedTimeline: widget.ride.segmentTimeline,
+      storedTimeline: _ride.segmentTimeline,
       probedDurationsByPath: probedDurationsByPath,
     );
     final declaredSet = declaredPaths.toSet();
@@ -444,8 +495,8 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
       );
     }
 
-    final telemetryMs = widget.ride.samples.isNotEmpty
-        ? widget.ride.samples.last.elapsedMs
+    final telemetryMs = _ride.samples.isNotEmpty
+        ? _ride.samples.last.elapsedMs
         : 0;
     var totalMs = telemetryMs;
     for (final entry in timeline) {
@@ -467,12 +518,12 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
     _lockMarkerMs = lockMarkerOffsetsMs(
       playlistPaths: _segmentPaths,
       playlistOffsets: _segmentOffsets,
-      lockedPaths: widget.ride.lockedSegmentPaths,
+      lockedPaths: _ride.lockedSegmentPaths,
       totalMs: totalMs,
     );
     // Rides that saved live-detected incidents show exactly those; older
     // files fall back to the sample heuristic.
-    final recordedIncidents = widget.ride.incidents;
+    final recordedIncidents = _ride.incidents;
     _incidentMarkerMs = recordedIncidents != null
         ? recordedIncidentOffsetsMs(
             elapsedMs: [
@@ -480,10 +531,7 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
             ],
             totalMs: totalMs,
           )
-        : incidentMarkerOffsetsMs(
-            samples: widget.ride.samples,
-            totalMs: totalMs,
-          );
+        : incidentMarkerOffsetsMs(samples: _ride.samples, totalMs: totalMs);
 
     var loaded = false;
     for (var index = 0; index < _segmentPaths.length; index++) {
@@ -1165,13 +1213,13 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
     Duration duration, {
     required bool isPlaying,
   }) {
-    if (widget.ride.samples.isEmpty) {
+    if (_ride.samples.isEmpty) {
       return const SizedBox.shrink();
     }
 
     final graphDurationMs = math.max(
       duration.inMilliseconds,
-      widget.ride.samples.last.elapsedMs,
+      _ride.samples.last.elapsedMs,
     );
 
     return Positioned(
@@ -1239,7 +1287,7 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
                   },
                   child: CustomPaint(
                     painter: _SpeedGraphPainter(
-                      samples: widget.ride.samples,
+                      samples: _ride.samples,
                       maxSpeed: _maxSampleSpeed,
                       currentPositionMs: position.inMilliseconds,
                       totalDurationMs: graphDurationMs,
@@ -1334,7 +1382,25 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
     return Scaffold(
       appBar: _isFullscreenPlayback
           ? null
-          : AppBar(title: const Text('Ride Playback')),
+          : AppBar(
+              title: const Text('Ride Playback'),
+              actions: [
+                if (_ride.expectedSegmentHashes.isNotEmpty)
+                  IconButton(
+                    tooltip: _isCheckingSegments
+                        ? 'Checking videos'
+                        : 'Check videos again',
+                    onPressed: _isLoading ? null : _checkVideosAgain,
+                    icon: _isCheckingSegments
+                        ? const SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.fact_check_outlined),
+                  ),
+              ],
+            ),
       body: playbackError != null
           ? _buildPlaybackError(playbackError)
           : _isLoading || controller == null
@@ -1346,7 +1412,7 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
                     ? (_scrubPreviewPosition ?? _globalPosition())
                     : _globalPosition();
                 final duration = _totalDuration;
-                final sample = widget.ride.sampleForPosition(position);
+                final sample = _ride.sampleForPosition(position);
                 final viewportHeight = MediaQuery.sizeOf(context).height;
                 final mapHeight = (viewportHeight * 0.14)
                     .clamp(90.0, 130.0)
@@ -1368,11 +1434,9 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
                               ),
                             ),
                           ),
-                          if (showPlaybackChrome &&
-                              widget.ride.samples.isNotEmpty)
+                          if (showPlaybackChrome && _ride.samples.isNotEmpty)
                             _buildOverlay(sample),
-                          if (showPlaybackChrome &&
-                              widget.ride.samples.isNotEmpty)
+                          if (showPlaybackChrome && _ride.samples.isNotEmpty)
                             _buildSpeedGraph(
                               position,
                               duration,
@@ -1429,7 +1493,7 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
                         ],
                       ),
                     ),
-                    if (showPlaybackChrome && widget.ride.samples.isNotEmpty)
+                    if (showPlaybackChrome && _ride.samples.isNotEmpty)
                       Container(
                         margin: const EdgeInsets.fromLTRB(12, 6, 12, 0),
                         padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
@@ -1495,7 +1559,7 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
                                   ? Padding(
                                       padding: const EdgeInsets.only(top: 8),
                                       child: RouteMapView(
-                                        telemetryData: widget.ride.samples,
+                                        telemetryData: _ride.samples,
                                         height: mapHeight,
                                         currentSample: sample,
                                       ),
@@ -1688,6 +1752,8 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
   @override
   void dispose() {
     _isDisposing = true;
+    // Stops the segment check after the segment being hashed.
+    _segmentCheckToken?.cancel();
     _loadGeneration++;
     _pendingSeek = null;
     WidgetsBinding.instance.removeObserver(this);

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:isolate';
 
@@ -8,7 +9,9 @@ import 'package:provider/provider.dart';
 import '../../core/utils/format_utils.dart';
 import '../camera/providers/camera_provider.dart';
 import 'models/ride_history_loader.dart';
+import 'models/ride_index.dart';
 import 'models/ride_record.dart';
+import 'models/segment_verifier.dart';
 import 'ride_playback_screen.dart';
 import 'widgets/playback_timeline.dart';
 
@@ -26,7 +29,15 @@ class _RidesListScreenState extends State<RidesListScreen> {
   late Future<List<RideRecord>> _ridesFuture;
   bool _isOpeningRide = false;
   final Set<String> _lockUpdatesInFlight = <String>{};
+
+  /// Share of a running lock change's segment checks that are done, by
+  /// lock key; `null` (indeterminate) until the first segment is checked.
+  final Map<String, double?> _lockProgress = <String, double?>{};
   final Set<String> _deletesInFlight = <String>{};
+
+  /// Video check state of each telemetry ride, by [rideIndexKey] of its
+  /// telemetry path.
+  Map<String, RideVideoCheck> _videoChecks = <String, RideVideoCheck>{};
 
   Widget _buildStatusBadge({required String label, required Color color}) {
     return Container(
@@ -64,21 +75,81 @@ class _RidesListScreenState extends State<RidesListScreen> {
         .whereType<File>()
         .map((file) => file.path)
         .toList(growable: false);
-    return _loadRideHistoryInBackground(recordingPaths);
+    final store = await RideIndexStore.shared();
+    final load = await _loadRideHistoryInBackground(
+      recordingPaths,
+      indexFilePath: store?.file.path,
+      index: store?.loaded,
+    );
+    if (store != null) {
+      // The UI isolate is the index's only writer.
+      await store.read(adopt: load.readIndex);
+      unawaited(
+        store.update((index) {
+          index.rides
+            ..clear()
+            ..addAll(load.rideEntries);
+          index.pruneSegmentHashes();
+        }),
+      );
+    }
+    _videoChecks = load.videoChecks;
+    return load.rides;
   }
 
-  /// Parses and hash-checks the rides on a background isolate so long
-  /// histories do not block the UI thread. Static so the isolate closure
-  /// captures only [recordingPaths].
-  static Future<List<RideRecord>> _loadRideHistoryInBackground(
-    List<String> recordingPaths,
-  ) async {
+  /// Loads the rides through the ride index on a background isolate so
+  /// long histories do not block the UI thread. The isolate reads the index
+  /// file at [indexFilePath], or uses [index] when the store already holds
+  /// it in memory (it may be newer than the file). Static so the isolate
+  /// closure captures only its arguments.
+  static Future<RideHistoryLoad> _loadRideHistoryInBackground(
+    List<String> recordingPaths, {
+    required String? indexFilePath,
+    required RideIndex? index,
+  }) async {
+    Future<RideHistoryLoad> load() => loadRideHistoryIndexed(
+      recordingPaths,
+      indexFilePath: index == null ? indexFilePath : null,
+      index: index,
+    );
     try {
-      return await Isolate.run(() => loadRideHistory(recordingPaths));
+      return await Isolate.run(load);
     } catch (_) {
       // Fall back to the current isolate if the background one fails.
-      return loadRideHistory(recordingPaths);
+      return load();
     }
+  }
+
+  RideVideoCheck _videoCheckOf(RideRecord ride) {
+    final path = ride.telemetryPath;
+    if (path == null) {
+      return RideVideoCheck.none;
+    }
+    return _videoChecks[rideIndexKey(path)] ?? RideVideoCheck.none;
+  }
+
+  /// Re-reads [ride]'s video check state from the index (after playback
+  /// checked its segments); nothing is hashed.
+  Future<void> _refreshVideoCheck(RideRecord ride) async {
+    final path = ride.telemetryPath;
+    final store = await RideIndexStore.shared();
+    if (path == null || store == null) {
+      return;
+    }
+    final check = await videoCheckFromIndex(
+      ride: ride,
+      index: await store.read(),
+      stat: statRideFile,
+    );
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _videoChecks = <String, RideVideoCheck>{
+        ..._videoChecks,
+        rideIndexKey(path): check,
+      };
+    });
   }
 
   String _formatDuration(Duration duration) => formatElapsed(duration);
@@ -86,10 +157,12 @@ class _RidesListScreenState extends State<RidesListScreen> {
   String _lockKeyFor(RideRecord ride) => ride.telemetryPath ?? ride.videoPath;
 
   /// Whether [RideRecord.setLockState] may run for [ride]: it refuses rides
-  /// that failed the integrity check or have quarantined paths.
-  static bool _canChangeLockState(RideRecord ride) =>
+  /// that failed the integrity check (including a failed video check
+  /// already stored in the ride index) or have quarantined paths.
+  bool _canChangeLockState(RideRecord ride) =>
       ride.integrity.status != RideIntegrityStatus.modified &&
-      !ride.hasQuarantinedSegments;
+      !ride.hasQuarantinedSegments &&
+      _videoCheckOf(ride).failed == 0;
 
   Future<void> _confirmAndUnlock(RideRecord ride) async {
     final lockKey = _lockKeyFor(ride);
@@ -123,15 +196,45 @@ class _RidesListScreenState extends State<RidesListScreen> {
     }
 
     final messenger = ScaffoldMessenger.of(context);
+    // Segments with a recorded hash are checked before the file is
+    // rewritten; the progress ring counts them.
+    final toCheck = ride.expectedSegmentHashes.keys
+        .where((path) => !ride.missingSegmentPaths.contains(path))
+        .length;
+    var checked = 0;
     setState(() {
       _lockUpdatesInFlight.add(lockKey);
+      _lockProgress[lockKey] = null;
     });
 
     var unlocked = false;
+    final store = await RideIndexStore.shared();
     try {
-      unlocked = await ride.setLockState(false);
+      unlocked = await ride.setLockState(
+        false,
+        hashSegment: SegmentVerifier(store: store).lockHasher(
+          onChecked: () {
+            checked++;
+            if (mounted && toCheck > 0) {
+              setState(() {
+                _lockProgress[lockKey] = (checked / toCheck).clamp(0.0, 1.0);
+              });
+            }
+          },
+        ),
+      );
     } catch (_) {
       unlocked = false;
+    }
+    final telemetryPath = ride.telemetryPath;
+    if (unlocked && store != null && telemetryPath != null) {
+      // The ride JSON changed, so its index entry is stale; the reload
+      // below decodes the file again.
+      unawaited(
+        store.update(
+          (index) => index.rides.remove(rideIndexKey(telemetryPath)),
+        ),
+      );
     }
     if (!mounted) {
       return;
@@ -139,6 +242,7 @@ class _RidesListScreenState extends State<RidesListScreen> {
 
     setState(() {
       _lockUpdatesInFlight.remove(lockKey);
+      _lockProgress.remove(lockKey);
       if (unlocked) {
         _ridesFuture = _loadRides();
       }
@@ -297,6 +401,11 @@ class _RidesListScreenState extends State<RidesListScreen> {
 
           final lockedRides = rides.where((ride) => ride.isLocked).toList();
           final otherRides = rides.where((ride) => !ride.isLocked).toList();
+          final items = <Object>[
+            if (lockedRides.isNotEmpty) ...['Locked Clips', ...lockedRides],
+            'All Rides',
+            ...otherRides,
+          ];
 
           return RefreshIndicator(
             onRefresh: () async {
@@ -305,35 +414,33 @@ class _RidesListScreenState extends State<RidesListScreen> {
               });
               await _ridesFuture;
             },
-            child: ListView(
+            // Section headers are Strings and cards are rides; only the
+            // visible cards are built.
+            child: ListView.builder(
               padding: const EdgeInsets.all(12),
-              children: [
-                if (lockedRides.isNotEmpty) ...[
-                  const Padding(
-                    padding: EdgeInsets.only(bottom: 8),
-                    child: Text(
-                      'Locked Clips',
-                      style: TextStyle(
-                        fontSize: 16,
-                        fontWeight: FontWeight.bold,
-                      ),
+              itemCount: items.length,
+              itemBuilder: (context, index) {
+                final item = items[index];
+                if (item is RideRecord) {
+                  return Padding(
+                    padding: const EdgeInsets.only(bottom: 10),
+                    child: _buildRideCard(context, item),
+                  );
+                }
+                return Padding(
+                  padding: EdgeInsets.only(
+                    bottom: 8,
+                    top: item == 'All Rides' ? 6 : 0,
+                  ),
+                  child: Text(
+                    item as String,
+                    style: const TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
                     ),
                   ),
-                  ...lockedRides
-                      .map((ride) => _buildRideCard(context, ride))
-                      .expand((card) => [card, const SizedBox(height: 10)]),
-                ],
-                const Padding(
-                  padding: EdgeInsets.only(bottom: 8, top: 6),
-                  child: Text(
-                    'All Rides',
-                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-                  ),
-                ),
-                ...otherRides
-                    .map((ride) => _buildRideCard(context, ride))
-                    .expand((card) => [card, const SizedBox(height: 10)]),
-              ],
+                );
+              },
             ),
           );
         },
@@ -344,6 +451,7 @@ class _RidesListScreenState extends State<RidesListScreen> {
   List<Widget> _buildBadges(RideRecord ride) {
     final hasTelemetry = ride.telemetryPath != null;
     final status = ride.integrity.status;
+    final videoCheck = _videoCheckOf(ride);
     return [
       if (!hasTelemetry)
         _buildStatusBadge(
@@ -361,6 +469,12 @@ class _RidesListScreenState extends State<RidesListScreen> {
         _buildStatusBadge(label: 'DATA UNMODIFIED', color: Colors.lightGreen)
       else if (hasTelemetry)
         _buildStatusBadge(label: 'UNVERIFIED', color: Colors.grey),
+      // From segment hashes stored in the ride index by playback or the
+      // lock flow; nothing is hashed here.
+      if (videoCheck.failed > 0)
+        _buildStatusBadge(label: 'VIDEO CHECK FAILED', color: Colors.redAccent)
+      else if (videoCheck.isVerified)
+        _buildStatusBadge(label: 'VIDEOS VERIFIED', color: Colors.lightGreen),
       if (ride.hasQuarantinedSegments)
         _buildStatusBadge(
           label: 'QUARANTINED ${ride.quarantinedSegmentPaths.length}',
@@ -380,8 +494,7 @@ class _RidesListScreenState extends State<RidesListScreen> {
   String _integrityText(RideRecord ride) {
     switch (ride.integrity.status) {
       case RideIntegrityStatus.verified:
-        return 'Integrity: ride data unmodified since recording '
-            '(videos are checked on playback)';
+        return 'Integrity: ride data unmodified since recording';
       case RideIntegrityStatus.modified:
         return 'Integrity: check failed';
       case RideIntegrityStatus.unknown:
@@ -411,6 +524,7 @@ class _RidesListScreenState extends State<RidesListScreen> {
     final badges = _buildBadges(ride);
     final videoCoverage = _videoCoverageText(ride);
     final isDeleting = _deletesInFlight.contains(_lockKeyFor(ride));
+    final videoLine = describeVideoCheck(_videoCheckOf(ride));
 
     return Card(
       child: ListTile(
@@ -452,6 +566,15 @@ class _RidesListScreenState extends State<RidesListScreen> {
             ),
             Text('Samples: ${ride.sampleCount}'),
             Text(_integrityLine(ride)),
+            if (videoLine != null)
+              Text(
+                videoLine,
+                style: TextStyle(
+                  color: _videoCheckOf(ride).failed > 0
+                      ? Colors.redAccent
+                      : null,
+                ),
+              ),
             if (ride.hasQuarantinedSegments)
               Text(
                 'Quarantined paths: ${ride.quarantinedSegmentPaths.length}',
@@ -471,12 +594,18 @@ class _RidesListScreenState extends State<RidesListScreen> {
             mainAxisAlignment: MainAxisAlignment.end,
             children: [
               if (ride.isLocked && isUpdatingLock)
-                const Padding(
-                  padding: EdgeInsets.all(4),
+                Padding(
+                  padding: const EdgeInsets.all(4),
                   child: SizedBox(
                     width: 20,
                     height: 20,
-                    child: CircularProgressIndicator(strokeWidth: 2),
+                    child: Tooltip(
+                      message: 'Checking the videos before unlocking',
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        value: _lockProgress[_lockKeyFor(ride)],
+                      ),
+                    ),
                   ),
                 )
               else if (ride.isLocked)
@@ -534,6 +663,8 @@ class _RidesListScreenState extends State<RidesListScreen> {
           } finally {
             _isOpeningRide = false;
           }
+          // Playback stored the segments it checked; show the new state.
+          unawaited(_refreshVideoCheck(ride));
         },
       ),
     );
