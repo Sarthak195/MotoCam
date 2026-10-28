@@ -236,6 +236,14 @@ void main() {
       File(sep('notes.json')).writeAsStringSync('{}');
       expect(findOrphanTelemetryFiles(root.path), isEmpty);
     });
+
+    test('does not scan subdirectories', () {
+      Directory(sep('nested')).createSync();
+      writeSidecar('nested${Platform.pathSeparator}ride_h.telemetry.json', {
+        'segmentPaths': [sep('gone.mp4')],
+      });
+      expect(findOrphanTelemetryFiles(root.path), isEmpty);
+    });
   });
 
   group('isActiveSegmentLocked', () {

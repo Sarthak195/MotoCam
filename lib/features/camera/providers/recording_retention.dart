@@ -97,8 +97,9 @@ bool isActiveSegmentLocked({
   return isRecording && pendingLockSequences.contains(activeSequence);
 }
 
-/// Lists the `*.telemetry.json` sidecars under [directoryPath] (recursively)
-/// whose ride no longer has any video segment on disk.
+/// Lists the `*.telemetry.json` sidecars directly inside [directoryPath]
+/// (subdirectories are not scanned) whose ride no longer has any video
+/// segment on disk.
 ///
 /// The segments are the ones the reader starts from: `segmentPaths` under
 /// the codec's segment-list rule, or `[videoPath]` when that list is empty
@@ -118,10 +119,7 @@ List<String> findOrphanTelemetryFiles(String directoryPath) {
   }
 
   final orphans = <String>[];
-  for (final entity in directory.listSync(
-    recursive: true,
-    followLinks: false,
-  )) {
+  for (final entity in directory.listSync(followLinks: false)) {
     if (entity is! File ||
         !entity.path.toLowerCase().endsWith('.telemetry.json')) {
       continue;
