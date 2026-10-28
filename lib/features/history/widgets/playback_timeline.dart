@@ -592,26 +592,46 @@ Set<String> segmentPathsFailingIntegrity(List<String> issues) {
 /// Segments that failed the check are counted once each, quarantined paths
 /// are counted once (from [quarantinedCount], not from the issue list), and
 /// missing segment files are not reported here because the seekbar already
-/// marks them as missing footage.
+/// marks them as missing footage. Signature issues get their own wording:
+/// `signature-removed` (this phone signed the ride but the file is now
+/// unsigned or signed by another key) and the other `signature-*`,
+/// `missing-signature` and `unsupported-signature-alg:` codes.
 String? describeIntegrityIssues({
   required List<String> issues,
   required int quarantinedCount,
 }) {
   final failedSegments = segmentPathsFailingIntegrity(issues).length;
   var rideDataIssues = 0;
+  var signatureIssues = 0;
   for (final issue in issues) {
     final isSegmentFailure = failedSegmentIssuePrefixes.any(
       (prefix) => issue.startsWith(prefix),
     );
     if (isSegmentFailure ||
         issue.startsWith('quarantined-segment-paths') ||
-        issue.startsWith('missing-segment-file:')) {
+        issue.startsWith('missing-segment-file:') ||
+        issue == 'signature-removed') {
+      continue;
+    }
+    if (issue.startsWith('signature-') ||
+        issue == 'missing-signature' ||
+        issue.startsWith('unsupported-signature-alg:')) {
+      signatureIssues++;
       continue;
     }
     rideDataIssues++;
   }
 
   final parts = <String>[];
+  if (issues.contains('signature-removed')) {
+    parts.add(
+      'this phone signed this ride, but its signature was removed or '
+      'replaced, so the ride data may have changed since recording',
+    );
+  }
+  if (signatureIssues > 0) {
+    parts.add('the ride\'s signature does not match its data');
+  }
   if (rideDataIssues > 0) {
     parts.add('the ride data may have changed since recording');
   }

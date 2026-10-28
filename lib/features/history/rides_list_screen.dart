@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 
+import '../../core/services/ride_signing_service.dart';
 import '../../core/utils/format_utils.dart';
 import '../camera/providers/camera_provider.dart';
 import 'models/ride_history_loader.dart';
@@ -105,10 +106,14 @@ class _RidesListScreenState extends State<RidesListScreen> {
       _indexStore = store;
       store.addListener(_onIndexChanged);
     }
+    // This phone's key and the rides it wrote signed: read here (platform
+    // channel, SharedPreferences) and passed into the loader isolate.
+    final signerContext = await loadRideSignerContext();
     final load = await _loadRideHistoryInBackground(
       recordingPaths,
       indexFilePath: store?.file.path,
       index: store?.loaded,
+      signerContext: signerContext,
     );
     if (store != null) {
       // The UI isolate is the index's only writer.
@@ -129,17 +134,20 @@ class _RidesListScreenState extends State<RidesListScreen> {
   /// Loads the rides through the ride index on a background isolate so
   /// long histories do not block the UI thread. The isolate reads the index
   /// file at [indexFilePath], or uses [index] when the store already holds
-  /// it in memory (it may be newer than the file). Static so the isolate
-  /// closure captures only its arguments.
+  /// it in memory (it may be newer than the file). [signerContext] says
+  /// who signed each ride. Static so the isolate closure captures only its
+  /// arguments.
   static Future<RideHistoryLoad> _loadRideHistoryInBackground(
     List<String> recordingPaths, {
     required String? indexFilePath,
     required RideIndex? index,
+    required RideSignerContext signerContext,
   }) async {
     Future<RideHistoryLoad> load() => loadRideHistoryIndexed(
       recordingPaths,
       indexFilePath: index == null ? indexFilePath : null,
       index: index,
+      signerContext: signerContext,
     );
     try {
       return await Isolate.run(load);
@@ -365,6 +373,14 @@ class _RidesListScreenState extends State<RidesListScreen> {
         failed++;
       }
     }
+    final rideSessionId = ride.rideSessionId;
+    final telemetryPath = ride.telemetryPath;
+    if (rideSessionId != null &&
+        telemetryPath != null &&
+        !await File(telemetryPath).exists()) {
+      // The ride is gone, so it no longer counts as written signed here.
+      await SignedRideRegistry.instance.remove(rideSessionId);
+    }
     if (!mounted) {
       return;
     }
@@ -494,7 +510,14 @@ class _RidesListScreenState extends State<RidesListScreen> {
       else if (ride.mockLocationDetected)
         _buildStatusBadge(label: 'SIMULATED GPS', color: Colors.purpleAccent)
       // The list checks only the ride data; video files are hashed when
-      // the ride is opened.
+      // the ride is opened. Only a ride signed with this phone's own key
+      // shows as signed; a copy on another phone shows as unmodified.
+      else if (status == RideIntegrityStatus.verified &&
+          ride.integrity.signedBy == RideSignedBy.thisDevice)
+        _buildStatusBadge(
+          label: 'SIGNED ON THIS PHONE',
+          color: Colors.lightGreen,
+        )
       else if (status == RideIntegrityStatus.verified)
         _buildStatusBadge(label: 'DATA UNMODIFIED', color: Colors.lightGreen)
       else if (hasTelemetry)
@@ -524,9 +547,25 @@ class _RidesListScreenState extends State<RidesListScreen> {
   String _integrityText(RideRecord ride) {
     switch (ride.integrity.status) {
       case RideIntegrityStatus.verified:
-        return 'Integrity: ride data unmodified since recording';
+        return switch (ride.integrity.signedBy) {
+          RideSignedBy.thisDevice =>
+            'Integrity: ride data unmodified and signed by this phone\'s '
+                'MotoCam key (it shows no edit by anyone without that key; it '
+                'does not prove the footage is genuine)',
+          RideSignedBy.otherKey =>
+            'Integrity: ride data unmodified; signed by another phone or an '
+                'earlier install of MotoCam',
+          RideSignedBy.unknownSigner =>
+            'Integrity: ride data unmodified; signed, but this phone\'s key '
+                'could not be read to check by whom',
+          RideSignedBy.none =>
+            'Integrity: ride data unmodified since recording',
+        };
       case RideIntegrityStatus.modified:
-        return 'Integrity: check failed';
+        return ride.integrity.issues.contains('signature-removed')
+            ? 'Integrity: check failed (this phone signed this ride, but the '
+                  'signature was removed or replaced)'
+            : 'Integrity: check failed';
       case RideIntegrityStatus.unknown:
         if (ride.telemetryPath == null) {
           return 'Integrity: not available';

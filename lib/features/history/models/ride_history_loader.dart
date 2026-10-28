@@ -16,12 +16,14 @@ class RideHistoryLoad {
     required this.decodedPaths,
   });
 
-  /// Sample-less rides, newest first.
+  /// Sample-less rides, newest first, with the signer context applied
+  /// ([RideRecord.withSignerContext]).
   final List<RideRecord> rides;
 
   /// Fresh index entries for every telemetry file that loaded, keyed by
   /// [rideIndexKey]. Files that are gone or failed to load are absent, so
-  /// storing this map drops their old entries.
+  /// storing this map drops their old entries. Entries hold the rides
+  /// before the signer context.
   final Map<String, RideIndexEntry> rideEntries;
 
   /// Video check state of each telemetry ride, keyed by [rideIndexKey] of
@@ -51,6 +53,10 @@ class RideHistoryLoad {
 /// video-only rides through [RideRecord.fromVideoFile]. Rides are returned
 /// newest first.
 ///
+/// Each ride's integrity report is then derived for [signerContext] (this
+/// phone's key and the rides it wrote signed, read on the UI isolate), for
+/// cached and decoded rides alike; see [RideRecord.withSignerContext].
+///
 /// The index is only read here. The caller stores [RideHistoryLoad.rideEntries]
 /// through the UI isolate's [RideIndexStore].
 ///
@@ -62,6 +68,7 @@ Future<RideHistoryLoad> loadRideHistoryIndexed(
   String? indexFilePath,
   RideIndex? index,
   RideFileStatSource stat = statRideFile,
+  RideSignerContext? signerContext,
 }) async {
   final readIndex =
       index ??
@@ -110,8 +117,9 @@ Future<RideHistoryLoad> loadRideHistoryIndexed(
       if (ride == null) {
         continue;
       }
-      rides.add(ride);
       rideEntries[key] = RideIndexEntry(path: path, stamp: stamp, ride: ride);
+      ride = ride.withSignerContext(signerContext);
+      rides.add(ride);
       videoChecks[key] = await videoCheckFromIndex(
         ride: ride,
         index: readIndex,

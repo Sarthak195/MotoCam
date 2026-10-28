@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:isolate';
 
 import '../../../core/ride_file/ride_telemetry_codec.dart' as ride_codec;
 import '../../../core/ride_file/ride_telemetry_codec.dart'
@@ -6,7 +7,10 @@ import '../../../core/ride_file/ride_telemetry_codec.dart'
         RideIncident,
         RideIntegrityReport,
         RideIntegrityStatus,
-        RideSegmentTimelineEntry;
+        RideSegmentTimelineEntry,
+        RideSignedBy,
+        RideSignerContext;
+import '../../../core/services/ride_signing_service.dart';
 import '../../../core/utils/integrity_utils.dart' as integrity_utils;
 import '../../../core/utils/path_utils.dart' as path_utils;
 import '../../telemetry/models/telemetry_data.dart';
@@ -18,7 +22,9 @@ export '../../../core/ride_file/ride_telemetry_codec.dart'
         RideIncident,
         RideIntegrityReport,
         RideIntegrityStatus,
-        RideSegmentTimelineEntry;
+        RideSegmentTimelineEntry,
+        RideSignedBy,
+        RideSignerContext;
 
 /// Represents a persisted ride session loaded from a telemetry JSON file.
 ///
@@ -132,7 +138,9 @@ class RideRecord {
   /// [samplesLoaded] is `false`.
   final int lastSampleElapsedMs;
 
-  /// Result of the most recent integrity check.
+  /// Result of the most recent integrity check. Records read from a file
+  /// carry the report from the file alone; [withSignerContext] adds who
+  /// signed the ride and the `signature-removed` check.
   final RideIntegrityReport integrity;
 
   /// Declared segment paths rejected because they lie outside the
@@ -267,6 +275,53 @@ class RideRecord {
       elapsedMs: targetMs,
       distanceKm: _lerp(lower.distanceKm, upper.distanceKm, t),
       timestamp: timestamp,
+    );
+  }
+
+  /// This ride with its [integrity] derived for [context] (see
+  /// `applySignerContext`): who signed it, and `signature-removed` when this
+  /// install wrote it signed but it no longer is. A `null` [context] gives
+  /// the report from the file alone.
+  RideRecord withSignerContext(RideSignerContext? context) {
+    final report = ride_codec.applySignerContext(
+      integrity,
+      rideSessionId: rideSessionId,
+      context: context,
+    );
+    if (identical(report, integrity)) {
+      return this;
+    }
+    return _withIntegrity(report);
+  }
+
+  RideRecord _withIntegrity(
+    RideIntegrityReport report, {
+    List<String>? quarantinedSegmentPaths,
+    List<String>? missingSegmentPaths,
+  }) {
+    return RideRecord(
+      videoPath: videoPath,
+      segmentPaths: segmentPaths,
+      lockedSegmentPaths: lockedSegmentPaths,
+      createdAt: createdAt,
+      telemetryPath: telemetryPath,
+      rideSessionId: rideSessionId,
+      isSessionComplete: isSessionComplete,
+      distanceKm: distanceKm,
+      maxSpeedKmh: maxSpeedKmh,
+      averageSpeedKmh: averageSpeedKmh,
+      segmentTimeline: segmentTimeline,
+      samples: samples,
+      samplesLoaded: samplesLoaded,
+      sampleCount: sampleCount,
+      lastSampleElapsedMs: lastSampleElapsedMs,
+      integrity: report,
+      quarantinedSegmentPaths:
+          quarantinedSegmentPaths ?? this.quarantinedSegmentPaths,
+      missingSegmentPaths: missingSegmentPaths ?? this.missingSegmentPaths,
+      incidents: incidents,
+      mockLocationDetected: mockLocationDetected,
+      expectedSegmentHashes: expectedSegmentHashes,
     );
   }
 
@@ -446,7 +501,8 @@ class RideRecord {
   /// is already `true`, otherwise the ride re-read from [telemetryPath]
   /// (this record when that fails or there is no telemetry file). So a
   /// result with a [telemetryPath] and [samplesLoaded] `false` means the
-  /// file could not be read again.
+  /// file could not be read again. The re-read ride keeps the signer
+  /// context of this record's [integrity].
   ///
   /// Parsing a long ride takes a while; run it off the UI isolate.
   Future<RideRecord> loadSamples() async {
@@ -454,7 +510,8 @@ class RideRecord {
     if (samplesLoaded || path == null) {
       return this;
     }
-    return await fromTelemetryFile(File(path)) ?? this;
+    final ride = await fromTelemetryFile(File(path));
+    return ride?.withSignerContext(integrity.signerContext) ?? this;
   }
 
   /// Locks ([locked] `true`) or unlocks every segment of this ride in its
@@ -466,12 +523,23 @@ class RideRecord {
   /// and only the payload hash is recomputed; a legacy ride without an
   /// envelope is updated without creating one, so it stays unverified.
   ///
+  /// A ride validly signed by this phone (or by an unknown signer, when
+  /// this phone's key could not be read) is re-signed with [signer]
+  /// (default: this phone's Keystore key through
+  /// [RideSigningService.instance]) and stays a version 3 file. When the
+  /// signer fails, or its key differs from the signer of a ride this phone
+  /// signed, the change is refused and the file is left untouched. A ride
+  /// signed by another key, or unsigned, is re-sealed as version 2: a
+  /// foreign signature is dropped, since it signed the old hash.
+  ///
   /// Segment files are hashed with [hashSegment]; Ride History passes one
   /// that reuses still-valid results from the ride index
   /// (`SegmentVerifier.lockHasher`) and hashes the rest off the UI isolate.
+  /// Call it on the UI isolate (the signer uses a platform channel).
   Future<bool> setLockState(
     bool locked, {
     ride_codec.SegmentFileHasher hashSegment = ride_codec.hashSegmentFile,
+    ride_codec.RidePayloadSigner? signer,
   }) async {
     if (integrity.status == RideIntegrityStatus.modified ||
         hasQuarantinedSegments) {
@@ -513,16 +581,64 @@ class RideRecord {
           return false;
         }
 
-        ride_codec.applyLockState(
+        final facts = report.signature;
+        final resign =
+            report.status == RideIntegrityStatus.verified &&
+            facts != null &&
+            facts.valid &&
+            integrity.signedBy != RideSignedBy.otherKey;
+        if (!resign) {
+          ride_codec.applyLockState(
+            json,
+            segments: segments,
+            locked: locked,
+            reseal: report.status == RideIntegrityStatus.verified,
+          );
+          await integrity_utils.writeTelemetryAtomically(
+            telemetryFile: telemetryFile,
+            content: ride_codec.encodeRideFileJson(json),
+          );
+          return true;
+        }
+
+        final payloadHash = ride_codec.applyLockState(
           json,
           segments: segments,
           locked: locked,
-          reseal: report.status == RideIntegrityStatus.verified,
-        );
+          reseal: true,
+          envelopeVersion: ride_codec.signedIntegrityEnvelopeVersion,
+        )!;
+        final signature =
+            await (signer ?? RideSigningService.instance.signPayloadHash)(
+              payloadHash,
+            );
+        if (signature == null) {
+          return false;
+        }
+        var updated = json;
+        if (ride_codec.sameRideSigningKey(
+          signature.publicKey,
+          facts.signerPublicKey,
+        )) {
+          final valid = await Isolate.run(
+            () => ride_codec.isValidRideSignature(signature, payloadHash),
+          );
+          if (!valid) {
+            return false;
+          }
+          updated = ride_codec.withRideSignature(json, signature);
+        } else if (integrity.signedBy == RideSignedBy.thisDevice) {
+          // This phone signed the ride but now answers with another key.
+          return false;
+        } else {
+          // The signer was unknown and is not this phone: drop the foreign
+          // signature and seal as version 2.
+          ride_codec.resealIntegrityEnvelope(json);
+        }
 
         await integrity_utils.writeTelemetryAtomically(
           telemetryFile: telemetryFile,
-          content: ride_codec.encodeRideFileJson(json),
+          content: ride_codec.encodeRideFileJson(updated),
         );
         return true;
       } catch (_) {
@@ -559,34 +675,20 @@ class RideRecord {
         return this;
       }
 
-      final integrity = await ride_codec.checkRideFileIntegrity(
+      final report = await ride_codec.checkRideFileIntegrity(
         json: json,
         segments: segments,
         verifySegments: true,
       );
 
-      return RideRecord(
-        videoPath: videoPath,
-        segmentPaths: segmentPaths,
-        lockedSegmentPaths: lockedSegmentPaths,
-        createdAt: createdAt,
-        telemetryPath: telemetryPath,
-        rideSessionId: rideSessionId,
-        isSessionComplete: isSessionComplete,
-        distanceKm: distanceKm,
-        maxSpeedKmh: maxSpeedKmh,
-        averageSpeedKmh: averageSpeedKmh,
-        segmentTimeline: segmentTimeline,
-        samples: samples,
-        samplesLoaded: samplesLoaded,
-        sampleCount: sampleCount,
-        lastSampleElapsedMs: lastSampleElapsedMs,
-        integrity: integrity,
+      return _withIntegrity(
+        ride_codec.applySignerContext(
+          report,
+          rideSessionId: rideSessionId,
+          context: integrity.signerContext,
+        ),
         quarantinedSegmentPaths: segments.quarantinedSegmentPaths,
         missingSegmentPaths: segments.missingSegmentPaths,
-        incidents: incidents,
-        mockLocationDetected: mockLocationDetected,
-        expectedSegmentHashes: expectedSegmentHashes,
       );
     } catch (_) {
       return this;

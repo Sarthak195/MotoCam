@@ -17,14 +17,16 @@ import 'dart:isolate';
 import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 
+import '../../../core/ride_file/ride_telemetry_codec.dart'
+    show RideSignatureFacts;
 import '../../../core/utils/integrity_utils.dart' as integrity_utils;
 import '../../../core/utils/path_utils.dart' as path_utils;
 import '../../telemetry/models/telemetry_data.dart';
 import 'ride_record.dart';
 
 /// Format number written to the index; a file with any other number is
-/// ignored and rebuilt.
-const int rideIndexFormatVersion = 1;
+/// ignored and rebuilt. Format 2 added the signature facts of each ride.
+const int rideIndexFormatVersion = 2;
 
 /// Name of the directory under the application support directory that
 /// holds the index.
@@ -111,6 +113,11 @@ String rideIndexKey(String path) => path_utils.normalizePath(path);
 
 /// One ride in the index: the telemetry file's path and stamp when it was
 /// decoded, and the sample-less [RideRecord] decoded from it.
+///
+/// Only what the file says is stored: the integrity report from the file
+/// alone ([RideIntegrityReport.contentReport]) with its signature facts.
+/// Who signed the ride is derived again on every load, because it depends
+/// on this phone's key.
 class RideIndexEntry {
   /// Creates an entry.
   const RideIndexEntry({
@@ -126,7 +133,7 @@ class RideIndexEntry {
   final RideFileStamp stamp;
 
   /// The decoded ride, without samples ([RideRecord.samplesLoaded] is
-  /// `false`).
+  /// `false`). Only its content report is stored.
   final RideRecord ride;
 
   /// The entry as stored in the index.
@@ -513,13 +520,40 @@ Map<String, dynamic> _rideToJson(RideRecord ride) => <String, dynamic>{
             },
         ],
   'mockLocationDetected': ride.mockLocationDetected,
-  'integrity': <String, dynamic>{
-    'status': ride.integrity.status.name,
-    'hasMetadata': ride.integrity.hasMetadata,
-    'issues': ride.integrity.issues,
-  },
+  'integrity': _integrityToJson(ride.integrity.contentReport),
   'expectedSegmentHashes': ride.expectedSegmentHashes,
 };
+
+Map<String, dynamic> _integrityToJson(RideIntegrityReport report) {
+  final signature = report.signature;
+  return <String, dynamic>{
+    'status': report.status.name,
+    'hasMetadata': report.hasMetadata,
+    'issues': report.issues,
+    // The signature outcome, so verification runs once per file version.
+    'signature': signature == null
+        ? null
+        : <String, dynamic>{
+            'publicKey': signature.signerPublicKey,
+            'valid': signature.valid,
+          },
+  };
+}
+
+RideSignatureFacts? _signatureFromJson(Map<String, dynamic> integrityJson) {
+  if (!integrityJson.containsKey('signature')) {
+    throw const FormatException('no signature field');
+  }
+  final raw = integrityJson['signature'];
+  if (raw == null) {
+    return null;
+  }
+  final map = _stringMap(raw);
+  return RideSignatureFacts(
+    signerPublicKey: map['publicKey'] as String?,
+    valid: map['valid'] as bool,
+  );
+}
 
 RideRecord _rideFromJson(
   Map<String, dynamic> json, {
@@ -529,12 +563,16 @@ RideRecord _rideFromJson(
   final status = RideIntegrityStatus.values.byName(
     integrityJson['status'] as String,
   );
+  final signature = _signatureFromJson(integrityJson);
   final integrity = switch (status) {
     RideIntegrityStatus.unknown => const RideIntegrityReport.unknown(),
-    RideIntegrityStatus.verified => const RideIntegrityReport.verified(),
+    RideIntegrityStatus.verified => RideIntegrityReport.verified(
+      signature: signature,
+    ),
     RideIntegrityStatus.modified => RideIntegrityReport.modified(
       _stringList(integrityJson['issues']),
       hasMetadata: integrityJson['hasMetadata'] as bool,
+      signature: signature,
     ),
   };
   final rawIncidents = json['incidents'];
