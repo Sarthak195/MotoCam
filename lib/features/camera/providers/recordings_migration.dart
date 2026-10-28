@@ -214,6 +214,7 @@ class _MigrationUnit {
     required this.root,
     required this.name,
     required this.files,
+    this.movedFiles = const <String>[],
     this.skipReason,
   });
 
@@ -222,6 +223,12 @@ class _MigrationUnit {
 
   /// Source paths in move order; a ride JSON is always last.
   final List<String> files;
+
+  /// Source paths of declared files of the ride that an earlier run already
+  /// moved (gone from the legacy root, present in the recordings root).
+  /// Never moved again, but named with the ride wherever its files are
+  /// protected or hidden, and counted when checking whether it is split.
+  final List<String> movedFiles;
 
   /// Set when the unit is known to stay where it is.
   RecordingsMigrationSkipReason? skipReason;
@@ -371,9 +378,11 @@ class RecordingsMigrator {
   /// returns before planning.
   int? _lowStorageBytes;
 
-  /// Split paths read from the journal at the start of this run, kept in
-  /// every journal written before the run's end, so a run that pauses
-  /// still names the rides an earlier run left split (the storage budget
+  /// Split paths read from the journal at the start of this run plus those
+  /// of every ride this run left split (written to the journal at once),
+  /// less those of rides this run then moved whole. Kept in every journal
+  /// written before and at the run's end, so a run that pauses, is killed
+  /// or skips a ride still names every ride left split (the storage budget
   /// reads them, see [protectedDestinationPaths]).
   Set<String> _carriedSplitPaths = const <String>{};
 
@@ -597,7 +606,11 @@ class RecordingsMigrator {
         continue;
       }
       if (_stoppedForSpace && _copyRoots.contains(unit.root)) {
-        // Left where it is; rides that are only renamed still move.
+        // Left where it is; rides that are only renamed still move. A ride
+        // an earlier run left half-moved stays named as split.
+        if (unit.movedFiles.isNotEmpty) {
+          await _noteSplit(unit, splitPaths, reported);
+        }
         continue;
       }
 
@@ -606,10 +619,11 @@ class RecordingsMigrator {
         outcome = RecordingsMigrationOutcome.paused;
         break;
       }
-      if (result != _FileResult.moved &&
-          result != _FileResult.vanished &&
-          await _isSplit(unit)) {
-        splitPaths.addAll(_unitPaths(unit));
+      if (result == _FileResult.moved || result == _FileResult.vanished) {
+        // Whole in the recordings root now: no longer split.
+        _carriedSplitPaths = _carriedSplitPaths.difference(_unitPaths(unit));
+      } else if (await _isSplit(unit)) {
+        await _noteSplit(unit, splitPaths, reported);
       }
       if (result == _FileResult.lowStorage) {
         continue;
@@ -648,17 +662,21 @@ class RecordingsMigrator {
     };
     final shouldNotify =
         moved > 0 || newlyReported.difference(reported).isNotEmpty;
+    // Every ride still split: those this run split and those an earlier
+    // run split that this run did not move whole (skipped, paused before
+    // them, or stopped on them again).
+    final allSplitPaths = <String>{...splitPaths, ..._carriedSplitPaths};
     // A paused run keeps the journal naming the ride in flight.
     if (outcome != RecordingsMigrationOutcome.paused) {
       await _saveJournal(
         reported: newlyReported,
-        split: splitPaths,
+        split: allSplitPaths,
         // Only from a run that reached its end, so every ride that is only
         // renamed was handled before a later run may skip planning.
         lowStorageBytes: _lowStorageBytes,
         done:
             outcome == RecordingsMigrationOutcome.completed &&
-            splitPaths.isEmpty &&
+            allSplitPaths.isEmpty &&
             _snapshot != null,
       );
     }
@@ -669,13 +687,31 @@ class RecordingsMigrator {
       skipped: List<RecordingsMigrationSkip>.unmodifiable(skipped),
       remaining: total - done,
       shouldNotify: shouldNotify,
-      splitPaths: Set<String>.unmodifiable(splitPaths),
+      splitPaths: Set<String>.unmodifiable(allSplitPaths),
     );
   }
 
-  /// Normalised source and destination paths of every file of [unit].
+  /// Records [unit] as split: in [splitPaths] and, written to the journal
+  /// at once, in the split list every later journal of this run carries,
+  /// so a pause or a kill before the run's end never drops it.
+  Future<void> _noteSplit(
+    _MigrationUnit unit,
+    Set<String> splitPaths,
+    Set<String> reported,
+  ) async {
+    final paths = _unitPaths(unit);
+    splitPaths.addAll(paths);
+    _carriedSplitPaths = <String>{..._carriedSplitPaths, ...paths};
+    await _saveJournal(reported: reported);
+  }
+
+  /// Normalised source and destination paths of every file of [unit],
+  /// those an earlier run moved included.
   Set<String> _unitPaths(_MigrationUnit unit) => <String>{
-    for (final source in unit.files) ...<String>{
+    for (final source in <String>[
+      ...unit.movedFiles,
+      ...unit.files,
+    ]) ...<String>{
       path_utils.normalizePath(source),
       path_utils.normalizePath(_destinationFor(source)),
     },
@@ -686,7 +722,7 @@ class RecordingsMigrator {
   Future<bool> _isSplit(_MigrationUnit unit) async {
     var inRoot = false;
     var inLegacyRoot = false;
-    for (final source in unit.files) {
+    for (final source in <String>[...unit.movedFiles, ...unit.files]) {
       if (await File(source).exists()) {
         inLegacyRoot = true;
       } else if (await File(_destinationFor(source)).exists()) {
@@ -762,6 +798,7 @@ class RecordingsMigrator {
     final name = path_utils.fileNameFromPath(telemetryFile.path);
     claimed.add(path_utils.normalizePath(telemetryFile.path));
     final videos = <String>[];
+    final moved = <String>[];
     // Whether the ride still has a video here or already in the
     // recordings root (a ride interrupted half-way), or must move anyway.
     var keepsRide = false;
@@ -794,8 +831,11 @@ class RecordingsMigrator {
               continue;
             }
             if (missing.contains(path)) {
-              keepsRide =
-                  keepsRide || await File(_destinationFor(path)).exists();
+              if (await File(_destinationFor(path)).exists()) {
+                // Moved by an earlier run: stays part of the ride.
+                keepsRide = true;
+                moved.add(path);
+              }
               continue;
             }
             if (!path_utils.isPathInsideDirectory(path, root) ||
@@ -817,6 +857,7 @@ class RecordingsMigrator {
       root: root,
       name: name,
       files: <String>[...videos, telemetryFile.path],
+      movedFiles: moved,
       skipReason: keepsRide ? null : RecordingsMigrationSkipReason.noVideoFiles,
     );
   }
@@ -865,7 +906,8 @@ class RecordingsMigrator {
       'root': unit.root,
       'name': unit.name,
       'telemetry': _isRideJson(unit.files.last) ? unit.files.last : null,
-      'files': unit.files,
+      // Files an earlier run moved too, so the storage budget keeps them.
+      'files': <String>[...unit.movedFiles, ...unit.files],
     };
 
     var anyMoved = false;
@@ -1206,17 +1248,20 @@ class RecordingsMigrationController extends ChangeNotifier {
   RecordingsMigrationProgress? get progress => _progress;
 
   /// Normalised paths of the ride being moved while a run is running or
-  /// paused in the middle of it, and after a finished run those of the
-  /// rides it left split ([RecordingsMigrationSummary.splitPaths]). Ride
-  /// History leaves these files out so a half-moved ride is not shown.
+  /// paused in the middle of it, and after a run those of the rides left
+  /// split ([RecordingsMigrationSummary.splitPaths]; after a paused run
+  /// both). Ride History leaves these files out so a half-moved ride is
+  /// not shown.
   Set<String> get inFlightPaths {
     final last = _lastSummary;
-    if (_running == null &&
-        last != null &&
-        last.outcome != RecordingsMigrationOutcome.paused) {
-      return last.splitPaths;
+    final progress = _progress?.inFlightPaths ?? const <String>{};
+    if (_running == null && last != null) {
+      if (last.outcome != RecordingsMigrationOutcome.paused) {
+        return last.splitPaths;
+      }
+      return <String>{...progress, ...last.splitPaths};
     }
-    return _progress?.inFlightPaths ?? const <String>{};
+    return progress;
   }
 
   /// Summary of the last finished run.

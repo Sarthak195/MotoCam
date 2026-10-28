@@ -811,6 +811,131 @@ void main() {
       expect(pending.existsSync(), isTrue);
     });
 
+    group('a ride left split stays named for the storage budget', () {
+      String inRoot(String name) => path_utils.normalizePath('$root$sep$name');
+      Future<Set<String>> protectedPaths() =>
+          RecordingsMigrator.protectedDestinationPaths(
+            workDirectory: work,
+            recordingsRoot: root,
+          );
+      Map<String, dynamic> journal() =>
+          jsonDecode(
+                File(
+                  '$work$sep$recordingsMigrationJournalFileName',
+                ).readAsStringSync(),
+              )
+              as Map<String, dynamic>;
+
+      /// Truncates the staging copy of every file named in [names], so its
+      /// copy fails.
+      RecordingsMigrationFaultHook truncating(Set<String> names) =>
+          (point, path) {
+            if (point == RecordingsMigrationFault.afterCopyBeforeRename &&
+                names.any(path.contains)) {
+              final file = File(path);
+              final bytes = file.readAsBytesSync();
+              file.writeAsBytesSync(bytes.sublist(0, bytes.length - 1));
+            }
+          };
+
+      test('split earlier in a run that then pauses on the next ride '
+          '(F014, F036)', () async {
+        await writeRide(external, 'a');
+        await writeRide(external, 'b');
+        final controller = RecordingsMigrationController();
+        controller.start(
+          migrator(
+            fault: truncating(<String>{'seg_a_2.mp4'}),
+            // Pauses once the next ride has started moving.
+            shouldPause: () => File('$root${sep}seg_b_1.mp4').existsSync(),
+          ),
+        );
+        await controller.whenIdle();
+        expect(
+          controller.lastSummary!.outcome,
+          RecordingsMigrationOutcome.paused,
+        );
+        expect(namesIn(root), <String>['seg_a_1.mp4', 'seg_b_1.mp4']);
+        // On disk (a kill now leaves the same journal) and in memory.
+        expect(await protectedPaths(), contains(inRoot('seg_a_1.mp4')));
+        expect(controller.inFlightPaths, contains(inRoot('seg_a_1.mp4')));
+      });
+
+      test('a ride paused half-moved and then stopped for space or paused '
+          'again keeps its moved videos named (F036)', () async {
+        await writeRide(external, 'x');
+        final first = await migrator(
+          shouldPause: () => File('$root${sep}seg_x_1.mp4').existsSync(),
+        ).run();
+        expect(first.outcome, RecordingsMigrationOutcome.paused);
+
+        // Paused again inside the next copy.
+        final staging = Directory('$work${sep}staging');
+        final again = await migrator(
+          shouldPause: () =>
+              staging.existsSync() && staging.listSync().isNotEmpty,
+        ).run();
+        expect(again.outcome, RecordingsMigrationOutcome.paused);
+        expect(
+          ((journal()['ride'] as Map)['files'] as List).map(
+            (path) => name(path as String),
+          ),
+          contains('seg_x_1.mp4'),
+        );
+        expect(await protectedPaths(), contains(inRoot('seg_x_1.mp4')));
+
+        // No room for the rest.
+        final stopped = await migrator(freeBytes: (_) async => 1).run();
+        expect(stopped.outcome, RecordingsMigrationOutcome.lowStorage);
+        expect(stopped.splitPaths, contains(inRoot('seg_x_1.mp4')));
+        expect(journal()['split'], contains(inRoot('seg_x_1.mp4')));
+        expect(journal()['done'], isNull);
+        expect(await protectedPaths(), contains(inRoot('seg_x_1.mp4')));
+
+        final finished = await migrator().run();
+        expect(finished.outcome, RecordingsMigrationOutcome.completed);
+        expect(journal()['done'], isTrue);
+        expect(journal()['split'], isNull);
+      });
+
+      test('a split ride whose copy fails again is not marked done '
+          '(F036)', () async {
+        await writeRide(external, 'split');
+        final fault = truncating(<String>{'seg_split_2.mp4'});
+        await migrator(fault: fault).run();
+        final again = await migrator(fault: fault).run();
+        expect(again.outcome, RecordingsMigrationOutcome.completed);
+        expect(journal()['done'], isNull);
+        expect(journal()['split'], contains(inRoot('seg_split_1.mp4')));
+        expect(again.splitPaths, contains(inRoot('seg_split_1.mp4')));
+        expect(await protectedPaths(), contains(inRoot('seg_split_1.mp4')));
+      });
+
+      test('a split ride skipped after an earlier ride runs out of space '
+          'stays named (F014)', () async {
+        // F sorts before S: F's copy fails, then S is split.
+        await writeRide(external, 'f');
+        await writeRide(external, 's');
+        await migrator(
+          fault: truncating(<String>{'seg_f_1.mp4', 'seg_s_2.mp4'}),
+        ).run();
+        expect(namesIn(root), <String>['seg_s_1.mp4']);
+        expect(journal()['split'], contains(inRoot('seg_s_1.mp4')));
+
+        // F no longer fits, so S is skipped.
+        final stopped = await migrator(freeBytes: (_) async => 1).run();
+        expect(stopped.outcome, RecordingsMigrationOutcome.lowStorage);
+        expect(stopped.splitPaths, contains(inRoot('seg_s_1.mp4')));
+        expect(journal()['split'], contains(inRoot('seg_s_1.mp4')));
+        expect(await protectedPaths(), contains(inRoot('seg_s_1.mp4')));
+
+        // The low-storage early return keeps reporting it.
+        final early = await migrator(freeBytes: (_) async => 1).run();
+        expect(early.total, 0);
+        expect(early.splitPaths, contains(inRoot('seg_s_1.mp4')));
+      });
+    });
+
     test('a pause before the first ride moves nothing', () async {
       await writeRide(documents, 'early');
       final expected = contents(documents);
