@@ -14,7 +14,9 @@ import 'recording_retention.dart';
 import 'recordings_migration.dart';
 import 'storage_budget.dart';
 import '../../history/models/ride_index.dart';
+import '../../history/services/legacy_ride_import.dart';
 import '../../history/services/ride_deletion.dart';
+import '../../../core/services/legacy_recordings_access.dart';
 import 'dart:io';
 import 'dart:async';
 import 'dart:isolate';
@@ -91,6 +93,10 @@ class CameraProvider extends ChangeNotifier {
   /// Directory next to the recordings root (never inside a scanned root)
   /// that holds the migration journal and staging copies.
   static const String _migrationDirectoryName = 'ride_migration';
+
+  /// Directory next to the recordings root that holds the legacy-folder
+  /// import's journal and staging copies.
+  static const String _importDirectoryName = 'ride_import';
   static const Duration _rollWaitTimeout = Duration(seconds: 60);
 
   CameraController? _controller;
@@ -153,6 +159,8 @@ class CameraProvider extends ChangeNotifier {
   bool _hasPrunedTelemetryTempFiles = false;
   final RecordingsMigrationController _recordingsMigration =
       RecordingsMigrationController();
+  final LegacyRideImportController _legacyRideImport =
+      LegacyRideImportController();
   Timer? _storageBudgetTimer;
   bool _isStorageBudgetRunning = false;
   int _sessionBudgetDeletedRides = 0;
@@ -269,6 +277,80 @@ class CameraProvider extends ChangeNotifier {
 
   /// Completes when no recordings migration run is in progress.
   Future<void> whenRecordingsMigrationIdle() => _recordingsMigration.whenIdle();
+
+  /// The import of rides from the v0.1.11/v0.1.12 public folder (Android
+  /// only): progress and idle signal for the UI. Start one with
+  /// [importLegacyRides].
+  LegacyRideImportController get legacyRideImport => _legacyRideImport;
+
+  /// Why [importLegacyRides] would refuse to start now, as a rider-facing
+  /// sentence, or `null` when it may start: it never runs on iOS, while a
+  /// recording starts, runs or stops, while rides are moved into private
+  /// storage, while the storage budget deletes rides, or while another
+  /// import runs.
+  String? get legacyImportBlockedReason {
+    if (!Platform.isAndroid) {
+      return 'Importing rides from an older version is available on Android '
+          'only.';
+    }
+    if (isRecording || _isStartingRecording || _isStoppingRecording) {
+      return 'Stop recording before importing rides.';
+    }
+    if (!_recordingsMigration.isIdle) {
+      return 'Rides are being moved to private storage. Try again when the '
+          'move finishes.';
+    }
+    if (_isStorageBudgetRunning) {
+      return 'Old rides are being deleted for the storage budget. Try again '
+          'in a moment.';
+    }
+    if (_legacyRideImport.isRunning) {
+      return 'An import is already running.';
+    }
+    return null;
+  }
+
+  /// Imports the rides of the picked folder [source] into
+  /// [recordingsDirectory] (see [LegacyRideImporter]) and returns the
+  /// summary, or `null` when [legacyImportBlockedReason] refuses it or the
+  /// recordings directory is unavailable.
+  ///
+  /// The import pauses (at its next poll, abandoning the copy in flight)
+  /// when a recording starts; START never waits for it. While it runs, the
+  /// migration and the storage budget do not.
+  Future<LegacyImportSummary?> importLegacyRides(
+    LegacyRideDocumentSource source,
+  ) async {
+    if (legacyImportBlockedReason != null) {
+      return null;
+    }
+    if (_recordingsDirectory == null && !await _setupRecordingsDirectory()) {
+      return null;
+    }
+    final root = _recordingsDirectory;
+    if (root == null || legacyImportBlockedReason != null) {
+      return null;
+    }
+    final importer = LegacyRideImporter(
+      source: source,
+      recordingsRoot: root,
+      workDirectory:
+          '${Directory(root).parent.path}${Platform.pathSeparator}'
+          '$_importDirectoryName',
+      freeBytes: _availableStorageBytesAt,
+      reserveBytes: _estimatedSegmentBytes + _storageMarginBytes,
+      shouldPause: () =>
+          _isDisposed ||
+          isRecording ||
+          _isStartingRecording ||
+          _isStoppingRecording,
+    );
+    try {
+      return await _legacyRideImport.run(importer);
+    } finally {
+      _maybeStartRecordingsMigration();
+    }
+  }
 
   /// Elapsed time of the active session, updated about once per second.
   /// After [stopRecording] it keeps the finished session's value until the
@@ -1062,6 +1144,7 @@ class CameraProvider extends ChangeNotifier {
       !_isStoppingRecording &&
       !_isDeferredMaintenanceRunning &&
       !_isStorageBudgetRunning &&
+      _legacyRideImport.isIdle &&
       !(_deferredMaintenanceTimer?.isActive ?? false);
 
   // Starts (or resumes) the move of rides out of the legacy roots when it
@@ -1862,12 +1945,13 @@ class CameraProvider extends ChangeNotifier {
   }
 
   // The budget may delete only while a ride records (so its session is
-  // known) and no other bulk file work (the migration) runs.
+  // known) and no other bulk file work (the migration, an import) runs.
   bool get _canEnforceStorageBudget =>
       !_isDisposed &&
       isRecording &&
       !_isStoppingRecording &&
-      _recordingsMigration.isIdle;
+      _recordingsMigration.isIdle &&
+      _legacyRideImport.isIdle;
 
   // Static so the isolate closure cannot capture the provider.
   static Future<StorageBudgetInventory> _scanStorageBudgetInBackground(

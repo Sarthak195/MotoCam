@@ -38,6 +38,11 @@ class MainActivity: FlutterActivity() {
     private fun internalBroadcastPermission(): String =
         "$packageName.permission.INTERNAL_BROADCAST"
     private var pipMethodChannel: MethodChannel? = null
+    private var legacyRecordingsAccess: LegacyRecordingsAccess? = null
+
+    // Every startActivityForResult of this activity is answered through
+    // this dispatcher, by request code (see ActivityRequestCodes).
+    private val activityResults = ActivityResultDispatcher()
     private var backgroundRecordingMethodChannel: MethodChannel? = null
     private var isRecordingActive = false
 
@@ -191,6 +196,15 @@ class MainActivity: FlutterActivity() {
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         RideSigner.register(flutterEngine.dartExecutor.binaryMessenger)
+
+        if (legacyRecordingsAccess == null) {
+            val access = LegacyRecordingsAccess(this)
+            legacyRecordingsAccess = access
+            activityResults.register(LegacyRecordingsAccess.REQUEST_PICK_TREE) { resultCode, data ->
+                access.onTreePicked(resultCode, data)
+            }
+        }
+        legacyRecordingsAccess?.register(flutterEngine.dartExecutor.binaryMessenger)
 
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, DEVICE_STATUS_CHANNEL)
             .setMethodCallHandler { call, result ->
@@ -573,6 +587,14 @@ class MainActivity: FlutterActivity() {
         }
     }
 
+    // FlutterActivity is not a ComponentActivity, so there is no Activity
+    // Result API: results come here and go to the handler of their code.
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        // Always first: plugins receive their results through FlutterActivity.
+        super.onActivityResult(requestCode, resultCode, data)
+        activityResults.dispatch(requestCode, resultCode, data)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         // Registered for the whole activity lifetime (not onStart/onStop) so a
@@ -610,6 +632,8 @@ class MainActivity: FlutterActivity() {
         // outlive it. Releasing the hold first lets CameraX close the camera
         // (ON_STOP) before the engine detaches; ON_DESTROY follows from
         // super.onDestroy either way.
+        legacyRecordingsAccess?.dispose()
+        legacyRecordingsAccess = null
         isRecordingActive = false
         keepScreenOnRequested = false
         applyKeepScreenOn()
