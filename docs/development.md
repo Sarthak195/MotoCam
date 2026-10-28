@@ -75,6 +75,7 @@ lib/
   core/
     providers/                 app-wide settings (AppSettingsProvider)
     services/                  wrappers around plugins and method channels
+    ride_file/                 ride-file codec (ride_telemetry_codec, ride_integrity)
     utils/                     stateless helpers (path_utils, integrity_utils, format_utils)
   features/
     camera/                    providers/camera_provider.dart, providers/recording_retention.dart
@@ -97,7 +98,7 @@ Pure logic sits in its own files so tests can reach it without widgets or plugin
   - `BackgroundRecordingService.instance` and `PipService.instance` are singletons with private constructors.
   - `AppPermissionService` and `DeviceStatusService` have `const` constructors. The recording screen state in [recording_screen.dart](../lib/features/recording/recording_screen.dart) holds one of each as a field.
   - `TelemetryProvider` calls `Geolocator` directly, and so does the recording screen for its location-services check; there is no separate location service.
-- **Utilities** in `lib/core/utils` are top-level functions. `path_utils` and `integrity_utils` are imported with a library prefix (`import '.../path_utils.dart' as path_utils;`, `as integrity_utils`); `format_utils` (`formatElapsed`) is imported without one.
+- **Utilities** in `lib/core/utils` are top-level functions. `path_utils` and `integrity_utils` are imported with a library prefix (`import '.../path_utils.dart' as path_utils;`, `as integrity_utils`), and so is the ride-file codec in `lib/core/ride_file` (`as ride_codec`); `format_utils` (`formatElapsed`) is imported without one.
 - **Method channels** are named `com.example.motocam/<area>` and declared as `static const` fields on the class that uses them. The full list is in [platform-integration.md](platform-integration.md).
 
 ### Naming
@@ -105,7 +106,7 @@ Pure logic sits in its own files so tests can reach it without widgets or plugin
 - Files use `snake_case.dart`; screens end in `_screen.dart`, providers in `_provider.dart`, services in `_service.dart`.
 - Private state classes follow the Flutter pattern `_XxxState`. Private helper painters and models stay in the screen file (for example `_SpeedGraphPainter` in [ride_playback_screen.dart](../lib/features/history/ride_playback_screen.dart)).
 - SharedPreferences keys are `static const` snake_case strings named `_xxxKey`. Thirteen are on `AppSettingsProvider`. The others are the two playback keys `_showRouteMapPrefKey` and `_onlineMapConsentPrefKey` in [ride_playback_screen.dart](../lib/features/history/ride_playback_screen.dart) and the public `BackgroundRecordingService.batteryOptimizationOfferedKey`. See [settings.md](settings.md).
-- Test-only entry points are marked `@visibleForTesting`: `TelemetryProvider.updateLocationForTesting`, `updateAccelerometerForTesting`, `updateRawAccelerometerForTesting` feed inputs through the production handlers, and `TelemetryProvider.clearHistory` resets the ride statistics. Getters that only tests read (for example `TelemetryProvider.activeRideSamples`, `incidentCount`, `lastIncidentGForce`, `hasPendingPersist` and `mockLocationDetected`, `RideIntegrityReport.isVerified` and `contrastRatio`) are marked the same way. The static helpers `TelemetryProvider.shouldAccumulateDistance` and `TelemetryProvider.sanitizeJsonValue`, and `CameraProvider.nearestSupportedFps` and `CameraProvider.galleryExportSummary`, are exposed for tests.
+- Test-only entry points are marked `@visibleForTesting`: `TelemetryProvider.updateLocationForTesting`, `updateAccelerometerForTesting`, `updateRawAccelerometerForTesting` feed inputs through the production handlers, and `TelemetryProvider.clearHistory` resets the ride statistics. Getters that only tests read (for example `TelemetryProvider.activeRideSamples`, `incidentCount`, `lastIncidentGForce`, `hasPendingPersist` and `mockLocationDetected`, `RideIntegrityReport.isVerified` and `contrastRatio`) are marked the same way. The static helper `TelemetryProvider.shouldAccumulateDistance`, and `CameraProvider.nearestSupportedFps` and `CameraProvider.galleryExportSummary`, are exposed for tests.
 
 ### Comments and dartdoc
 
@@ -146,17 +147,18 @@ flutter test --plain-name "incident"                                 # by name s
 flutter test --coverage                                              # writes coverage/lcov.info
 ```
 
-There are 222 tests in 19 files, and all pass. The table groups them by area.
+There are 331 tests in 25 files, and all pass. The table groups them by area.
 
 | Area | Files | Tests | What it covers |
 |---|---|---|---|
-| Settings | [test/core/providers/](../test/core/providers/) | 19 | `AppSettingsProvider` loading defaults and stored values, legacy-key migration, clamping, preset ids, updates and the gallery-export opt-in. |
-| Services | [test/core/services/](../test/core/services/) | 33 | `AppPermissionService` (required versus recommended permissions, no background location, legacy storage only with gallery export, iOS skips), `BackgroundRecordingService` (the one-time battery-exemption offer, START errors, notification Stop), `DeviceStatusService` and `PipService`, with their method channels mocked. |
+| Settings | [test/core/providers/](../test/core/providers/) | 20 | `AppSettingsProvider` loading defaults and stored values, legacy-key migration, clamping, preset ids, updates and the gallery-export opt-in. |
+| Services | [test/core/services/](../test/core/services/) | 39 | `AppPermissionService` (required versus recommended permissions, no background location, legacy storage only with gallery export, iOS skips), `BackgroundRecordingService` (the one-time battery-exemption offer, START errors, notification Stop), `DeviceStatusService` and `PipService`, with their method channels mocked. |
 | Utilities | [test/core/utils/](../test/core/utils/) | 18 | Canonical JSON hashing, the integrity envelope, atomic telemetry writes and per-path locking, temp-file pruning, path normalization and containment, `formatElapsed`. |
+| Ride-file codec | [test/core/ride_file/](../test/core/ride_file/) | 5 | The segment-list, span and summary rules, and a writer-to-reader round trip (final save and restricted checkpoint) through the codec's writer path with real segment files. |
 | Camera | [test/features/camera/providers/](../test/features/camera/providers/) | 47 | `CameraProvider` resolution mapping, idle state, FPS fallback and the gallery-export summary; `recording_retention.dart` segment eviction (locked segments never evicted), pending-segment tracking, the LOCKED badge rule and orphan-sidecar detection; `camera_init_status.dart` permission-to-failure mapping, including plugin exception codes. |
-| History models | [test/features/history/models/](../test/features/history/models/) | 25 | `RideRecord.fromTelemetryFile` integrity results, quarantine of untrusted paths, relocation of stale absolute paths, lock-state changes, incidents and sample interpolation; `ride_history_loader.dart` loading on a background isolate and finding orphan videos. |
+| History models | [test/features/history/models/](../test/features/history/models/) | 48 | Golden tests over the fixtures in [test/fixtures/ride_files/](../test/fixtures/ride_files/) (payload hashes, read results, integrity reports and lock-state rewrites recorded before the codec existed; never regenerate them); `RideRecord.fromTelemetryFile` integrity results, quarantine of untrusted paths, relocation of stale absolute paths, lock-state changes, incidents and sample interpolation; `ride_history_loader.dart` loading on a background isolate and finding orphan videos. |
 | Playback | [test/features/history/playback/](../test/features/history/playback/) | 26 | The playback timeline (effective timeline, missing and uncovered ranges, segment lookup, markers, speed-graph gestures, integrity descriptions) and the seekbar track shape. These files test code in `lib/features/history/widgets/`. |
-| Map | [test/features/map/](../test/features/map/) | 6 | GPS-fix filtering and downsampling in `route_points.dart`, and the `StaticMapViewer` "No GPS fix" state. |
+| Map | [test/features/map/](../test/features/map/) | 8 | GPS-fix filtering and downsampling in `route_points.dart`, the `StaticMapViewer` "No GPS fix" state and the OpenStreetMap attribution layer. |
 | Recording | [test/features/recording/](../test/features/recording/) | 78 | `recording_screen_logic.dart`: the background-stall tracker, the ride-checkpoint tracker, lock notices, elapsed-time formatting, button contrast and the initial FPS choice, the preview mode and the camera failure panel text; `startPreflightNeedsSheet` from `start_preflight_sheet.dart`; every row of `StartPreflightEvaluator`. |
 | Telemetry | [test/features/telemetry/](../test/features/telemetry/) | 41 | `TelemetryData` JSON (UTC timestamps, lenient parsing, fix flags) and `TelemetryProvider` (ride start, fix tracking, distance gating, mock-location flags, incident detection on both accelerometer paths, sealed saves, checkpoints and failed-save retry). |
 | App | [test/widget_test.dart](../test/widget_test.dart) | 1 | Builds `MotoCamApp` and checks the dark Material 3 theme, the recording screen and that stored settings are loaded. |

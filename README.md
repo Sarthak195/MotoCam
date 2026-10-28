@@ -107,7 +107,7 @@ MotoCam/
 ├── android/                   Gradle project, manifest, Kotlin MainActivity and BackgroundRecordingService
 ├── ios/                       Xcode Runner project and Podfile (no native channel handlers)
 ├── lib/                       Dart source (see below)
-├── test/                      Unit and widget tests (222 tests in 19 files)
+├── test/                      Unit and widget tests (331 tests in 25 files)
 ├── docs/                      Developer documentation and audit reports
 ├── release-notes/             Per-release notes, v0.1.8.md to v0.1.13.md
 ├── scripts/                   release-security-precheck.ps1, generate-keystore.ps1
@@ -128,9 +128,12 @@ lib/
 │   │   ├── background_recording_service.dart   Android foreground-service bridge
 │   │   ├── device_status_service.dart          Battery, temperature and thermal status (Android)
 │   │   └── pip_service.dart                    Picture-in-Picture bridge
+│   ├── ride_file/
+│   │   ├── ride_integrity.dart                 Ride integrity envelope: build, re-seal, check
+│   │   └── ride_telemetry_codec.dart           The one codec for the ride telemetry JSON
 │   └── utils/
 │       ├── format_utils.dart                   Shared elapsed-time format
-│       ├── integrity_utils.dart                SHA-256 hashing, integrity envelope, atomic telemetry writes
+│       ├── integrity_utils.dart                SHA-256 hashing, per-path locks, atomic telemetry writes
 │       └── path_utils.dart                     Path normalization and containment checks
 └── features/
     ├── camera/providers/
@@ -208,7 +211,7 @@ Map tiles come from `tile.openstreetmap.org`, so the route map needs a network c
 | Debug APK | `flutter build apk --debug` |
 | Release APK | `flutter build apk --release` |
 
-- `flutter analyze` is clean, all 222 tests pass and the tree is `dart format`-clean.
+- `flutter analyze` is clean, all 331 tests pass and the tree is `dart format`-clean.
 - CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs on pushes to `main` and on pull requests with Flutter 3.41.2. It runs `flutter pub get --enforce-lockfile`, `flutter analyze`, the precheck, `flutter test --coverage`, a debug APK build and the format check, and builds the iOS app for the simulator in a second job.
 - The precheck mostly checks Android: the release signing config in `build.gradle.kts`, the manifest (no background location or all-files access, backups off, the signature-protected internal broadcast permission), that no credential or keystore files are tracked and that the Android assets folder is empty. It also checks the iOS `Info.plist` keys and the `ios/Podfile` permission macros, then runs `flutter analyze` and `flutter test` unless skipped. It fails when any step fails. It reads no signing credentials.
 - Release builds need four signing values. Gradle reads them from the environment variables `MOTOCAM_KEYSTORE_FILE`, `MOTOCAM_KEYSTORE_PASSWORD`, `MOTOCAM_KEY_ALIAS` and `MOTOCAM_KEY_PASSWORD`, or from `android/key.properties` (copied from `android/key.properties.template`). Each environment variable wins over its file value, and a relative keystore path is resolved against `android/app/`. Gradle stops with `Release signing config missing: ...` (naming the missing values) or `Release keystore not found ...` only when a task that packages or signs a release artifact is about to run. Release builds use R8 minification and resource shrinking. See [docs/release.md](docs/release.md#signing-setup-android).

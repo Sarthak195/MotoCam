@@ -210,7 +210,7 @@ A scrub may start while a segment loads; the seek it commits is queued by `_seek
 
 **Fallback duration F**: the upper median (`sorted[len ~/ 2]`) of the positive lengths of the stored entries (after the adjustment below) and the probed durations, or 1000 ms when there are none.
 
-**Stored entries.** For each stored entry, first entry per path: `s = max(startMs, 0)`, `e = max(endMs, s + 1)`. An entry shorter than 1000 ms (for example one saved without an end) takes its probed length when one exists: `e = s + A[p]`.
+**Stored entries.** The stored timeline already follows the file rule (see [data-formats.md](data-formats.md#ride-file-codec)). For each stored entry, first entry per path, the codec's `normalizeTimelineSpan` gives `s = max(startMs, 0)` and `max(endMs, s)`, and playback then requires at least 1 ms: `e = max(endMs, s + 1)`. An entry shorter than 1000 ms (for example one saved without an end) takes its probed length when one exists: `e = s + A[p]`.
 
 **Declared paths without a stored entry.** `c = max(e)` over the stored entries (0 without any). For each such `p` in D: `dur = max(A[p] ?? F, 1000)`, add `(p, c, c + dur)`, `c += dur`. Paths missing from the stored timeline are therefore appended after its end. Without a stored timeline this makes a sequential, gap-free timeline from 0 in declared order.
 

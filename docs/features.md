@@ -238,7 +238,7 @@ When the ride has samples, a collapsible **Route Map** card ([route_map_view.dar
 
 ## Integrity statuses
 
-`TelemetryProvider` stores an `integrity` envelope in every ride JSON it writes, checkpoints included. It holds a SHA-256 of each segment file and a SHA-256 of the canonicalized JSON payload together with the rest of the envelope, so the segment hashes are covered by the payload hash. `RideRecord` checks it (`_verifyIntegrity`) and produces exactly one of three statuses ([ride_record.dart](../lib/features/history/models/ride_record.dart)):
+`TelemetryProvider` stores an `integrity` envelope in every ride JSON it writes, checkpoints included. It holds a SHA-256 of each segment file and a SHA-256 of the canonicalized JSON payload together with the rest of the envelope, so the segment hashes are covered by the payload hash. `RideRecord` checks it with the ride-file codec (`checkRideIntegrity` in [ride_integrity.dart](../lib/core/ride_file/ride_integrity.dart)) and produces exactly one of three statuses ([ride_record.dart](../lib/features/history/models/ride_record.dart)):
 
 | Status | Meaning |
 |---|---|

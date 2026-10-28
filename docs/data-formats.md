@@ -8,6 +8,7 @@ This document describes every file MotoCam writes: where it goes, how it is name
 - [Directory layout and file naming](#directory-layout-and-file-naming)
 - [File inventory](#file-inventory)
 - [Ride telemetry JSON](#ride-telemetry-json)
+- [Ride-file codec](#ride-file-codec)
 - [Checkpoints and the final save](#checkpoints-and-the-final-save)
 - [Integrity envelope](#integrity-envelope)
 - [Path scope and quarantine](#path-scope-and-quarantine)
@@ -65,7 +66,7 @@ All rides share one flat recordings directory. Nothing groups files by ride: the
 | Segment file | The camera plugin's own file name, kept unchanged. Android CameraX records to `<app cache>/REC<digits>.mp4` (via `File.createTempFile("REC", ".mp4")`). iOS records to `<tmp>/camera/videos/REC_<UUID>.mp4`. | Camera plugin, then `CameraProvider._persistSegmentToRecordingsDirectory` |
 | Name collision | `<base>_1<ext>`, `<base>_2<ext>`, ... (the first name not already present) | `CameraProvider._buildUniqueSegmentPath` |
 | Blank plugin file name | `segment_<epoch ms>.mp4` | `CameraProvider._buildUniqueSegmentPath` |
-| Telemetry file | `ride_<rideSessionId>.telemetry.json`, with every character outside `[a-zA-Z0-9_-]` replaced by `_` | `TelemetryProvider._buildPrimaryTelemetryPath` |
+| Telemetry file | `ride_<rideSessionId>.telemetry.json`, with every character outside `[a-zA-Z0-9_-]` replaced by `_` | `rideTelemetryPathFor` in the ride-file codec |
 | `rideSessionId` | `<UTC epoch ms of ride start>_<16 lowercase hex>`. The hex is two `Random.secure().nextInt(1 << 30)` values, each zero-padded to 8 digits. | `TelemetryProvider._buildRideSessionId` |
 | Telemetry temp file | `<telemetry path>.<pid>-<microseconds since epoch>-<counter>.tmp` | `writeTelemetryAtomically` |
 
@@ -100,7 +101,7 @@ There is no index, database or manifest file: the ride list is rebuilt on every 
 
 ## Ride telemetry JSON
 
-Each recording session produces at most one telemetry file. It is written by `TelemetryProvider` in [telemetry_provider.dart](../lib/features/telemetry/providers/telemetry_provider.dart): as sealed checkpoints while recording, and as the final file at stop. `_buildPayloadCore` builds the payload, `sanitizeJsonValue` replaces every non-finite double (`NaN`, infinity) with `null`, and `_sealPayload` adds the `integrity` envelope. The file is `jsonEncode({...payload, "integrity": envelope})`, so keys appear on disk in the order of the table below. Later, `RideRecord.setLockState` rewrites the file in place. It replaces `lockedSegmentPaths` and the envelope's `payloadHash` (and `envelopeVersion`) and passes every other key through unchanged, keeping their order. The reader is `RideRecord` in [ride_record.dart](../lib/features/history/models/ride_record.dart).
+Each recording session produces at most one telemetry file. It is written by `TelemetryProvider` in [telemetry_provider.dart](../lib/features/telemetry/providers/telemetry_provider.dart): as sealed checkpoints while recording, and as the final file at stop. Every rule of the format lives in the ride-file codec (see [Ride-file codec](#ride-file-codec)): `encodeRidePayload` builds the payload, `sanitizeJsonValue` replaces every non-finite double (`NaN`, infinity) with `null`, and `sealRidePayload` adds the `integrity` envelope. The file is `encodeRideFileJson({...payload, "integrity": envelope})` (compact `jsonEncode`), so keys appear on disk in the order of the table below. Later, `RideRecord.setLockState` rewrites the file in place with the codec's `applyLockState`. It replaces `lockedSegmentPaths` and the envelope's `payloadHash` (and `envelopeVersion`) and passes every other key through unchanged, keeping their order. The reader is `RideRecord` in [ride_record.dart](../lib/features/history/models/ride_record.dart), which decodes the file with the codec's `decodeRideFile` and parses the samples with `decodeRideSamples`.
 
 The reader accepts **no alternative key names**. Its only tolerances are absent keys, the fallbacks listed below, and the coercions in the last column. Every field is optional for the reader except that some video path must be found. In the Required column, "yes" means the reader returns `null` and the ride is not listed without the field. "Type-checked" means a value of the wrong type makes `fromTelemetryFile` throw internally, so it returns `null` and the ride is dropped from the list.
 
@@ -108,11 +109,11 @@ The reader accepts **no alternative key names**. Its only tolerances are absent 
 
 | Field | Type | Required (reader) | Meaning / written value | Read by | Reader behaviour |
 |---|---|---|---|---|---|
-| `schemaVersion` | int | no | `TelemetryProvider.rideSchemaVersion`, `3` | `RideRecord._verifyIntegrity` | A number is truncated to int; a string is parsed; anything else counts as `0`. Used only when `integrity` is absent (see [Verification procedure](#verification-procedure-riderecord_verifyintegrity)). |
+| `schemaVersion` | int | no | `rideFileSchemaVersion` (also `TelemetryProvider.rideSchemaVersion`), `3` | `checkRideIntegrity` | A number is truncated to int; a string is parsed; anything else counts as `0`. Used only when `integrity` is absent (see [Verification procedure](#verification-procedure-checkrideintegrity)). |
 | `rideSessionId` | string | no | Session id (see naming) | `RideRecord` (`rideSessionId`, not shown in the UI) | `toString().trim()`; empty or missing gives `null` |
 | `sessionComplete` | bool | no | `false` in checkpoints, `true` in the final save | `RideRecord` (`isSessionComplete`) | bool; string `true`/`false` (trimmed, any case); number (non-zero = true); otherwise `true`. `false` shows the "RECOVERED (INCOMPLETE)" badge. |
 | `storagePolicy` | string | no | `"hybrid-private-primary"` | nothing | Ignored |
-| `publicExportRelativePath` | string | no | `"Movies/MotoCam/Recordings"`, written whether or not gallery export is on | nothing | Ignored |
+| `publicExportRelativePath` | string | no | `"Movies/MotoCam/Recordings"` (`publicExportRelativePath`), written whether or not gallery export is on | nothing | Ignored |
 | `storageDirectory` | string | no | Parent directory of the trimmed `videoPath`, or `""` | nothing | Ignored. It is not a trusted root. |
 | `sampleRateMs` | int | no | `TelemetryProvider.sampleInterval` in ms (default 1000) | nothing | Ignored |
 | `videoPath` | string | yes, unless `segmentPaths` or legacy recovery supplies a path | Final save: the path returned by `CameraProvider.stopRecording` (or the last session segment), trimmed. Checkpoint: the last segment the checkpoint lists. | `RideRecord` | Resolved like a segment path; quarantined and dropped if it is outside the telemetry file's directory. If empty, the last existing segment is used, otherwise the last trusted one. Appended to the segment list if missing. Becomes `RideRecord.videoPath`. |
@@ -129,7 +130,7 @@ The reader accepts **no alternative key names**. Its only tolerances are absent 
 | `mockLocationDetected` | bool | no | `true` if any fix during the ride came from a mock location provider (`Position.isMocked`) | `RideRecord` (`mockLocationDetected`) | Same coercions as `sessionComplete`; otherwise `false`. `true` shows the "SIMULATED GPS" badge in place of "DATA UNMODIFIED" or "UNVERIFIED" ("INTEGRITY WARNING" still takes precedence) and a playback notice. |
 | `incidents` | object[] | no | Incidents detected live during the ride (see below), in detection order | `RideRecord` (`incidents`) | Key absent: `null`, and playback derives incident markers from the samples. Present but not a list: empty list. Non-object entries and entries without a usable `elapsedMs` are skipped; the rest are sorted by `elapsedMs`. |
 | `samples` | object[] | no | Telemetry samples in capture order (see below) | `RideRecord` | A non-list counts as `[]`; non-object entries ignored; a sample that fails to parse is skipped and the ride is kept; order kept, not sorted |
-| `integrity` | object | no (but see the rule for schema 3) | SHA-256 envelope (see [Integrity envelope](#integrity-envelope)) | `RideRecord._verifyIntegrity` | Absent or `null`: `unknown`, or `modified` for a completed schema-3 file. Present but not an object: `modified`. |
+| `integrity` | object | no (but see the rule for schema 3) | SHA-256 envelope (see [Integrity envelope](#integrity-envelope)) | `checkRideIntegrity` | Absent or `null`: `unknown`, or `modified` for a completed schema-3 file. Present but not an object: `modified`. |
 
 If the JSON root is not an object, or the file cannot be read or decoded, `fromTelemetryFile` returns `null`.
 
@@ -166,7 +167,7 @@ Written by `TelemetryProvider._detectCrash` for each incident detected while a r
 
 ### `segmentTimeline[]` entries
 
-These come from `CameraProvider.lastSessionSegmentTimeline` (`SegmentTimelineEntry.toJson`). Both values are ms since `CameraProvider.recordingStartedAt`, which is also the telemetry ride's zero point. `startMs` is when the segment's recording started and `endMs` is when its recording stopped, so the short gap at each segment roll shows up as a gap between one entry's `endMs` and the next entry's `startMs` (see [recording-pipeline.md](recording-pipeline.md)). The writer trims `path`, keeps entries for known segment paths only (first entry per path), clamps a negative `startMs` to 0 and an `endMs` below `startMs` up to `startMs`, then sorts by `startMs`.
+These come from `CameraProvider.lastSessionSegmentTimeline` (`SegmentTimelineEntry.toJson`). Both values are ms since `CameraProvider.recordingStartedAt`, which is also the telemetry ride's zero point. `startMs` is when the segment's recording started and `endMs` is when its recording stopped, so the short gap at each segment roll shows up as a gap between one entry's `endMs` and the next entry's `startMs` (see [recording-pipeline.md](recording-pipeline.md)). The writer trims `path`, keeps entries for known segment paths only (first entry per path), clamps a negative `startMs` to 0 and an `endMs` below `startMs` up to `startMs`, then sorts by `startMs`. The reader applies the same function (`normalizeRideTimeline`) after mapping each path through segment resolution.
 
 | Field | Type | Reader behaviour |
 |---|---|---|
@@ -176,7 +177,7 @@ These come from `CameraProvider.lastSessionSegmentTimeline` (`SegmentTimelineEnt
 
 ### `recordingSettings`
 
-This object is built by `RecordingScreen._recordingSettingsSnapshot` in [recording_screen.dart](../lib/features/recording/recording_screen.dart), for every checkpoint and once at stop (taken before the camera stops). `TelemetryProvider._normalizeRecordingSettings` trims the keys, drops empty keys and turns non-primitive values into strings with `toString()`. No code reads it back.
+This object is built by `RecordingScreen._recordingSettingsSnapshot` in [recording_screen.dart](../lib/features/recording/recording_screen.dart), for every checkpoint and once at stop (taken before the camera stops). The codec's `resolveRideFileContent` trims the keys, drops empty keys and turns non-primitive values into strings with `toString()`. No code reads it back.
 
 | Keys | Type |
 |---|---|
@@ -249,6 +250,34 @@ This example was put together by hand from the writer code; the app did not prod
 }
 ```
 
+## Ride-file codec
+
+Every rule of the ride JSON lives in one module, [ride_telemetry_codec.dart](../lib/core/ride_file/ride_telemetry_codec.dart), which also exports the integrity envelope code in [ride_integrity.dart](../lib/core/ride_file/ride_integrity.dart). It depends only on `core` (`path_utils`, `integrity_utils`). `RideRecord` re-exports its model types (`RideIntegrityStatus`, `RideIntegrityReport`, `RideIncident`, `RideSegmentTimelineEntry`), so feature code keeps importing them from [ride_record.dart](../lib/features/history/models/ride_record.dart).
+
+| Concern | Codec API | Used by |
+|---|---|---|
+| Read the file | `readRideFileJson` (`null` when the root is not an object) | `RideRecord.fromTelemetryFile`, `verifySegmentIntegrity`, `setLockState` |
+| Summary fields, without the samples | `decodeRideFileSummary` returns `RideFileSummary` (schema version, session id, completeness, start time, statistics, mock flag, incidents). It never reads `samples`. | `decodeRideFile` |
+| Samples | `decodeRideSamples(json, parse)`, kept separate so a caller that needs only the summary skips them; `RideRecord` passes `TelemetryData.fromJson` | `RideRecord.fromTelemetryFile` |
+| Segment paths | `resolveRideSegments` returns `ResolvedRideSegments` (trusted, missing and quarantined paths, `videoPath`, declared and resolved forms), using `resolveDeclaredRidePath` and `trustedRootsForTelemetryFile` | `RideRecord` |
+| Timeline and locks | `decodeRideTimeline`, `decodeLockedSegmentPaths` | `decodeRideFile` |
+| Integrity | `checkRideFileIntegrity` (`checkRideIntegrity` plus `applyQuarantineToIntegrity`) | `RideRecord` |
+| Everything except the samples | `decodeRideFile` returns `DecodedRideFile` | `RideRecord.fromTelemetryFile` |
+| Lock-state rewrite | `applyLockState` | `RideRecord.setLockState` |
+| Writer | `resolveRideFileContent` (`RideFileInput` to `RideFileContent`, with `restrictedTo` for checkpoints), `encodeRidePayload` (`RideFileSnapshot`), `sanitizeJsonValue`, `sealRidePayload`, `encodeRideFileJson`, `rideTelemetryPathFor` | `TelemetryProvider` |
+| Shared rules | `normalizeSegmentPathList`, `normalizeRideTimeline`, `normalizeTimelineSpan` | Writer, reader, playback (`orderedDeclaredSegmentPaths`, `buildEffectiveTimeline` in [playback_timeline.dart](../lib/features/history/widgets/playback_timeline.dart)) |
+| Constants | `rideFileSchemaVersion` (3), `rideFileStoragePolicy`, `publicExportRelativePath`, `legacyPublicRecordingsDirectory`, `rideTelemetryFileSuffix`, `rideVideoFileExtensions` | Writer, reader, `CameraProvider` (gallery export path) |
+
+Each rule exists once. Where the writer, the reader and playback used to differ, the rule kept is the one that reads every existing file the way the reader already did:
+
+- **Segment list** (`normalizeSegmentPathList`): trim each entry, drop empty entries and repeats, keep the order, and append `videoPath` when it is not listed. The writer and playback apply it to the declared paths. The reader applies it in two steps, because resolution can rewrite or quarantine entries: it normalises `segmentPaths` (falling back to `[videoPath]` only when the list is empty), resolves and trust-checks each entry, runs legacy sibling recovery when no trusted entry is left, and only then appends the resolved `videoPath` when it is missing. For every file the writer produces, both orders give the same list.
+- **Timeline** (`normalizeRideTimeline`, `normalizeTimelineSpan`): keep the first entry per known segment, clamp a negative `startMs` to 0, raise `endMs` (missing: the start) to at least the start, and sort by `startMs`. `startMs` and `endMs` are read only for kept entries, and a non-number there makes the reader drop the ride. The writer and the reader call the same function. Playback adds presentation rules on top of the stored timeline that never reach the file: every entry lasts at least 1 ms, a short entry takes a probed length, segments without an entry are appended, and overlaps are pushed later (see [playback-and-history.md](playback-and-history.md)).
+- **Envelope** (`buildIntegrityEnvelope`, `resealIntegrityEnvelope`): the writer sets `segmentCount` to the number of written `segmentPaths`. A lock change keeps every stored envelope field, recomputes only `payloadHash` and sets `envelopeVersion` to 2; it never re-derives the segment list or the counts. Readers never read `segmentCount`.
+- **File names**: every layer uses `path_utils.fileNameFromPath`.
+- **Legacy public folder**: `legacyPublicRecordingsDirectory` (`/storage/emulated/0/Movies/MotoCam/Recordings`, the v0.1.11 and v0.1.12 location) is the only copy of that path in the app. It is reserved for trust and discovery decisions; today it is neither a trusted root nor scanned. The gallery export's `relativePath` and the written `publicExportRelativePath` both come from `publicExportRelativePath`.
+
+The format is pinned by golden tests. [ride_file_golden_test.dart](../test/features/history/models/ride_file_golden_test.dart) reads 16 fixture files in [test/fixtures/ride_files](../test/fixtures/ride_files) (a legacy file without an envelope, schema 1, envelope versions 1 and 2, checkpoints with and without an envelope, a tampered file, relocated and quarantined paths, legacy sibling recovery and rejected files) and compares their payload hashes, read results, integrity reports and lock-state rewrites with values recorded before the codec existed. [ride_telemetry_codec_test.dart](../test/core/ride_file/ride_telemetry_codec_test.dart) runs the writer path with real segment files and reads the result back with `RideRecord.fromTelemetryFile`.
+
 ## Checkpoints and the final save
 
 The file of a ride in progress is a **checkpoint**: the same schema with `sessionComplete: false`. It is sealed with a full integrity envelope, like the final file.
@@ -267,7 +296,7 @@ If the app is killed during a ride, the last checkpoint stays on disk. The ride 
 
 ## Integrity envelope
 
-The helpers are in [integrity_utils.dart](../lib/core/utils/integrity_utils.dart). The envelope is built by `buildIntegrityEnvelope`, which `TelemetryProvider._sealPayload` runs in `Isolate.run` for every checkpoint and the final save. `resealIntegrityEnvelope` updates it when the lock state changes, and `RideRecord._verifyIntegrity` checks it.
+The envelope code is in [ride_integrity.dart](../lib/core/ride_file/ride_integrity.dart), part of the ride-file codec; the generic hashing helpers (`hashJsonCanonical`, `hashFileSha256`) stay in [integrity_utils.dart](../lib/core/utils/integrity_utils.dart). The envelope is built by `buildIntegrityEnvelope`, which the codec's `sealRidePayload` runs in `Isolate.run` for every checkpoint and the final save. `resealIntegrityEnvelope` updates it when the lock state changes (through `applyLockState`), and `checkRideIntegrity` checks it.
 
 The envelope is an unkeyed SHA-256 checksum. It shows that the ride data and segments are unmodified since recording, or detects accidental corruption, but anyone who can rewrite the files can also recompute it. It is not tamper-proof.
 
@@ -293,7 +322,9 @@ The envelope is an unkeyed SHA-256 checksum. It shows that the ride data and seg
 - **Segment hashes** (`hashFileSha256`): the raw bytes of each file, streamed with `openRead()`. An empty path, a missing file or a `FileSystemException` gives no hash. The writer hashes on a background isolate and caches each hash by path, size and modification time, so checkpoints and the final save do not re-hash unchanged files.
 - No key, salt, signature or device binding is used. Keyed integrity (HMAC or a platform keystore) is not implemented.
 
-### Verification procedure (`RideRecord._verifyIntegrity`)
+### Verification procedure (`checkRideIntegrity`)
+
+`RideRecord` runs it through the codec's `checkRideFileIntegrity`, which passes the ride's trusted segments (resolved path, declared path, missing or not) and applies step 9.
 
 1. If `integrity` is absent or `null`: when `schemaVersion` is at least 3 (`mandatoryIntegritySchemaVersion`) and `sessionComplete` is not `false`, the result is `modified` with `missing-integrity`; otherwise it is `unknown`. The remaining steps do not run.
 2. If `integrity` is not a JSON object, the result is `modified` with `invalid-integrity`. The remaining steps do not run.
@@ -305,7 +336,7 @@ The envelope is an unkeyed SHA-256 checksum. It shows that the ride data and seg
    - only when segment verification is requested and the file exists: a file that cannot be read adds `unreadable-segment-file:<path>`, and a different hash adds `segment-hash-mismatch:<path>`.
 7. Each `segmentHashes` key that matched no segment adds `orphan-integrity-hash:<key>`.
 8. No issues gives `verified`. Any issue gives `modified`.
-9. Afterwards, `RideRecord._applyTrustToIntegrity` runs: if any path was quarantined, the result becomes `modified`, with the extra issue `quarantined-segment-paths:<count>`. This also applies to a ride with no envelope.
+9. Afterwards, `applyQuarantineToIntegrity` runs: if any path was quarantined, the result becomes `modified`, with the extra issue `quarantined-segment-paths:<count>`. This also applies to a ride with no envelope.
 
 Segment files that no longer exist are not integrity issues. They are listed in `RideRecord.missingSegmentPaths`, the list shows an "INCOMPLETE" badge, and playback marks the missing footage.
 
@@ -376,9 +407,9 @@ All exceptions return `false`. The app only ever calls `setLockState(false)`, fr
 
 `RideRecord` only exposes segment paths that are inside a trusted root, so only those are played, verified, locked, deleted in-app or placed on the timeline. Path helpers are in [path_utils.dart](../lib/core/utils/path_utils.dart).
 
-The only trusted root is the directory the telemetry file was found in (`RideRecord._trustedRootsForTelemetry`), normalized with `normalizePath`. No field of the JSON being checked (such as `storageDirectory` or `videoPath`) is trusted, and there is no hard-coded public path.
+The only trusted root is the directory the telemetry file was found in (`trustedRootsForTelemetryFile` in the codec), normalized with `normalizePath`. No field of the JSON being checked (such as `storageDirectory` or `videoPath`) is trusted, and the legacy public folder (`legacyPublicRecordingsDirectory`, see [Ride-file codec](#ride-file-codec)) is not a trusted root.
 
-Declared path resolution (`RideRecord._resolveDeclaredPath`), applied to `segmentPaths` and `videoPath`. Entries of `lockedSegmentPaths` and timeline paths are mapped through the same results, so they match only when they equal a declared segment path:
+Declared path resolution (`resolveDeclaredRidePath`, called by `resolveRideSegments`), applied to `segmentPaths` and `videoPath`. Entries of `lockedSegmentPaths` and timeline paths are mapped through the same results, so they match only when they equal a declared segment path:
 
 - A plain file name (no separator) is resolved inside the telemetry file's directory.
 - An existing path is kept.
@@ -404,7 +435,7 @@ Effects of quarantine:
 - They block `setLockState` and the list's unlock button.
 - History discovery counts them as referenced, so they do not appear as video-only rides.
 
-Separately, the writer keeps only segment paths inside the parent directory of `videoPath` (`TelemetryProvider._filterPathsInDirectory`, skipped when `videoPath` is empty), then drops paths whose files do not exist at write time (`TelemetryProvider._filterExistingPathsInOrder`).
+Separately, the writer (`resolveRideFileContent`) keeps only segment paths inside the parent directory of `videoPath` (skipped when `videoPath` is empty), then drops paths whose files do not exist at write time.
 
 ## Atomic-write procedure
 
@@ -445,7 +476,7 @@ Consequences:
 - **Samples without `hasFix`** are treated as having no fix only at exactly (0, 0).
 - **Files without `incidents`** get incident markers derived from the samples in playback (3.2 g, 5 s debounce; see [playback-and-history.md](playback-and-history.md)).
 - **Schema 1 files** have no `segmentPaths`, so the reader uses `[videoPath]`. If even that is empty, the telemetry file's sibling video is recovered (see [quarantine](#path-scope-and-quarantine)). However, orphan pruning deletes any unlocked telemetry file in the current recordings directory whose `segmentPaths` is missing, so a schema 1 file there is deleted the next time pruning runs (2 s after a recording stops).
-- **Recordings directories**: the current recordings directory is scanned, and on Android also `<documents>/MotoCam Recordings` and `<cache>/MotoCam Recordings`. Orphan and temp-file pruning run only in the current directory. Earlier Android builds also wrote rides to `/storage/emulated/0/MotoCam Recordings` (v0.1.3-v0.1.5), the app temporary directory itself from `getTemporaryDirectory()`, not a `MotoCam Recordings` subfolder (v0.1.6-v0.1.9) and `/storage/emulated/0/Movies/MotoCam/Recordings` (v0.1.11-v0.1.12). These locations are not scanned and there is no migration code, so rides left there are not listed.
+- **Recordings directories**: the current recordings directory is scanned, and on Android also `<documents>/MotoCam Recordings` and `<cache>/MotoCam Recordings`. Orphan and temp-file pruning run only in the current directory. Earlier Android builds also wrote rides to `/storage/emulated/0/MotoCam Recordings` (v0.1.3-v0.1.5), the app temporary directory itself from `getTemporaryDirectory()`, not a `MotoCam Recordings` subfolder (v0.1.6-v0.1.9) and `/storage/emulated/0/Movies/MotoCam/Recordings` (v0.1.11-v0.1.12, the codec constant `legacyPublicRecordingsDirectory`). These locations are not scanned and there is no migration code, so rides left there are not listed.
 - **Legacy file names**: `<video base>.telemetry.json` files are discovered like any `*.telemetry.json` file. `RideRecord.fromVideoFile` also checks for one next to an unreferenced video and uses it when it references that video.
 - **Absolute paths** are stored as written. When a stored path no longer exists, the reader looks for the same file name in the telemetry file's directory.
 
