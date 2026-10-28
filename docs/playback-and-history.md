@@ -262,7 +262,7 @@ Quarantined paths are not shown: they are neither in the playlist nor in the tim
 
 ## Telemetry sync during playback
 
-On each rebuild of the `ValueListenableBuilder<VideoPlayerValue>`, the screen takes `position` (the scrub preview while scrubbing, otherwise the global position) and calls `widget.ride.sampleForPosition(position)`:
+On each rebuild of the `ValueListenableBuilder<VideoPlayerValue>`, the screen takes `position` (the scrub preview while scrubbing, otherwise the global position) and calls `_ride.sampleForPosition(position)`:
 
 - No samples: `TelemetryData.empty()`. Before the first or after the last sample: that sample.
 - Otherwise a binary search on `elapsedMs`, then linear interpolation of latitude, longitude, speed, bearing, accelerationG and distanceKm between the two neighbours. Bearing is interpolated along the shortest arc (`RideRecord.interpolateBearing`), so 350° to 10° passes through 0°.
@@ -291,7 +291,7 @@ The "Route Map" card sits below the video when the ride has samples and the scre
 
 The first time the rider expands the map, a dialog "Show online map?" explains that the map downloads tiles from OpenStreetMap (`tile.openstreetmap.org`), which sends the ride's area and the device's IP address to the OpenStreetMap Foundation, and that tiles are cached on the device. "Not now" leaves the map collapsed. "Show map" stores bool `ride_playback_online_map_consent` and expands the map. A stored `ride_playback_show_route_map` is honoured only once consent is stored.
 
-The map height is `clamp(0.14 × screen height, 90, 130)`. `RouteMapView` receives `widget.ride.samples` and the interpolated sample as `currentSample`.
+The map height is `clamp(0.14 × screen height, 90, 130)`. `RouteMapView` receives `_ride.samples` and the interpolated sample as `currentSample`.
 
 ### Tile source (`MapSourceConfig`)
 

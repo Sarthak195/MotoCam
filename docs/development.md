@@ -79,7 +79,8 @@ lib/
     utils/                     stateless helpers (path_utils, integrity_utils, format_utils)
   features/
     camera/                    providers/camera_provider.dart, providers/recording_retention.dart
-    history/                   models/ (ride_record.dart, ride_history_loader.dart), *_screen.dart,
+    history/                   models/ (ride_record.dart, ride_history_loader.dart, ride_index.dart,
+                               segment_verifier.dart), *_screen.dart,
                                widgets/ (route_map_view, playback_timeline, playback_seekbar_track_shape)
     map/                       map_source_config.dart, route_points.dart, widgets/
     recording/                 recording_screen.dart, recording_screen_logic.dart, widgets/
@@ -147,7 +148,7 @@ flutter test --plain-name "incident"                                 # by name s
 flutter test --coverage                                              # writes coverage/lcov.info
 ```
 
-There are 331 tests in 25 files, and all pass. The table groups them by area.
+There are 361 tests in 27 files, and all pass. The table groups them by area.
 
 | Area | Files | Tests | What it covers |
 |---|---|---|---|
@@ -156,11 +157,11 @@ There are 331 tests in 25 files, and all pass. The table groups them by area.
 | Utilities | [test/core/utils/](../test/core/utils/) | 18 | Canonical JSON hashing, the integrity envelope, atomic telemetry writes and per-path locking, temp-file pruning, path normalization and containment, `formatElapsed`. |
 | Ride-file codec | [test/core/ride_file/](../test/core/ride_file/) | 5 | The segment-list, span and summary rules, and a writer-to-reader round trip (final save and restricted checkpoint) through the codec's writer path with real segment files. |
 | Camera | [test/features/camera/providers/](../test/features/camera/providers/) | 47 | `CameraProvider` resolution mapping, idle state, FPS fallback and the gallery-export summary; `recording_retention.dart` segment eviction (locked segments never evicted), pending-segment tracking, the LOCKED badge rule and orphan-sidecar detection; `camera_init_status.dart` permission-to-failure mapping, including plugin exception codes. |
-| History models | [test/features/history/models/](../test/features/history/models/) | 48 | Golden tests over the fixtures in [test/fixtures/ride_files/](../test/fixtures/ride_files/) (payload hashes, read results, integrity reports and lock-state rewrites recorded before the codec existed; never regenerate them); `RideRecord.fromTelemetryFile` integrity results, quarantine of untrusted paths, relocation of stale absolute paths, lock-state changes, incidents and sample interpolation; `ride_history_loader.dart` loading on a background isolate and finding orphan videos. |
+| History models | [test/features/history/models/](../test/features/history/models/) | 77 | Golden tests over the fixtures in [test/fixtures/ride_files/](../test/fixtures/ride_files/) (payload hashes, read results, integrity reports and lock-state rewrites recorded before the codec existed; never regenerate them); `RideRecord.fromTelemetryFile` integrity results, quarantine of untrusted paths, relocation of stale absolute paths, lock-state changes, incidents, sample interpolation and sample-less records (`loadSamples: false`, `loadSamples`, also through `Isolate.run`); `ride_history_loader.dart` loading on a background isolate and finding orphan videos; the ride index (hit without reading the file, miss, stale size, modification or change time through an injected stat source, a vanished segment or ride file, corrupt and other-format files, the JSON round trip, a populated index sent into an isolate, the loader never writing, the one writer with concurrent updates, adoption, temp-file pruning and segment-hash pruning); `SegmentVerifier` (check order, cancellation after the segment in flight, persisted results reused after a restart and re-hashed when the stamp or expected hash changes, `ignoreCache`, missing and unreadable files, with a counting fake hasher), the history video-check state and text, and `setLockState` reusing stored results while still refusing a changed segment. |
 | Playback | [test/features/history/playback/](../test/features/history/playback/) | 26 | The playback timeline (effective timeline, missing and uncovered ranges, segment lookup, markers, speed-graph gestures, integrity descriptions) and the seekbar track shape. These files test code in `lib/features/history/widgets/`. |
 | Map | [test/features/map/](../test/features/map/) | 8 | GPS-fix filtering and downsampling in `route_points.dart`, the `StaticMapViewer` "No GPS fix" state and the OpenStreetMap attribution layer. |
 | Recording | [test/features/recording/](../test/features/recording/) | 78 | `recording_screen_logic.dart`: the background-stall tracker, the ride-checkpoint tracker, lock notices, elapsed-time formatting, button contrast and the initial FPS choice, the preview mode and the camera failure panel text; `startPreflightNeedsSheet` from `start_preflight_sheet.dart`; every row of `StartPreflightEvaluator`. |
-| Telemetry | [test/features/telemetry/](../test/features/telemetry/) | 41 | `TelemetryData` JSON (UTC timestamps, lenient parsing, fix flags) and `TelemetryProvider` (ride start, fix tracking, distance gating, mock-location flags, incident detection on both accelerometer paths, sealed saves, checkpoints and failed-save retry). |
+| Telemetry | [test/features/telemetry/](../test/features/telemetry/) | 42 | `TelemetryData` JSON (UTC timestamps, lazy timestamp parsing also across an isolate, lenient parsing, fix flags) and `TelemetryProvider` (ride start, fix tracking, distance gating, mock-location flags, incident detection on both accelerometer paths, sealed saves, checkpoints and failed-save retry). |
 | App | [test/widget_test.dart](../test/widget_test.dart) | 1 | Builds `MotoCamApp` and checks the dark Material 3 theme, the recording screen and that stored settings are loaded. |
 
 - Tests that touch method channels mock them with `setMockMethodCallHandler` on the test binding's `defaultBinaryMessenger`. Tests that write files use temporary directories.
