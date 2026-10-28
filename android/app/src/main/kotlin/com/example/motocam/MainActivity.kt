@@ -3,6 +3,7 @@ package com.example.motocam
 import android.Manifest
 import android.app.PictureInPictureParams
 import android.content.BroadcastReceiver
+import android.content.ContentUris
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
@@ -29,6 +30,8 @@ import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 import java.io.File
 import java.io.FileOutputStream
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 class MainActivity: FlutterActivity() {
     private val CHANNEL = "com.example.motocam/pip"
@@ -39,6 +42,7 @@ class MainActivity: FlutterActivity() {
         "$packageName.permission.INTERNAL_BROADCAST"
     private var pipMethodChannel: MethodChannel? = null
     private var legacyRecordingsAccess: LegacyRecordingsAccess? = null
+    private var galleryCopies: GalleryCopies? = null
 
     // Every startActivityForResult of this activity is answered through
     // this dispatcher, by request code (see ActivityRequestCodes).
@@ -205,6 +209,15 @@ class MainActivity: FlutterActivity() {
             }
         }
         legacyRecordingsAccess?.register(flutterEngine.dartExecutor.binaryMessenger)
+
+        if (galleryCopies == null) {
+            val copies = GalleryCopies(this)
+            galleryCopies = copies
+            activityResults.register(GalleryCopies.REQUEST_DELETE) { resultCode, _ ->
+                copies.onDeleteRequestResult(resultCode)
+            }
+        }
+        galleryCopies?.register(flutterEngine.dartExecutor.binaryMessenger)
 
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, DEVICE_STATUS_CHANNEL)
             .setMethodCallHandler { call, result ->
@@ -376,6 +389,9 @@ class MainActivity: FlutterActivity() {
                         val sourcePath = call.argument<String>("sourcePath")
                         val displayName = call.argument<String>("displayName")
                         val relativePath = call.argument<String>("relativePath") ?: "Movies/MotoCam/Videos"
+                        // Optional (default false): link a finished copy of
+                        // the same name and size instead of copying again.
+                        val reuseExisting = call.argument<Boolean>("reuseExisting") ?: false
 
                         if (sourcePath.isNullOrBlank() || displayName.isNullOrBlank()) {
                             result.error("INVALID_ARGS", "sourcePath and displayName are required", null)
@@ -402,7 +418,14 @@ class MainActivity: FlutterActivity() {
                                     return@Thread
                                 }
 
-                                val exportedPath = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                                val existingUri = if (reuseExisting) {
+                                    findExistingGalleryCopy(sourceFile, displayName, relativePath)
+                                } else {
+                                    null
+                                }
+                                val exportedPath = if (existingUri != null) {
+                                    existingUri
+                                } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                                     val values = ContentValues().apply {
                                         put(MediaStore.Video.Media.DISPLAY_NAME, displayName)
                                         put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
@@ -444,20 +467,25 @@ class MainActivity: FlutterActivity() {
                                         targetDir.mkdirs()
                                     }
 
-                                    val targetFile = File(targetDir, displayName)
-                                    sourceFile.inputStream().use { inStream ->
-                                        FileOutputStream(targetFile).use { outStream ->
-                                            inStream.copyTo(outStream)
+                                    // Never over another file: a name in use
+                                    // gets a numbered suffix.
+                                    val targetFile = uniqueTarget(targetDir, displayName)
+                                    try {
+                                        sourceFile.inputStream().use { inStream ->
+                                            FileOutputStream(targetFile).use { outStream ->
+                                                inStream.copyTo(outStream)
+                                                outStream.fd.sync()
+                                            }
                                         }
+                                        // Only the public copy is scanned, never
+                                        // the private source; the scan gives the
+                                        // copy's content URI.
+                                        scanForUri(targetFile)
+                                            ?: throw IllegalStateException("Media scan gave no URI")
+                                    } catch (e: Exception) {
+                                        targetFile.delete()
+                                        throw e
                                     }
-
-                                    MediaScannerConnection.scanFile(
-                                        this,
-                                        arrayOf(targetFile.absolutePath),
-                                        null,
-                                        null
-                                    )
-                                    targetFile.absolutePath
                                 }
 
                                 runOnUiThread {
@@ -473,6 +501,85 @@ class MainActivity: FlutterActivity() {
                     else -> result.notImplemented()
                 }
             }
+    }
+
+    /**
+     * The content URI of a finished gallery copy of [source] named
+     * [displayName] in [relativePath] with the same size (one a killed
+     * process made before Dart could record it), or null. On API 29+ the
+     * query sees only media this app inserted; below it, the public file is
+     * checked and scanned.
+     */
+    private fun findExistingGalleryCopy(
+        source: File,
+        displayName: String,
+        relativePath: String,
+    ): String? {
+        val size = source.length()
+        return try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val collection = MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+                val folder = relativePath.trimEnd('/') + "/"
+                contentResolver.query(
+                    collection,
+                    arrayOf(MediaStore.Video.Media._ID, MediaStore.Video.Media.SIZE),
+                    "${MediaStore.Video.Media.DISPLAY_NAME}=? AND " +
+                        "${MediaStore.Video.Media.RELATIVE_PATH}=?",
+                    arrayOf(displayName, folder),
+                    null,
+                )?.use { cursor ->
+                    var found: String? = null
+                    while (found == null && cursor.moveToNext()) {
+                        if (cursor.getLong(1) == size) {
+                            found = ContentUris.withAppendedId(collection, cursor.getLong(0))
+                                .toString()
+                        }
+                    }
+                    found
+                }
+            } else {
+                @Suppress("DEPRECATION")
+                val folder = File(Environment.getExternalStorageDirectory(), relativePath)
+                val target = File(folder, displayName)
+                if (target.isFile && target.length() == size) scanForUri(target) else null
+            }
+        } catch (e: Exception) {
+            Log.w("MotoCam", "existing gallery copy lookup failed", e)
+            null
+        }
+    }
+
+    /** [displayName] in [dir], or `name_1.ext`, `name_2.ext`, ... if taken. */
+    private fun uniqueTarget(dir: File, displayName: String): File {
+        val dot = displayName.lastIndexOf('.')
+        val base = if (dot > 0) displayName.substring(0, dot) else displayName
+        val extension = if (dot > 0) displayName.substring(dot) else ""
+        var candidate = File(dir, displayName)
+        var suffix = 1
+        while (candidate.exists()) {
+            candidate = File(dir, "${base}_$suffix$extension")
+            suffix++
+        }
+        return candidate
+    }
+
+    /**
+     * Scans [file] (a public gallery copy, never a private file) and waits
+     * up to 15 s for its MediaStore content URI. Call off the main thread.
+     */
+    private fun scanForUri(file: File): String? {
+        val latch = CountDownLatch(1)
+        var scanned: Uri? = null
+        MediaScannerConnection.scanFile(
+            this,
+            arrayOf(file.absolutePath),
+            arrayOf("video/mp4"),
+        ) { _, uri ->
+            scanned = uri
+            latch.countDown()
+        }
+        latch.await(15, TimeUnit.SECONDS)
+        return scanned?.toString()
     }
 
     private fun readBatteryStatus(): Map<String, Any?> {
@@ -634,6 +741,8 @@ class MainActivity: FlutterActivity() {
         // super.onDestroy either way.
         legacyRecordingsAccess?.dispose()
         legacyRecordingsAccess = null
+        galleryCopies?.dispose()
+        galleryCopies = null
         isRecordingActive = false
         keepScreenOnRequested = false
         applyKeepScreenOn()

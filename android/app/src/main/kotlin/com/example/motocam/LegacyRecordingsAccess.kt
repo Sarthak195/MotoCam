@@ -283,15 +283,14 @@ object ActivityRequestCodes {
     /** `ACTION_OPEN_DOCUMENT_TREE` for the legacy-folder import. */
     const val PICK_LEGACY_RECORDINGS_TREE = 7101
 
-    /** Reserved for a MediaStore delete request (a later change). */
+    /** The MediaStore delete prompt for gallery copies ([GalleryCopies]). */
     const val MEDIA_STORE_DELETE_REQUEST = 7102
 }
 
 /**
  * Routes `onActivityResult` to the handler registered for its request
  * code. Kept free of Android framework types other than [Intent] so the
- * routing stays trivial to extend (the next handler: MediaStore delete
- * requests).
+ * routing stays trivial to extend.
  */
 class ActivityResultDispatcher {
     private val handlers =
