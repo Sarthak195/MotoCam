@@ -1164,6 +1164,18 @@ Future<Map<String, dynamic>> sealRidePayload(
   return <String, dynamic>{...payload, 'integrity': envelope};
 }
 
+/// [isValidRideSignature] on a background isolate.
+///
+/// Top level on purpose: the isolate closure then captures only
+/// [signature] and [payloadHash]. A closure created inside another closure
+/// carries its whole enclosing scope, which can hold unsendable objects
+/// (such as a hasher that reaches widget state) and make `Isolate.run`
+/// throw.
+Future<bool> verifyRideSignatureInBackground(
+  RideSignatureData signature,
+  String payloadHash,
+) => Isolate.run(() => isValidRideSignature(signature, payloadHash));
+
 /// The final save's ride JSON from [sealAndSignRidePayload] and the
 /// signature it carries (`null` when it was sealed as version 2).
 typedef SealedRidePayload = ({
@@ -1217,9 +1229,9 @@ Future<SealedRidePayload> sealAndSignRidePayload(
   try {
     signature = await signer(payloadHash).timeout(signerTimeout);
     if (signature != null) {
-      final candidate = signature;
-      final valid = await Isolate.run(
-        () => isValidRideSignature(candidate, payloadHash),
+      final valid = await verifyRideSignatureInBackground(
+        signature,
+        payloadHash,
       );
       if (!valid) {
         debugPrint('Ride signing: the phone returned an invalid signature.');

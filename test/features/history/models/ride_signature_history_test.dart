@@ -4,6 +4,7 @@
 
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 
 import 'package:flutter_test/flutter_test.dart';
 
@@ -274,6 +275,32 @@ void main() {
       expect(relocked.isLocked, isTrue);
       expect(relocked.integrity.signedBy, RideSignedBy.thisDevice);
     });
+
+    test(
+      're-signing works with a hasher that captures unsendable state',
+      () async {
+        // Ride History passes a hasher whose closure reaches the widget
+        // State; the background signature check must not try to send it.
+        final file = await writeRide('mine', signer: phone);
+        final ride = await loadRide(file, contextFor(phone));
+        final port = ReceivePort();
+        addTearDown(port.close);
+        var hashed = 0;
+        final saved = await ride.setLockState(
+          false,
+          hashSegment: (path, expectedHash) async {
+            hashed++;
+            port.sendPort.hashCode;
+            return hashSegmentFile(path, expectedHash);
+          },
+          signer: phone.signer,
+        );
+        expect(saved, isTrue);
+        expect(hashed, 1);
+        final reloaded = await loadRide(file, contextFor(phone));
+        expect(reloaded.integrity.signedBy, RideSignedBy.thisDevice);
+      },
+    );
 
     test('a failed re-sign refuses the change and leaves the file', () async {
       final file = await writeRide('mine', signer: phone);

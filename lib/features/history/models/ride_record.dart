@@ -1,5 +1,4 @@
 import 'dart:io';
-import 'dart:isolate';
 
 import '../../../core/ride_file/ride_telemetry_codec.dart' as ride_codec;
 import '../../../core/ride_file/ride_telemetry_codec.dart'
@@ -620,8 +619,9 @@ class RideRecord {
           signature.publicKey,
           facts.signerPublicKey,
         )) {
-          final valid = await Isolate.run(
-            () => ride_codec.isValidRideSignature(signature, payloadHash),
+          final valid = await ride_codec.verifyRideSignatureInBackground(
+            signature,
+            payloadHash,
           );
           if (!valid) {
             return false;
