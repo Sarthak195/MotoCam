@@ -44,6 +44,7 @@ The UI is portrait-only and always dark (Material 3). There is no localization; 
 - **Blackout mode.** Hides the preview behind a black screen while recording continues; hold for 2 s to exit.
 - **Ride history and playback.** Rides grouped into Locked Clips and All Rides, plus video-only entries for videos without a ride file. Rides can be unlocked and deleted after a confirmation. Playback runs all segments as one timeline, marks missing segments and gaps on the seekbar, and shows a telemetry overlay, a speed graph with incident and lock markers, and a collapsible OpenStreetMap route map that loads tiles only after a one-time consent.
 - **Integrity checks.** Each ride's telemetry file carries a SHA-256 integrity check over its payload and every segment file. On Android the final save is also signed with a key that never leaves the phone's Android Keystore. The signature shows that the files were not changed by anyone without this app's key on this phone; it does not prove the footage is genuine (a rooted phone or a modified app can sign anything). A ride shows as signed only on the phone and install that recorded it: a copy on another phone shows only as data unmodified, a reinstall creates a new key (older rides then count as signed by another key), and iOS rides are not signed. Unsigned rides keep only the checksum, which detects accidental corruption and naive edits but which anyone who can rewrite the files can recompute. The rides list checks the ride data only and shows one of `INTEGRITY WARNING`, `SIMULATED GPS` (fixes from a mock location provider), `SIGNED ON THIS PHONE`, `DATA UNMODIFIED` or `UNVERIFIED`, plus `VIDEOS VERIFIED` or `VIDEO CHECK FAILED` once the ride's segments were checked. Separate badges mark segment paths outside the ride's folder, which are quarantined and not played (`QUARANTINED n`), missing segment files (`INCOMPLETE`) and rides kept only as a checkpoint (`RECOVERED (INCOMPLETE)`). Opening a ride hashes its segment files one at a time in the background, starting with the segment about to play; leaving the screen stops the check, and results are kept in a ride index cache (which also spares the list from re-reading unchanged ride files), so an unchanged segment is not hashed again. Segments that fail the check still play and are marked on the seekbar; "Check videos again" re-hashes them all.
+- **Private storage.** On Android, rides (videos and telemetry) are stored in the app's private internal storage (`files/MotoCam Recordings`): other apps cannot read them on any Android version, they are excluded from backup and device transfer, they are not reachable over USB or with a file manager (use the gallery export to get clips out), and they are deleted with the app, as before. Rides recorded by earlier builds in `Android/data/com.example.motocam/files` (or the old fallback folders) are moved there in the background whenever the app is not recording, with a progress banner and a summary; rides that do not fit in internal storage, or whose file names clash, stay in the old folder and remain listed.
 - **Gallery export (Android, opt-in).** Off by default. When the rider turns it on, locked segments are copied to the device gallery (`Movies/MotoCam/Recordings`) when recording stops. MotoCam never removes these copies. There is no manual export button.
 
 Each feature, with its exact behaviour and the code behind it, is described in [docs/features.md](docs/features.md).
@@ -141,7 +142,8 @@ lib/
     ├── camera/providers/
     │   ├── camera_init_status.dart             Camera init state and failure reasons
     │   ├── camera_provider.dart                Camera lifecycle, segments, locks, retention, gallery export
-    │   └── recording_retention.dart            Pure loop-retention, LOCKED badge and orphan-sidecar rules
+    │   ├── recording_retention.dart            Pure loop-retention, LOCKED badge and orphan-sidecar rules
+    │   └── recordings_migration.dart           Moves rides from the legacy roots into private storage
     ├── history/
     │   ├── models/
     │   │   ├── ride_history_loader.dart        Loads rides (and video-only rides) off the UI isolate, through the ride index
@@ -160,6 +162,7 @@ lib/
     │       ├── playback_telemetry_overlay.dart Telemetry stats over the video
     │       ├── playback_timeline.dart          Pure playback timeline logic
     │       ├── playback_video_area.dart        Video surface, video area and error view
+    │       ├── recordings_migration_banner.dart  Progress and summary banner of the ride migration
     │       ├── ride_playback_body.dart         Playback body built from position-scoped widgets
     │       ├── route_map_panel.dart            Collapsible Route Map card
     │       ├── route_map_view.dart             flutter_map route on OpenStreetMap tiles
