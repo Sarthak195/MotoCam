@@ -2029,6 +2029,12 @@ class CameraProvider extends ChangeNotifier {
       // The telemetry session has not started; the next roll retries.
       return;
     }
+    final startedAt = _recordingStartTime;
+    // A stop and a new START during the run would mix two sessions'
+    // protections; the run then ends and the new session schedules its own.
+    bool sessionChanged() =>
+        currentRideSessionIdSource?.call() != sessionId ||
+        _recordingStartTime != startedAt;
     _isStorageBudgetRunning = true;
     try {
       final store = await RideIndexStore.shared();
@@ -2039,6 +2045,30 @@ class CameraProvider extends ChangeNotifier {
       if (!_canEnforceStorageBudget) {
         return;
       }
+      if (sessionChanged()) {
+        _scheduleStorageBudget(const Duration(seconds: 3));
+        return;
+      }
+      // Neither the migration nor the import runs while a ride records, so
+      // their journals cannot change during this run.
+      final parent = Directory(root).parent.path;
+      final sep = Platform.pathSeparator;
+      final protectedPaths = <String>{
+        ...inventory.protectedPaths,
+        ..._recordingsMigration.inFlightPaths,
+        ..._legacyRideImport.inFlightPaths,
+        ...await RecordingsMigrator.protectedDestinationPaths(
+          workDirectory: '$parent$sep$_migrationDirectoryName',
+          recordingsRoot: root,
+        ),
+        ...await LegacyRideImporter.protectedDestinationPaths(
+          workDirectory: '$parent$sep$_importDirectoryName',
+          recordingsRoot: root,
+        ),
+      };
+      if (!_canEnforceStorageBudget || sessionChanged()) {
+        return;
+      }
       final selection = selectRidesForStorageBudget(
         budgetBytes: budget,
         fileSizes: inventory.fileSizes,
@@ -2046,7 +2076,8 @@ class CameraProvider extends ChangeNotifier {
         recordingsRoot: root,
         currentRideSessionId: sessionId,
         currentSessionPaths: _liveSessionPaths(),
-        currentSessionStartedAt: _recordingStartTime,
+        currentSessionStartedAt: startedAt,
+        protectedPaths: protectedPaths,
       );
       if (!selection.isOverBudget) {
         return;
@@ -2069,7 +2100,7 @@ class CameraProvider extends ChangeNotifier {
           _normalizePath(entry.key): entry.value,
       };
       for (final ride in selection.ridesToDelete) {
-        if (!_canEnforceStorageBudget) {
+        if (!_canEnforceStorageBudget || sessionChanged()) {
           break;
         }
         // A segment registered since the scan is never deleted.

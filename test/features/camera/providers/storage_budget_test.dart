@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:motocam/core/utils/path_utils.dart' as path_utils;
 import 'package:motocam/features/camera/providers/storage_budget.dart';
 
 final String _sep = Platform.pathSeparator;
@@ -166,6 +167,38 @@ void main() {
     expect(selection.ridesToDelete.map((r) => r.id), <String>[old.id]);
   });
 
+  test('the videos of a half-moved ride in the protected paths are never '
+      'selected', () {
+    // The migration paused after moving this locked ride's first video; its
+    // JSON is still in the legacy root, so the video looks like the oldest
+    // unlocked video-only ride.
+    final halfMoved = StorageBudgetRide(
+      id: inRoot('seg_half_1.mp4'),
+      createdAt: DateTime(2026, 1, 1),
+      files: <String>[inRoot('seg_half_1.mp4')],
+    );
+    final old = ride('old', 2);
+    final rides = <StorageBudgetRide>[halfMoved, old];
+    final selection = selectRidesForStorageBudget(
+      budgetBytes: 150,
+      fileSizes: sizesOf(rides),
+      rides: rides,
+      recordingsRoot: root,
+      protectedPaths: <String>[inRoot('seg_half_1.mp4')],
+    );
+    expect(selection.ridesToDelete.map((r) => r.id), <String>[old.id]);
+    expect(selection.protectedBytes, 100);
+
+    // Without the protection it would have gone first.
+    final unprotected = selectRidesForStorageBudget(
+      budgetBytes: 150,
+      fileSizes: sizesOf(rides),
+      rides: rides,
+      recordingsRoot: root,
+    );
+    expect(unprotected.ridesToDelete.first.id, halfMoved.id);
+  });
+
   test('orphan videos and files of no ride count toward the total', () {
     final orphan = StorageBudgetRide(
       id: inRoot('orphan.mp4'),
@@ -321,6 +354,37 @@ void main() {
       ]);
       expect(byName['lone.mp4']!.lastModified, isNotNull);
       expect(inventory.records, hasLength(2));
+      expect(inventory.protectedPaths, isEmpty);
     });
+
+    test(
+      'a ride JSON that fails to load protects every video-only ride',
+      () async {
+        File write(String name, int bytes) =>
+            File('${recordings.path}$_sep$name')
+              ..writeAsBytesSync(List<int>.filled(bytes, 1));
+        final locked = write('locked_1.mp4', 10);
+        final other = write('other.mp4', 10);
+        // A truncated JSON that would have locked locked_1.mp4.
+        File(
+          '${recordings.path}${_sep}ride_bad.telemetry.json',
+        ).writeAsStringSync('{"schemaVersion": 3, "lockedSegmentPaths": ["');
+
+        final inventory = await scanStorageBudgetInventory(recordings.path);
+        expect(inventory.protectedPaths, <String>{
+          path_utils.normalizePath(locked.path),
+          path_utils.normalizePath(other.path),
+        });
+        final rides = inventory.rides;
+        final selection = selectRidesForStorageBudget(
+          budgetBytes: 1,
+          fileSizes: inventory.fileSizes,
+          rides: rides,
+          recordingsRoot: recordings.path,
+          protectedPaths: inventory.protectedPaths,
+        );
+        expect(selection.ridesToDelete, isEmpty);
+      },
+    );
   });
 }

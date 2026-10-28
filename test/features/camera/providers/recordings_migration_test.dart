@@ -735,6 +735,82 @@ void main() {
       expect(contents(root), expected);
     });
 
+    test('a ride paused half-moved and rides left split by an earlier run '
+        'stay named for the storage budget', () async {
+      // An earlier run left a ride split; this run is the first to plan.
+      final oldSource = '$external${sep}seg_old_1.mp4';
+      final oldDestination = '$root${sep}seg_old_1.mp4';
+      await Directory(work).create(recursive: true);
+      File('$work$sep$recordingsMigrationJournalFileName').writeAsStringSync(
+        jsonEncode(<String, Object?>{
+          'version': 1,
+          'ride': null,
+          'reportedSkips': <String>[],
+          'split': <String>[
+            path_utils.normalizePath(oldSource),
+            path_utils.normalizePath(oldDestination),
+          ],
+        }),
+      );
+      final ride = await writeRide(documents, 'half');
+      // Pauses once the first video is in the recordings root.
+      final summary = await migrator(
+        legacyRoots: <String>[documents],
+        shouldPause: () => File('$root${sep}seg_half_1.mp4').existsSync(),
+      ).run();
+      expect(summary.outcome, RecordingsMigrationOutcome.paused);
+      expect(namesIn(root), <String>['seg_half_1.mp4']);
+
+      String inRoot(String name) => path_utils.normalizePath('$root$sep$name');
+      final journalBefore = File(
+        '$work$sep$recordingsMigrationJournalFileName',
+      ).readAsStringSync();
+      expect(
+        await RecordingsMigrator.protectedDestinationPaths(
+          workDirectory: work,
+          recordingsRoot: root,
+        ),
+        <String>{
+          inRoot('seg_half_1.mp4'),
+          inRoot('seg_half_2.mp4'),
+          inRoot(name(ride.path)),
+          path_utils.normalizePath(oldDestination),
+        },
+      );
+      // Reading changes nothing.
+      expect(
+        File('$work$sep$recordingsMigrationJournalFileName').readAsStringSync(),
+        journalBefore,
+      );
+    });
+
+    test('the protected paths of a missing or damaged journal are empty, and '
+        'an unfinished replacement is read and kept', () async {
+      Future<Set<String>> read() =>
+          RecordingsMigrator.protectedDestinationPaths(
+            workDirectory: work,
+            recordingsRoot: root,
+          );
+      expect(await read(), isEmpty);
+      await Directory(work).create(recursive: true);
+      final journal = File('$work$sep$recordingsMigrationJournalFileName')
+        ..writeAsStringSync('{');
+      expect(await read(), isEmpty);
+      final pending = File('${journal.path}.new')
+        ..writeAsStringSync(
+          jsonEncode(<String, Object?>{
+            'version': 1,
+            'ride': <String, Object?>{
+              'files': <String>['$external${sep}seg_new_1.mp4'],
+            },
+          }),
+        );
+      expect(await read(), <String>{
+        path_utils.normalizePath('$root${sep}seg_new_1.mp4'),
+      });
+      expect(pending.existsSync(), isTrue);
+    });
+
     test('a pause before the first ride moves nothing', () async {
       await writeRide(documents, 'early');
       final expected = contents(documents);

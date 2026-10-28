@@ -108,7 +108,9 @@ class StorageBudgetSelection {
 /// `rideSessionId` is [currentRideSessionId], or any of its files is in
 /// [currentSessionPaths], since segments exist before the session's
 /// checkpoint JSON does), has a file modified at or after
-/// [currentSessionStartedAt], or shares a file with any such ride.
+/// [currentSessionStartedAt], has a file in [protectedPaths] (the ride the
+/// migration or the import left half-moved, or the videos a ride JSON that
+/// failed to decode may lock), or shares a file with any such ride.
 ///
 /// The others are deleted oldest first (by `createdAt`, then id) until
 /// the total is at or under the budget. When the protected bytes alone
@@ -122,6 +124,7 @@ StorageBudgetSelection selectRidesForStorageBudget({
   String? currentRideSessionId,
   Iterable<String> currentSessionPaths = const <String>[],
   DateTime? currentSessionStartedAt,
+  Iterable<String> protectedPaths = const <String>[],
 }) {
   final root = path_utils.normalizePath(recordingsRoot);
   final sizes = <String, int>{};
@@ -146,12 +149,16 @@ StorageBudgetSelection selectRidesForStorageBudget({
   final sessionPaths = <String>{
     for (final path in currentSessionPaths) path_utils.normalizePath(path),
   };
-  final protectedFiles = <String>{...sessionPaths};
+  final otherProtected = <String>{
+    for (final path in protectedPaths) path_utils.normalizePath(path),
+  };
+  final protectedFiles = <String>{...sessionPaths, ...otherProtected};
   final unprotected = <StorageBudgetRide>[];
   for (final ride in rides) {
     final keys = ride.files.map(path_utils.normalizePath).toList();
     final isProtected =
         ride.isLocked ||
+        keys.any(otherProtected.contains) ||
         ride.hasQuarantinedPaths ||
         keys.isEmpty ||
         keys.any((key) => !_isDirectlyInside(key, root)) ||
@@ -238,6 +245,7 @@ class StorageBudgetInventory {
     required this.fileSizes,
     required this.rides,
     required this.records,
+    this.protectedPaths = const <String>{},
   });
 
   /// Every counted file directly inside the root with its size.
@@ -248,6 +256,13 @@ class StorageBudgetInventory {
 
   /// The ride record of each entry of [rides], by [StorageBudgetRide.id].
   final Map<String, RideRecord> records;
+
+  /// Normalised paths the budget must never delete although no loaded ride
+  /// locks them: when a ride JSON in the root failed to load, the files of
+  /// every video-only ride (the lock state lives only in the ride JSON, so
+  /// any of them may be a locked segment of that ride). Pass them to
+  /// [selectRidesForStorageBudget] as `protectedPaths`.
+  final Set<String> protectedPaths;
 }
 
 /// Whether [path] counts toward the budget: a ride video or a ride JSON
@@ -262,8 +277,10 @@ bool isStorageBudgetFile(String path) {
 
 /// Lists the top level of [recordingsRoot] (never a subdirectory, a legacy
 /// root or a staging directory) and loads its rides through the ride
-/// index at [indexFilePath] when given. Blocking-heavy (JSON decoding), so
-/// run it off the UI isolate (`Isolate.run`).
+/// index at [indexFilePath] when given. When any ride JSON there fails to
+/// load, every video-only ride goes into
+/// [StorageBudgetInventory.protectedPaths]. Blocking-heavy (JSON decoding),
+/// so run it off the UI isolate (`Isolate.run`).
 Future<StorageBudgetInventory> scanStorageBudgetInventory(
   String recordingsRoot, {
   String? indexFilePath,
@@ -289,11 +306,25 @@ Future<StorageBudgetInventory> scanStorageBudgetInventory(
     fileSizes.keys.toList(),
     indexFilePath: indexFilePath,
   );
+  final loadedJsons = <String>{
+    for (final record in load.rides)
+      if (record.telemetryPath != null)
+        path_utils.normalizePath(record.telemetryPath!),
+  };
+  final anyJsonFailed = fileSizes.keys.any(
+    (path) =>
+        path.toLowerCase().endsWith(ride_codec.rideTelemetryFileSuffix) &&
+        !loadedJsons.contains(path_utils.normalizePath(path)),
+  );
+  final protectedPaths = <String>{};
   final rides = <StorageBudgetRide>[];
   final records = <String, RideRecord>{};
   for (final record in load.rides) {
     final id = record.telemetryPath ?? record.videoPath;
     final files = filesOfRide(record);
+    if (anyJsonFailed && record.telemetryPath == null) {
+      protectedPaths.addAll(files.map(path_utils.normalizePath));
+    }
     DateTime? newest;
     for (final file in files) {
       final time = modified[path_utils.normalizePath(file)];
@@ -318,6 +349,7 @@ Future<StorageBudgetInventory> scanStorageBudgetInventory(
     fileSizes: fileSizes,
     rides: rides,
     records: records,
+    protectedPaths: protectedPaths,
   );
 }
 

@@ -158,6 +158,11 @@ class LegacyImportSummary {
     if (outcome == LegacyImportOutcome.listFailed) {
       return 'Could not read the selected folder. Nothing was imported.';
     }
+    if (outcome == LegacyImportOutcome.paused && total == 0) {
+      // Paused while the folder was still being read: nothing is known yet.
+      return 'The import stopped because recording started; import again '
+          'to continue.';
+    }
     final sentences = <String>[];
     if (total == 0) {
       sentences.add('No rides were found in the selected folder');
@@ -307,6 +312,42 @@ class LegacyRideImporter {
   final Duration pollInterval;
 
   String get _sep => Platform.pathSeparator;
+
+  /// Normalised paths in [recordingsRoot] of the files of the ride that the
+  /// journal in [workDirectory] names as in flight (an import that paused
+  /// or stopped in the middle of it). Until the ride is whole, its JSON with
+  /// the lock state is not in private storage, so the storage budget never
+  /// deletes these. Changes nothing, and returns an empty set when the
+  /// journal cannot be read.
+  static Future<Set<String>> protectedDestinationPaths({
+    required String workDirectory,
+    required String recordingsRoot,
+  }) async {
+    final sep = Platform.pathSeparator;
+    final journalPath = '$workDirectory$sep$legacyImportJournalFileName';
+    final paths = <String>{};
+    for (final path in <String>[journalPath, '$journalPath.new']) {
+      try {
+        final file = File(path);
+        if (!await file.exists()) {
+          continue;
+        }
+        final journal = jsonDecode(await file.readAsString());
+        final ride = journal is Map ? journal['ride'] : null;
+        if (ride is! Map || ride['files'] is! List) {
+          continue;
+        }
+        for (final name in ride['files'] as List) {
+          if (name is String && _isSafeName(name)) {
+            paths.add(path_utils.normalizePath('$recordingsRoot$sep$name'));
+          }
+        }
+      } catch (_) {
+        // A damaged journal names nothing.
+      }
+    }
+    return paths;
+  }
 
   String get _journalPath => '$workDirectory$_sep$legacyImportJournalFileName';
 

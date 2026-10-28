@@ -371,7 +371,62 @@ class RecordingsMigrator {
   /// returns before planning.
   int? _lowStorageBytes;
 
+  /// Split paths read from the journal at the start of this run, kept in
+  /// every journal written before the run's end, so a run that pauses
+  /// still names the rides an earlier run left split (the storage budget
+  /// reads them, see [protectedDestinationPaths]).
+  Set<String> _carriedSplitPaths = const <String>{};
+
   String get _sep => Platform.pathSeparator;
+
+  /// Normalised paths in [recordingsRoot] that the journal in
+  /// [workDirectory] names as part of a ride not wholly moved: every file
+  /// of the ride in flight (at its destination) and every file of a ride
+  /// left split. The storage budget never deletes them, since the rest of
+  /// such a ride (its JSON with the lock state) is still in a legacy root.
+  /// Reads both the journal and an unfinished replacement of it, changes
+  /// nothing, and returns an empty set when neither can be read.
+  static Future<Set<String>> protectedDestinationPaths({
+    required String workDirectory,
+    required String recordingsRoot,
+  }) async {
+    final sep = Platform.pathSeparator;
+    final journalPath = '$workDirectory$sep$recordingsMigrationJournalFileName';
+    final paths = <String>{};
+    for (final path in <String>[journalPath, '$journalPath.new']) {
+      try {
+        final file = File(path);
+        if (!await file.exists()) {
+          continue;
+        }
+        final journal = jsonDecode(await file.readAsString());
+        if (journal is! Map) {
+          continue;
+        }
+        final names = <String>[];
+        final ride = journal['ride'];
+        if (ride is Map && ride['files'] is List) {
+          for (final file in ride['files'] as List) {
+            names.add(path_utils.fileNameFromPath(file.toString()));
+          }
+        }
+        final split = journal['split'];
+        if (split is List) {
+          for (final file in split) {
+            names.add(path_utils.fileNameFromPath(file.toString()));
+          }
+        }
+        for (final name in names) {
+          if (name.isNotEmpty) {
+            paths.add(path_utils.normalizePath('$recordingsRoot$sep$name'));
+          }
+        }
+      } catch (_) {
+        // A damaged journal names nothing.
+      }
+    }
+    return paths;
+  }
 
   String get _journalPath =>
       '$workDirectory$_sep$recordingsMigrationJournalFileName';
@@ -459,6 +514,7 @@ class RecordingsMigrator {
       if (split is List)
         for (final path in split) path.toString(),
     };
+    _carriedSplitPaths = knownSplitPaths;
     final neededBytes = journal['lowStorageBytes'];
     if (_snapshot != null &&
         neededBytes is int &&
@@ -1088,11 +1144,13 @@ class RecordingsMigrator {
     Object? ride,
     Object? file,
     required Iterable<String> reported,
-    Set<String> split = const <String>{},
+    Set<String>? split,
     int? lowStorageBytes,
     bool done = false,
   }) {
     final snapshot = _snapshot;
+    // Before the run's end, the rides an earlier run left split.
+    split ??= _carriedSplitPaths;
     return _writeJournal(<String, dynamic>{
       'version': 1,
       'ride': ride,

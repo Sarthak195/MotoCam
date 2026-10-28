@@ -402,6 +402,20 @@ void main() {
             )
             as Map;
     expect((journal['ride'] as Map)['name'], 'ride_r9.telemetry.json');
+    // The storage budget never deletes the half-imported ride's copies.
+    String inRoot(String name) =>
+        path_utils.normalizePath('${root.path}$_sep$name');
+    expect(
+      await LegacyRideImporter.protectedDestinationPaths(
+        workDirectory: work,
+        recordingsRoot: root.path,
+      ),
+      <String>{
+        inRoot('j.mp4'),
+        inRoot('k.mp4'),
+        inRoot('ride_r9.telemetry.json'),
+      },
+    );
 
     // The next run rolls forward.
     final resumed = await importer(_FakeSource(public)).run();
@@ -409,6 +423,60 @@ void main() {
     expect(resumed.imported, 1);
     expect(rootNames(), <String>['j.mp4', 'k.mp4', 'ride_r9.telemetry.json']);
   });
+
+  test('a pause while the folder is read says so without a ride count', () {
+    const summary = LegacyImportSummary(
+      outcome: LegacyImportOutcome.paused,
+      total: 0,
+      imported: 0,
+      alreadyImported: 0,
+      skipped: <LegacyImportSkip>[],
+      remaining: 0,
+      importedDocuments: <LegacyRideDocument>[],
+    );
+    expect(
+      summary.message,
+      'The import stopped because recording started; import again to '
+      'continue.',
+    );
+  });
+
+  test('a pause while planning rides returns the short message', () async {
+    writeV012Ride('rp', <String>['p.mp4']);
+    final summary = await importer(
+      _FakeSource(public),
+      shouldPause: () => true,
+    ).run();
+    expect(summary.outcome, LegacyImportOutcome.paused);
+    expect(summary.message, isNot(contains('No rides were found')));
+  });
+
+  test(
+    'the protected paths of a missing or damaged journal are empty',
+    () async {
+      Future<Set<String>> read() =>
+          LegacyRideImporter.protectedDestinationPaths(
+            workDirectory: work,
+            recordingsRoot: root.path,
+          );
+      expect(await read(), isEmpty);
+      Directory(work).createSync(recursive: true);
+      File('$work$_sep$legacyImportJournalFileName').writeAsStringSync('{');
+      expect(await read(), isEmpty);
+      File('$work$_sep$legacyImportJournalFileName').writeAsStringSync(
+        jsonEncode(<String, Object?>{
+          'version': 1,
+          'ride': <String, Object?>{
+            'name': 'x',
+            'files': <String>['a.mp4', '../escape.mp4'],
+          },
+        }),
+      );
+      expect(await read(), <String>{
+        path_utils.normalizePath('${root.path}${_sep}a.mp4'),
+      });
+    },
+  );
 
   test('stops when the copies do not fit the free space', () async {
     writeV012Ride('ra', <String>['l.mp4']);
