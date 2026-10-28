@@ -408,6 +408,44 @@ void main() {
       expect(segments.quarantinedSegmentPaths, isEmpty);
     });
 
+    test('a file placed at the old path in a same-named directory elsewhere '
+        'changes nothing', () async {
+      final oldRoot = await Directory('${elsewhere.path}${_sep}ride').create();
+      final declaredGone = '${oldRoot.path}${_sep}gone.mp4';
+      final kept = await touch(rideDirectory, 'kept.mp4');
+      final json = <String, dynamic>{
+        'videoPath': '${oldRoot.path}${_sep}kept.mp4',
+        'segmentPaths': <String>[
+          declaredGone,
+          '${oldRoot.path}${_sep}kept.mp4',
+        ],
+      };
+      final telemetryFile = File(
+        '${rideDirectory.path}${_sep}r.telemetry.json',
+      );
+      Future<List<List<String>>> read() async {
+        final segments = (await resolveRideSegments(
+          telemetryFile: telemetryFile,
+          json: json,
+        ))!;
+        return <List<String>>[
+          segments.segmentPaths,
+          segments.missingSegmentPaths,
+          segments.quarantinedSegmentPaths,
+        ];
+      }
+
+      final before = await read();
+      // Someone writes a file where the evicted segment used to be.
+      await touch(oldRoot, 'gone.mp4');
+      expect(await read(), before);
+      expect(before, <List<String>>[
+        <String>['${rideDirectory.path}${_sep}gone.mp4', kept],
+        <String>['${rideDirectory.path}${_sep}gone.mp4'],
+        const <String>[],
+      ]);
+    });
+
     test(
       'a path in the legacy public folder always maps to its sibling',
       () async {

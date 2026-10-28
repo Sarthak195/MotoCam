@@ -674,11 +674,13 @@ Future<ResolvedRideSegments?> resolveRideSegments({
 ///   sibling is used, even when the declared path also exists elsewhere (the
 ///   ride was moved or copied, for example from a legacy recordings root,
 ///   and the source copy may still be there);
-/// * a missing path outside [telemetryDirectory] whose parent directory has
-///   the same name as [telemetryDirectory] (for example both are
+/// * a path outside [telemetryDirectory] whose parent directory has the
+///   same name as [telemetryDirectory] (for example both are
 ///   `MotoCam Recordings`: the ride moved between roots and this segment
-///   was already gone) is mapped to that missing sibling, so it counts as
-///   missing rather than quarantined; nothing outside the directory is read;
+///   was already gone) is mapped to that missing sibling, existing or not,
+///   so it counts as missing rather than quarantined; nothing outside the
+///   directory is read or even checked, so a file placed at the old path
+///   cannot change how the ride reads;
 /// * anything else is kept as declared (a path outside [telemetryDirectory]
 ///   is then quarantined by [resolveRideSegments]).
 Future<String> resolveDeclaredRidePath(
@@ -705,14 +707,16 @@ Future<String> resolveDeclaredRidePath(
     // not the originals are still in the public folder.
     return candidatePath;
   }
-  final exists = await File(path).exists();
-  if (isInside && exists) {
+  // A path outside the directory is never checked: whether a file exists
+  // there (a location others may write to) must not change how the ride
+  // reads.
+  if (isInside && await File(path).exists()) {
     return path;
   }
   if (await File(candidatePath).exists()) {
     return candidatePath;
   }
-  if (!isInside && !exists && _hasSameParentName(path, telemetryDirectory)) {
+  if (!isInside && _hasSameParentName(path, telemetryDirectory)) {
     return candidatePath;
   }
   return path;
