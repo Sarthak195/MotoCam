@@ -47,7 +47,7 @@ MotoCam collects GPS and gravity-removed accelerometer data in a single app-wide
 
 If location services are off when `initialize()` runs, tracking does not start (see [Start conditions](#start-conditions)). START asks the rider to turn location on and does not start the recording without it.
 
-**Background.** On Android, GPS continuity while the app is in the background during recording relies on the app's own foreground service, which includes the `location` type when a location permission is granted. It is started by `RecordingScreen` over `com.example.motocam/background_recording`; see [platform-integration.md](platform-integration.md). On iOS, `Info.plist` declares `UIBackgroundModes` `location`. Recording itself still stops when `MainActivity` stops (screen lock or timeout, or leaving the app without Picture-in-Picture); see [recording-pipeline.md](recording-pipeline.md).
+**Background.** On Android, GPS continuity while the app is in the background during recording relies on the app's own foreground service, which includes the `location` type when a location permission is granted. It is started by `RecordingScreen` over `com.example.motocam/background_recording`; see [platform-integration.md](platform-integration.md). On iOS, `Info.plist` declares `UIBackgroundModes` `location`. While that service runs, video capture is designed to continue with the screen off too (not yet confirmed on a device); see [recording-pipeline.md](recording-pipeline.md).
 
 Resolved plugin versions (pubspec.lock): geolocator 14.1.2, geolocator_android 5.2.1, geolocator_apple 2.4.2.
 

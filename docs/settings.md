@@ -56,6 +56,7 @@ Normalization styles: **range clamp** pins out-of-range values to the nearest bo
 | Incident sensitivity | `incidentSensitivity` / `updateIncidentSensitivity` | `incident_sensitivity` | String (`IncidentSensitivity.name`) | `medium` | `low`, `medium`, `high`; any other stored string loads as `medium` |
 | Record audio | `audioEnabled` / `updateAudioEnabled` | `recording_audio_enabled` | bool | `true` | Any bool |
 | Copy locked clips to gallery | `exportLockedClipsToGallery` / `updateExportLockedClipsToGallery` | `export_locked_clips_to_gallery` | bool | `false` | Any bool. The switch is shown only on Android |
+| Keep screen on while recording | `keepScreenOnWhileRecording` / `updateKeepScreenOnWhileRecording` | `keep_screen_on_while_recording` | bool | `true` | Any bool. The switch is shown only on Android |
 | Quality group | not persisted | none | `QualityPresetTier` | Tier of the current preset, else Balanced | Balanced or High Detail. Sheet-only filter for the preset dropdown |
 
 Quality presets (`AppSettingsProvider.qualityProfiles`):
@@ -95,14 +96,15 @@ The saved values are the rider's request and are never overwritten with what the
 | Incident sensitivity | `TelemetryProvider.setIncidentDetectionConfig(triggerGForce:, debounce:)` | No validation in the telemetry provider. |
 | Record audio | `CameraController(enableAudio:)`; `AppPermissionService.ensureRequiredPermissions(audioEnabled:)`; the start preflight | Also decides whether the microphone permission is requested and checked. |
 | Copy locked clips to gallery | `CameraProvider.autoExportLockedClipsToGallery` (set at each START); `AppPermissionService.ensureRequiredPermissions(galleryExportEnabled:)` | When on, the ride's locked segments are copied to the gallery at stop (Android). On Android 9 and lower it also makes the permission audit ask for the storage permission. |
+| Keep screen on while recording | `BackgroundRecordingService.setKeepScreenOn` after START, and when saved during a recording | Android only. `MainActivity` sets `FLAG_KEEP_SCREEN_ON` while a recording is active and the setting is on, and clears it at every stop. It is the fallback in case recording with the screen off, which the app is designed for, does not work on a phone. |
 
-`RecordingScreen._recordingSettingsSnapshot` builds a `recordingSettings` map with `requested*` values from this provider and `applied*` values from `CameraProvider`. `TelemetryProvider` writes it into the ride's telemetry JSON at every checkpoint (`checkpointRideSession`) and at stop (`stopRideSessionAndPersist`); see [data-formats.md](data-formats.md). The gallery-export setting is not part of the snapshot.
+`RecordingScreen._recordingSettingsSnapshot` builds a `recordingSettings` map with `requested*` values from this provider and `applied*` values from `CameraProvider`. `TelemetryProvider` writes it into the ride's telemetry JSON at every checkpoint (`checkpointRideSession`) and at stop (`stopRideSessionAndPersist`); see [data-formats.md](data-formats.md). The gallery-export and keep-screen-on settings are not part of the snapshot.
 
 ## The settings sheet and the save flow
 
 The gear icon in `RecordingScreen` opens the sheet. It is disabled while settings are being applied and while a recording starts or stops; it stays enabled during recording. Before showing the sheet, the screen fetches the supported FPS list for the preset resolved from the saved resolution, the camera list (`getAvailableCameras(refresh: true)`) and the known-unsupported presets.
 
-In `_RecordingSettingsSheetState.initState` the sheet copies the provider's values, with three adjustments: when the saved FPS is not in the offered list, `resolveInitialFps` picks 30 (or the last offered rate) and the preset becomes Custom; an empty camera name is replaced by the active camera (or the first camera), so the first save stores an explicit name; and if the current resolution is known unsupported, the highest supported resolution is pre-selected and the preset becomes Custom. In the sheet, picking a resolution, FPS or bitrate by hand switches the preset to Custom; picking a preset or quality group fills resolution, bitrate and (if supported) FPS. The **Copy locked clips to gallery** switch is shown only on Android. Dismissing the sheet discards everything.
+In `_RecordingSettingsSheetState.initState` the sheet copies the provider's values, with three adjustments: when the saved FPS is not in the offered list, `resolveInitialFps` picks 30 (or the last offered rate) and the preset becomes Custom; an empty camera name is replaced by the active camera (or the first camera), so the first save stores an explicit name; and if the current resolution is known unsupported, the highest supported resolution is pre-selected and the preset becomes Custom. In the sheet, picking a resolution, FPS or bitrate by hand switches the preset to Custom; picking a preset or quality group fills resolution, bitrate and (if supported) FPS. The **Copy locked clips to gallery** and **Keep screen on while recording** switches are shown only on Android. Dismissing the sheet discards everything.
 
 ```mermaid
 sequenceDiagram
@@ -113,7 +115,10 @@ sequenceDiagram
     participant Camera as CameraProvider
     Sheet->>Screen: pop(RecordingSettingsFormResult)
     Screen->>Settings: preset match? updateRecordingQualityProfile : resolution, FPS, bitrate setters
-    Screen->>Settings: audio, speed refresh, camera name, segment, loop, sensitivity, gallery export setters
+    Screen->>Settings: audio, speed refresh, camera name, segment, loop, sensitivity, gallery export, keep-screen-on setters
+    opt recording
+        Screen->>Screen: setKeepScreenOn(keep-screen-on)
+    end
     Screen->>Telemetry: setSpeedUiRefreshInterval, setIncidentDetectionConfig
     Screen->>Camera: applyRecordingSettings(...)
     alt refused while recording
@@ -122,7 +127,7 @@ sequenceDiagram
     Screen->>Screen: SnackBar with outcome
 ```
 
-A result whose triple matches a preset is saved with `updateRecordingQualityProfile`, even if the sheet showed Custom. Otherwise three separate setters run; each one whose value changed notifies and writes all four video keys, so listeners can briefly see mixed values. `CameraProvider.applyRecordingSettings` returns `false` while a recording is starting, active or stopping. If the save happened during a recording, the snack bar reads "Camera settings saved. They apply to the next recording."; the camera keeps its current configuration, and the next START applies the saved camera settings (re-initializing the camera when they differ) before its preflight. Telemetry values are applied live regardless. When the camera applies a lower resolution than requested, the snack bar names both; when initialization fails, it reads "Unable to initialize camera with the selected settings on this device."
+A result whose triple matches a preset is saved with `updateRecordingQualityProfile`, even if the sheet showed Custom. Otherwise three separate setters run; each one whose value changed notifies and writes all four video keys, so listeners can briefly see mixed values. `CameraProvider.applyRecordingSettings` returns `false` while a recording is starting, active or stopping. If the save happened during a recording, the snack bar reads "Camera settings saved. They apply to the next recording."; the camera keeps its current configuration, and the next START applies the saved camera settings (re-initializing the camera when they differ) before its preflight. Telemetry values and the keep-screen-on setting are applied live regardless. When the camera applies a lower resolution than requested, the snack bar names both; when initialization fails, it reads "Unable to initialize camera with the selected settings on this device."
 
 ## Legacy keys and migration
 

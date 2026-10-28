@@ -30,7 +30,7 @@ MotoCam is a Flutter motorcycle dashcam. One home screen coordinates three app-w
 
 Current limitations of the recording pipeline:
 
-- On Android, recording stops when `MainActivity` stops: a screen timeout or lock, or leaving the app without entering PiP. The camera is bound to the activity, and the foreground service does not keep it running.
+- On Android, the camera plugin binds CameraX to `MainActivity`'s lifecycle. While a recording's foreground service runs, `MainActivity` holds the lifecycle it exposes at STARTED, so recording is designed to continue with the screen off or the app in the background; this has not yet been confirmed on a device. The keep-screen-on setting (on by default) is the fallback. Swiping the app away from Recents still ends the recording. See [platform-integration.md](platform-integration.md#camera-lifecycle-hold).
 - On iOS nothing disables the idle timer while recording, so Auto-Lock interrupts the capture.
 - Each segment roll stops and restarts the camera recording, which loses about a second of footage at every segment boundary.
 
@@ -114,7 +114,7 @@ Notes:
 
 | Dart side | Channel `com.example.motocam/...` | Gating in Dart | Methods (Dart to native) | Native to Dart |
 |---|---|---|---|---|
-| `BackgroundRecordingService` | `background_recording` | `defaultTargetPlatform == android`; no-op or default elsewhere | `startForegroundRecording`, `updateForegroundRecording`, `stopForegroundRecording`, `isIgnoringBatteryOptimizations`, `requestIgnoreBatteryOptimizations` | `onStopRequested` |
+| `BackgroundRecordingService` | `background_recording` | `defaultTargetPlatform == android`; no-op or default elsewhere | `startForegroundRecording`, `updateForegroundRecording`, `stopForegroundRecording`, `setKeepScreenOn`, `isIgnoringBatteryOptimizations`, `requestIgnoreBatteryOptimizations` | `onStopRequested` |
 | `DeviceStatusService` | `device_status` | `defaultTargetPlatform == android`; otherwise `empty` | `getBatteryStatus` | none |
 | `PipService` | `pip` | Not gated. Failures are caught and return `false` | `enterPipMode` | `onPipModeChanged` |
 | `CameraProvider.platform` | `media` | Gallery export runs only on Android; a failed free-space query returns `null` | `getAvailableStorageBytes`, `exportVideoToGallery` | none |

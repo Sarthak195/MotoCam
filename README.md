@@ -27,7 +27,7 @@ MotoCam is a Flutter dashcam app for motorcycle riders. It records video in fixe
 
 Current limitations:
 
-- On Android, recording stops when the app's activity stops: when the screen times out or is locked, or when the rider leaves the app without Picture-in-Picture.
+- On Android, recording is designed to continue with the screen off or the app in the background while the recording notification shows, but this has not yet been confirmed on a device. The **Keep screen on while recording** setting (on by default) is the fallback. Swiping MotoCam away from Recents still ends the recording, because the activity and the Flutter engine are destroyed.
 - On iOS, the idle timer is not disabled while recording, so Auto-Lock interrupts the capture.
 - Each segment roll loses about a second of footage.
 
@@ -39,7 +39,7 @@ The UI is portrait-only and always dark (Material 3). There is no localization; 
 - **Start preflight.** Every START runs a permission audit and a checklist (permissions, location services, camera readiness, media write access, plus warnings for the Android notification permission and battery-optimization exemption, a missing motion sensor, battery level and temperature).
 - **Live telemetry.** Speed, ride duration, distance, battery and temperature tiles on the recording screen (battery and temperature on Android only).
 - **Incident detection and locking.** While recording, gravity-removed acceleration at or above a sensitivity-dependent threshold (Low 4.5 g, Medium 3.5 g, High 2.8 g), sustained for at least 40 ms, locks the two previous segments and the current one. A LOCK button does the same manually.
-- **Background recording support (Android).** While recording, a foreground service with an ongoing notification, a Stop action and a wake lock runs, and the app enters Picture-in-Picture automatically when the rider leaves it. Recording still stops when the activity stops (see the limitations above and [docs/features.md](docs/features.md#picture-in-picture-and-screen-off-recording)).
+- **Background recording support (Android).** While recording, a foreground service with an ongoing notification, a Stop action and a wake lock runs, and the app enters Picture-in-Picture automatically when the rider leaves it. While that service runs, the camera is kept open when the screen turns off or the app leaves the foreground, so recording is designed to continue (not yet confirmed on a device). The screen is kept on while recording unless the rider turns that off (see the limitations above and [docs/features.md](docs/features.md#picture-in-picture-and-screen-off-recording)).
 - **Crash-safe ride files.** Once the first segment is saved, the ride's telemetry JSON is written as a checkpoint whenever a segment or lock is added and every 30 s, so a ride survives a crash or kill before STOP. A failed save can be retried.
 - **Blackout mode.** Hides the preview behind a black screen while recording continues; hold for 2 s to exit.
 - **Ride history and playback.** Rides grouped into Locked Clips and All Rides, plus video-only entries for videos without a ride file. Rides can be unlocked and deleted after a confirmation. Playback runs all segments as one timeline, marks missing segments and gaps on the seekbar, and shows a telemetry overlay, a speed graph with incident and lock markers, and a collapsible OpenStreetMap route map that loads tiles only after a one-time consent.
