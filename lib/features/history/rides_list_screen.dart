@@ -1158,7 +1158,10 @@ class _RidesListScreenState extends State<RidesListScreen> {
           ],
         ),
         trailing: SizedBox(
-          width: (ride.isLocked ? 116 : 64) + (showGalleryMenu ? 28 : 0),
+          // Each button takes the 48 px Material tap target. On Android the
+          // gallery menu takes the place of the play icon (tapping the card
+          // plays the ride either way).
+          width: (ride.isLocked ? 48 : 0) + 48 + (showGalleryMenu ? 48 : 24),
           child: Row(
             mainAxisSize: MainAxisSize.min,
             mainAxisAlignment: MainAxisAlignment.end,
@@ -1233,7 +1236,6 @@ class _RidesListScreenState extends State<RidesListScreen> {
                 PopupMenuButton<String>(
                   tooltip: 'Gallery',
                   padding: EdgeInsets.zero,
-                  constraints: const BoxConstraints(minWidth: 28),
                   iconSize: 20,
                   icon: const Icon(Icons.more_vert),
                   onSelected: (value) {
@@ -1255,7 +1257,7 @@ class _RidesListScreenState extends State<RidesListScreen> {
                       ),
                   ],
                 ),
-              const Icon(Icons.play_circle_outline),
+              if (!showGalleryMenu) const Icon(Icons.play_circle_outline),
             ],
           ),
         ),
