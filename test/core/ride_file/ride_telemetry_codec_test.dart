@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -52,6 +53,24 @@ void main() {
       expect(summary.sessionComplete, isTrue);
       expect(summary.distanceKm, 2.0);
       expect(summary.incidents, isNull);
+    });
+
+    test('decodeRideFileSummary reads a non-finite number as 0', () {
+      // 1e999 overflows to infinity when decoded.
+      final summary = decodeRideFileSummary(
+        jsonDecode(
+              '{"distanceKm": 1e999, "maxSpeedKmh": -1e999, '
+              '"averageSpeedKmh": 12.5}',
+            )
+            as Map<String, dynamic>,
+      );
+      expect(summary.distanceKm, 0);
+      expect(summary.maxSpeedKmh, 0);
+      expect(summary.averageSpeedKmh, 12.5);
+      expect(
+        () => decodeRideFileSummary(<String, dynamic>{'distanceKm': 'x'}),
+        throwsA(isA<TypeError>()),
+      );
     });
   });
 

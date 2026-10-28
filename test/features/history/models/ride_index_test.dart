@@ -423,6 +423,78 @@ void main() {
       expect(other.existsSync(), isTrue);
     });
 
+    test('a first read that adopts an index also removes stale temp '
+        'files', () async {
+      // The app's first read always adopts the index the history isolate
+      // read, so the prune must not depend on reading the file.
+      await indexFile.parent.create(recursive: true);
+      final stale = File('${indexFile.path}.7-8-9.tmp');
+      await stale.writeAsString('x');
+      await stale.setLastModified(
+        DateTime.now().subtract(const Duration(hours: 1)),
+      );
+
+      await RideIndexStore(indexFile).read(adopt: RideIndex());
+      for (var i = 0; i < 50 && stale.existsSync(); i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+      }
+      expect(stale.existsSync(), isFalse);
+    });
+
+    test(
+      'update notifies listeners once the memory holds the change',
+      () async {
+        final store = RideIndexStore(indexFile);
+        final seen = <List<String>>[];
+        store.addListener(
+          () => seen.add(store.loaded!.segmentHashes.keys.toList()),
+        );
+        await store.update(
+          (index) => index.segmentHashes['a'] = hashEntry('x'),
+        );
+        expect(seen, <List<String>>[
+          <String>['a'],
+        ]);
+      },
+    );
+
+    test('a ride with a non-finite summary number does not stop the index '
+        'from being written', () async {
+      final ride = RideRecord(
+        videoPath: '${sep}r${sep}a.mp4',
+        segmentPaths: <String>['${sep}r${sep}a.mp4'],
+        lockedSegmentPaths: const <String>[],
+        createdAt: DateTime(2026),
+        telemetryPath: '${sep}r${sep}a.telemetry.json',
+        rideSessionId: null,
+        isSessionComplete: true,
+        distanceKm: double.infinity,
+        maxSpeedKmh: double.nan,
+        averageSpeedKmh: double.negativeInfinity,
+        segmentTimeline: const <RideSegmentTimelineEntry>[],
+        samples: const [],
+        samplesLoaded: false,
+        integrity: const RideIntegrityReport.unknown(),
+        quarantinedSegmentPaths: const <String>[],
+      );
+      final store = RideIndexStore(indexFile);
+      await store.update((index) {
+        index.rides['r'] = RideIndexEntry(
+          path: ride.telemetryPath!,
+          stamp: const RideFileStamp(size: 1, modifiedUs: 1, changedUs: 1),
+          ride: ride,
+        );
+        index.segmentHashes['s'] = hashEntry('x');
+      });
+
+      final stored = RideIndex.parse(await indexFile.readAsString());
+      expect(stored.segmentHashes.keys, <String>['s']);
+      final storedRide = stored.rides['r']!.ride;
+      expect(storedRide.distanceKm, 0);
+      expect(storedRide.maxSpeedKmh, 0);
+      expect(storedRide.averageSpeedKmh, 0);
+    });
+
     test('a corrupt index file starts an empty index', () async {
       await indexFile.parent.create(recursive: true);
       await indexFile.writeAsString('garbage');

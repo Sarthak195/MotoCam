@@ -311,7 +311,12 @@ class RideIndex {
 /// whole index atomically (temp file plus rename); updates are queued, so
 /// none is lost when several arrive at once. Background isolates read the
 /// file (see [RideIndex.readFile]) but never write it.
-class RideIndexStore {
+///
+/// Listeners are notified after each [update] has changed the in-memory
+/// index (before its write), so a screen can show a result stored by work
+/// it did not start, such as a segment hash that finishes after playback
+/// was closed.
+class RideIndexStore extends ChangeNotifier {
   /// Creates a store for the index at [file]. The app uses [shared].
   RideIndexStore(this.file);
 
@@ -320,6 +325,7 @@ class RideIndexStore {
 
   RideIndex? _memory;
   Future<RideIndex>? _loading;
+  bool _pruneStarted = false;
 
   /// The in-memory index, or `null` until [read] has loaded it. It can be
   /// newer than the file while a write is queued.
@@ -364,8 +370,13 @@ class RideIndexStore {
   /// The in-memory index, read from [file] on first use (parsed on a
   /// background isolate). When [adopt] is given and nothing was read yet,
   /// it is used instead of reading the file again (it is the index a
-  /// background isolate has just read).
+  /// background isolate has just read). The first call, whichever path it
+  /// takes, also deletes stale temp files of the index.
   Future<RideIndex> read({RideIndex? adopt}) {
+    if (!_pruneStarted) {
+      _pruneStarted = true;
+      unawaited(_pruneStaleTempFiles());
+    }
     final memory = _memory;
     if (memory != null) {
       return Future<RideIndex>.value(memory);
@@ -375,7 +386,6 @@ class RideIndexStore {
       return Future<RideIndex>.value(adopt);
     }
     return _loading ??= () async {
-      unawaited(_pruneStaleTempFiles());
       final path = file.path;
       RideIndex index;
       try {
@@ -417,11 +427,12 @@ class RideIndexStore {
     }
   }
 
-  /// Applies [change] to the in-memory index and writes the index file.
-  /// A failed write is ignored: the file is only a cache.
+  /// Applies [change] to the in-memory index, notifies listeners and writes
+  /// the index file. A failed write is ignored: the file is only a cache.
   Future<void> update(void Function(RideIndex index) change) async {
     final index = await read();
     change(index);
+    notifyListeners();
     await _write(index);
   }
 
@@ -463,6 +474,8 @@ Map<String, dynamic> _stringMap(Object? value) {
   return value.map((key, value) => MapEntry(key.toString(), value));
 }
 
+double _finiteOrZero(double value) => value.isFinite ? value : 0;
+
 List<String> _stringList(Object? value) =>
     (value as List).map((item) => item as String).toList(growable: false);
 
@@ -478,9 +491,11 @@ Map<String, dynamic> _rideToJson(RideRecord ride) => <String, dynamic>{
   'createdAtUs': ride.createdAt.microsecondsSinceEpoch,
   'rideSessionId': ride.rideSessionId,
   'sessionComplete': ride.isSessionComplete,
-  'distanceKm': ride.distanceKm,
-  'maxSpeedKmh': ride.maxSpeedKmh,
-  'averageSpeedKmh': ride.averageSpeedKmh,
+  // JSON has no infinity or NaN: one such value would make every write of
+  // the index throw, so it is stored as 0 (what the codec reads it as).
+  'distanceKm': _finiteOrZero(ride.distanceKm),
+  'maxSpeedKmh': _finiteOrZero(ride.maxSpeedKmh),
+  'averageSpeedKmh': _finiteOrZero(ride.averageSpeedKmh),
   'sampleCount': ride.sampleCount,
   'lastSampleElapsedMs': ride.lastSampleElapsedMs,
   'incidents': ride.incidents == null

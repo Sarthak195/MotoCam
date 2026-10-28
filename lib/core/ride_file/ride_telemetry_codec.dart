@@ -297,13 +297,13 @@ class RideFileSummary {
   /// `startedAt` in local time, or `null` when missing or unparsable.
   final DateTime? startedAt;
 
-  /// `distanceKm` (missing or `null`: 0).
+  /// `distanceKm` (missing, `null` or not finite: 0).
   final double distanceKm;
 
-  /// `maxSpeedKmh` (missing or `null`: 0).
+  /// `maxSpeedKmh` (missing, `null` or not finite: 0).
   final double maxSpeedKmh;
 
-  /// `averageSpeedKmh` (missing or `null`: 0).
+  /// `averageSpeedKmh` (missing, `null` or not finite: 0).
   final double averageSpeedKmh;
 
   /// `mockLocationDetected` (default `false`).
@@ -407,8 +407,13 @@ bool readRideFileBool(
   return defaultValue;
 }
 
-double _readJsonDouble(Map<String, dynamic> json, String key) =>
-    (json[key] as num?)?.toDouble() ?? 0;
+/// Reads a summary number: 0 when missing, `null` or not finite (JSON such
+/// as `1e999` decodes to infinity, which JSON cannot store again); throws
+/// on a non-number.
+double _readJsonDouble(Map<String, dynamic> json, String key) {
+  final value = json[key] as num?;
+  return value == null || !value.isFinite ? 0 : value.toDouble();
+}
 
 String? _readOptionalString(Map<String, dynamic> json, String key) {
   final raw = json[key]?.toString().trim();
