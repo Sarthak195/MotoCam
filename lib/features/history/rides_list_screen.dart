@@ -10,12 +10,14 @@ import '../../core/services/ride_signing_service.dart';
 import '../../core/utils/format_utils.dart';
 import '../../core/utils/path_utils.dart' as path_utils;
 import '../camera/providers/camera_provider.dart';
+import '../camera/providers/recordings_migration.dart';
 import 'models/ride_history_loader.dart';
 import 'models/ride_index.dart';
 import 'models/ride_record.dart';
 import 'models/segment_verifier.dart';
 import 'ride_playback_screen.dart';
 import 'widgets/playback_timeline.dart';
+import 'widgets/recordings_migration_banner.dart';
 
 /// Ride History: lists recorded rides (locked clips first) with their
 /// summary, integrity status and lock state, and opens playback on tap.
@@ -53,6 +55,11 @@ class _RidesListScreenState extends State<RidesListScreen> {
   /// late does not overwrite a newer one.
   int _videoCheckRefreshes = 0;
 
+  /// The move of rides into private storage, listened to so the list
+  /// reloads when a run ends.
+  RecordingsMigrationController? _migration;
+  bool _wasMigrating = false;
+
   Widget _buildStatusBadge({required String label, required Color color}) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
@@ -78,6 +85,10 @@ class _RidesListScreenState extends State<RidesListScreen> {
     super.didChangeDependencies();
     if (!_hasLoadedRides) {
       _hasLoadedRides = true;
+      final migration = context.read<CameraProvider>().recordingsMigration;
+      _migration = migration;
+      _wasMigrating = migration.isRunning;
+      migration.addListener(_onMigrationChanged);
       _ridesFuture = _loadRides();
     }
   }
@@ -85,7 +96,40 @@ class _RidesListScreenState extends State<RidesListScreen> {
   @override
   void dispose() {
     _indexStore?.removeListener(_onIndexChanged);
+    _migration?.removeListener(_onMigrationChanged);
     super.dispose();
+  }
+
+  /// Reloads the list when a migration run ends (moved rides have new
+  /// paths).
+  void _onMigrationChanged() {
+    final migrating = _migration?.isRunning ?? false;
+    final ended = _wasMigrating && !migrating;
+    _wasMigrating = migrating;
+    if (ended && mounted) {
+      setState(() {
+        _ridesFuture = _loadRides();
+      });
+    }
+  }
+
+  /// While rides are being moved into private storage their files change
+  /// paths, so opening, unlocking and deleting wait: shows a notice and
+  /// returns `true` while a run is moving files.
+  bool _refuseWhileMigrating() {
+    if (!(_migration?.isRunning ?? false)) {
+      return false;
+    }
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text(
+          'Rides are being moved to private storage. Try again when the '
+          'move finishes.',
+        ),
+        duration: Duration(seconds: 3),
+      ),
+    );
+    return true;
   }
 
   void _onIndexChanged() {
@@ -98,9 +142,13 @@ class _RidesListScreenState extends State<RidesListScreen> {
   Future<List<RideRecord>> _loadRides() async {
     final cameraProvider = context.read<CameraProvider>();
     final recordings = await cameraProvider.getRecordings();
+    // A ride the migration is moving (or paused in the middle of) is left
+    // out until it is whole in one root.
+    final inFlight = cameraProvider.recordingsMigration.inFlightPaths;
     final recordingPaths = recordings
         .whereType<File>()
         .map((file) => file.path)
+        .where((path) => !inFlight.contains(path_utils.normalizePath(path)))
         .toList(growable: false);
     final store = await RideIndexStore.shared();
     if (store != null && _indexStore == null && mounted) {
@@ -205,7 +253,7 @@ class _RidesListScreenState extends State<RidesListScreen> {
 
   Future<void> _confirmAndUnlock(RideRecord ride) async {
     final lockKey = _lockKeyFor(ride);
-    if (_lockUpdatesInFlight.contains(lockKey)) {
+    if (_lockUpdatesInFlight.contains(lockKey) || _refuseWhileMigrating()) {
       return;
     }
 
@@ -230,7 +278,7 @@ class _RidesListScreenState extends State<RidesListScreen> {
         ],
       ),
     );
-    if (confirmed != true || !mounted) {
+    if (confirmed != true || !mounted || _refuseWhileMigrating()) {
       return;
     }
 
@@ -318,7 +366,7 @@ class _RidesListScreenState extends State<RidesListScreen> {
 
   Future<void> _confirmAndDelete(RideRecord ride) async {
     final key = _lockKeyFor(ride);
-    if (_deletesInFlight.contains(key)) {
+    if (_deletesInFlight.contains(key) || _refuseWhileMigrating()) {
       return;
     }
     final messenger = ScaffoldMessenger.of(context);
@@ -361,7 +409,7 @@ class _RidesListScreenState extends State<RidesListScreen> {
         ],
       ),
     );
-    if (confirmed != true || !mounted) {
+    if (confirmed != true || !mounted || _refuseWhileMigrating()) {
       return;
     }
 
@@ -436,72 +484,80 @@ class _RidesListScreenState extends State<RidesListScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: const Text('Ride History')),
-      body: FutureBuilder<List<RideRecord>>(
-        future: _ridesFuture,
-        builder: (context, snapshot) {
-          if (snapshot.connectionState == ConnectionState.waiting) {
-            return const Center(child: CircularProgressIndicator());
-          }
-
-          if (snapshot.hasError) {
-            return Center(
-              child: Text('Failed to load rides: ${snapshot.error}'),
-            );
-          }
-
-          final rides = snapshot.data ?? const <RideRecord>[];
-          if (rides.isEmpty) {
-            return const Center(
-              child: Text('No rides found yet. Record a ride to see it here.'),
-            );
-          }
-
-          final lockedRides = rides.where((ride) => ride.isLocked).toList();
-          final otherRides = rides.where((ride) => !ride.isLocked).toList();
-          final items = <Object>[
-            if (lockedRides.isNotEmpty) ...['Locked Clips', ...lockedRides],
-            'All Rides',
-            ...otherRides,
-          ];
-
-          return RefreshIndicator(
-            onRefresh: () async {
-              setState(() {
-                _ridesFuture = _loadRides();
-              });
-              await _ridesFuture;
-            },
-            // Section headers are Strings and cards are rides; only the
-            // visible cards are built.
-            child: ListView.builder(
-              padding: const EdgeInsets.all(12),
-              itemCount: items.length,
-              itemBuilder: (context, index) {
-                final item = items[index];
-                if (item is RideRecord) {
-                  return Padding(
-                    padding: const EdgeInsets.only(bottom: 10),
-                    child: _buildRideCard(context, item),
-                  );
-                }
-                return Padding(
-                  padding: EdgeInsets.only(
-                    bottom: 8,
-                    top: item == 'All Rides' ? 6 : 0,
-                  ),
-                  child: Text(
-                    item as String,
-                    style: const TextStyle(
-                      fontSize: 16,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                );
-              },
-            ),
-          );
-        },
+      body: Column(
+        children: [
+          if (_migration != null)
+            RecordingsMigrationBanner(migration: _migration!),
+          Expanded(child: _buildRideList()),
+        ],
       ),
+    );
+  }
+
+  Widget _buildRideList() {
+    return FutureBuilder<List<RideRecord>>(
+      future: _ridesFuture,
+      builder: (context, snapshot) {
+        if (snapshot.connectionState == ConnectionState.waiting) {
+          return const Center(child: CircularProgressIndicator());
+        }
+
+        if (snapshot.hasError) {
+          return Center(child: Text('Failed to load rides: ${snapshot.error}'));
+        }
+
+        final rides = snapshot.data ?? const <RideRecord>[];
+        if (rides.isEmpty) {
+          return const Center(
+            child: Text('No rides found yet. Record a ride to see it here.'),
+          );
+        }
+
+        final lockedRides = rides.where((ride) => ride.isLocked).toList();
+        final otherRides = rides.where((ride) => !ride.isLocked).toList();
+        final items = <Object>[
+          if (lockedRides.isNotEmpty) ...['Locked Clips', ...lockedRides],
+          'All Rides',
+          ...otherRides,
+        ];
+
+        return RefreshIndicator(
+          onRefresh: () async {
+            setState(() {
+              _ridesFuture = _loadRides();
+            });
+            await _ridesFuture;
+          },
+          // Section headers are Strings and cards are rides; only the
+          // visible cards are built.
+          child: ListView.builder(
+            padding: const EdgeInsets.all(12),
+            itemCount: items.length,
+            itemBuilder: (context, index) {
+              final item = items[index];
+              if (item is RideRecord) {
+                return Padding(
+                  padding: const EdgeInsets.only(bottom: 10),
+                  child: _buildRideCard(context, item),
+                );
+              }
+              return Padding(
+                padding: EdgeInsets.only(
+                  bottom: 8,
+                  top: item == 'All Rides' ? 6 : 0,
+                ),
+                child: Text(
+                  item as String,
+                  style: const TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              );
+            },
+          ),
+        );
+      },
     );
   }
 
@@ -732,7 +788,7 @@ class _RidesListScreenState extends State<RidesListScreen> {
           ),
         ),
         onTap: () async {
-          if (_isOpeningRide) {
+          if (_isOpeningRide || _refuseWhileMigrating()) {
             return;
           }
           _isOpeningRide = true;

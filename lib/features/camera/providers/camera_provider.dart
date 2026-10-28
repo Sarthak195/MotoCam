@@ -11,6 +11,7 @@ import '../../../core/utils/integrity_utils.dart' as integrity_utils;
 import '../../../core/utils/path_utils.dart' as path_utils;
 import 'camera_init_status.dart';
 import 'recording_retention.dart';
+import 'recordings_migration.dart';
 import 'dart:io';
 import 'dart:async';
 import 'dart:isolate';
@@ -83,6 +84,10 @@ class CameraProvider extends ChangeNotifier {
   static const String _galleryRelativePath =
       ride_codec.publicExportRelativePath;
   static const String _recordingsDirectoryName = 'MotoCam Recordings';
+
+  /// Directory next to the recordings root (never inside a scanned root)
+  /// that holds the migration journal and staging copies.
+  static const String _migrationDirectoryName = 'ride_migration';
   static const Duration _rollWaitTimeout = Duration(seconds: 60);
 
   CameraController? _controller;
@@ -128,6 +133,8 @@ class CameraProvider extends ChangeNotifier {
   bool _isExportingToGallery = false;
   bool _isDeferredMaintenanceRunning = false;
   bool _hasPrunedTelemetryTempFiles = false;
+  final RecordingsMigrationController _recordingsMigration =
+      RecordingsMigrationController();
   String? _lastGalleryExportMessage;
   String? _lastRecordingError;
   int _consecutiveRollStopFailures = 0;
@@ -212,6 +219,18 @@ class CameraProvider extends ChangeNotifier {
 
   /// Directory that holds this app's segments and telemetry sidecars.
   String? get recordingsDirectory => _recordingsDirectory;
+
+  /// The move of rides from the legacy roots into [recordingsDirectory]
+  /// (Android only): progress, summary and idle signal for the UI.
+  RecordingsMigrationController get recordingsMigration => _recordingsMigration;
+
+  /// Whether no recordings migration run is in progress, so no ride file
+  /// is being moved. Anything else that moves, imports or deletes rides in
+  /// bulk must wait for this (see [whenRecordingsMigrationIdle]).
+  bool get isRecordingsMigrationIdle => _recordingsMigration.isIdle;
+
+  /// Completes when no recordings migration run is in progress.
+  Future<void> whenRecordingsMigrationIdle() => _recordingsMigration.whenIdle();
 
   /// Elapsed time of the active session, updated about once per second.
   /// After [stopRecording] it keeps the finished session's value until the
@@ -925,8 +944,10 @@ class CameraProvider extends ChangeNotifier {
       if (!_hasPrunedTelemetryTempFiles) {
         _hasPrunedTelemetryTempFiles = true;
         // Temp files left by a process killed mid-write; errors are ignored.
+        // Only the recordings root: never the legacy roots or staging.
         unawaited(integrity_utils.pruneStaleTelemetryTempFiles(recordingsDir));
       }
+      _maybeStartRecordingsMigration();
       return true;
     } catch (e) {
       _logError('Error setting up recordings directory: $e');
@@ -934,10 +955,10 @@ class CameraProvider extends ChangeNotifier {
     }
   }
 
+  // Android: the app's private files directory (filesDir), on the same
+  // mount as the camera plugin's cache directory, so a finished segment is
+  // renamed into place.
   Future<Directory?> _resolveRecordingsBaseDirectory() async {
-    if (Platform.isAndroid) {
-      return getExternalStorageDirectory();
-    }
     if (Platform.isIOS) {
       return getApplicationDocumentsDirectory();
     }
@@ -959,27 +980,89 @@ class CameraProvider extends ChangeNotifier {
     }
   }
 
-  // Roots that earlier builds fell back to when the primary root was
-  // unavailable. Only scanned so rides stored there stay visible.
-  Future<List<String>> _legacyFallbackRecordingsDirectories() async {
+  // Android roots earlier builds recorded to: app-specific external storage
+  // (the root until this build) and the documents and cache directories
+  // (old fallbacks). Scanned so rides stored there stay visible until the
+  // migration has moved them; never written to and never pruned. An
+  // unavailable root (for example an unmounted card) is skipped.
+  Future<List<String>> _legacyRecordingsDirectories() async {
     if (!Platform.isAndroid) {
       return const <String>[];
     }
     final roots = <String>[];
-    for (final resolve in <Future<Directory> Function()>[
+    for (final resolve in <Future<Directory?> Function()>[
+      getExternalStorageDirectory,
       getApplicationDocumentsDirectory,
       getApplicationCacheDirectory,
     ]) {
       try {
         final base = await resolve();
-        roots.add(
-          '${base.path}${Platform.pathSeparator}$_recordingsDirectoryName',
-        );
+        if (base == null) {
+          continue;
+        }
+        final root =
+            '${base.path}${Platform.pathSeparator}$_recordingsDirectoryName';
+        final current = _recordingsDirectory;
+        if (current == null ||
+            _normalizePath(root) != _normalizePath(current)) {
+          roots.add(root);
+        }
       } catch (_) {
         // Root unavailable on this device.
       }
     }
     return roots;
+  }
+
+  // The migration may run only while nothing records or prunes: never while
+  // a recording is starting, active or stopping, and never while the
+  // deferred orphan prune is queued or running.
+  bool get _canRunRecordingsMigration =>
+      !_isDisposed &&
+      !isRecording &&
+      !_isStartingRecording &&
+      !_isStoppingRecording &&
+      !_isDeferredMaintenanceRunning &&
+      !(_deferredMaintenanceTimer?.isActive ?? false);
+
+  // Starts (or resumes) the move of rides out of the legacy roots when it
+  // may run. START never waits for it: the run checks
+  // _canRunRecordingsMigration between files and copy chunks and pauses.
+  void _maybeStartRecordingsMigration() {
+    final root = _recordingsDirectory;
+    if (!Platform.isAndroid ||
+        root == null ||
+        !_canRunRecordingsMigration ||
+        !_recordingsMigration.isIdle ||
+        _recordingsMigration.isFinished) {
+      return;
+    }
+    unawaited(() async {
+      final legacyRoots = await _legacyRecordingsDirectories();
+      if (!_canRunRecordingsMigration || !_recordingsMigration.isIdle) {
+        return;
+      }
+      final RecordingsMigrator migrator;
+      try {
+        migrator = RecordingsMigrator(
+          recordingsRoot: root,
+          legacyRoots: legacyRoots,
+          workDirectory:
+              '${Directory(root).parent.path}${Platform.pathSeparator}'
+              '$_migrationDirectoryName',
+          freeBytes: _availableStorageBytesAt,
+          reserveBytes: _estimatedSegmentBytes + _storageMarginBytes,
+          shouldPause: () => !_canRunRecordingsMigration,
+        );
+      } catch (e) {
+        _logError('Recordings migration not started: $e');
+        return;
+      }
+      _recordingsMigration.start(
+        migrator,
+        onError: (error) => _logError('Recordings migration failed: $error'),
+      );
+    }());
   }
 
   // Path utilities delegate to shared module.
@@ -1040,8 +1123,9 @@ class CameraProvider extends ChangeNotifier {
       path_utils.fileNameFromPath(sourcePath),
     );
 
-    // On Android the plugin's cache dir and the recordings root are on
-    // different mounts, so the rename fails and the copy fallback runs.
+    // On Android the plugin's cache dir and the recordings root (filesDir)
+    // are on the same mount, so the rename succeeds; the copy fallback is
+    // kept for other layouts.
     try {
       final movedFile = await sourceFile.rename(targetPath);
       final movedPath = movedFile.path;
@@ -1155,6 +1239,10 @@ class CameraProvider extends ChangeNotifier {
     if (directoryPath == null || directoryPath.isEmpty) {
       return null;
     }
+    return _availableStorageBytesAt(directoryPath);
+  }
+
+  Future<int?> _availableStorageBytesAt(String directoryPath) async {
     try {
       return await platform.invokeMethod<int>('getAvailableStorageBytes', {
         'path': directoryPath,
@@ -1181,9 +1269,10 @@ class CameraProvider extends ChangeNotifier {
   // segment needs; unknown free space never blocks recording.
   //
   // [reclaimableBytes] is space the loop frees when the segment being
-  // recorded is registered. It only offsets the margin: the stopped segment
-  // is copied into the recordings directory before the loop deletes
-  // anything, so the copy needs a full segment of free space on its own.
+  // recorded is registered. It only offsets the margin: the next segment is
+  // written in full before the loop deletes anything (and where the rename
+  // into the recordings directory fails, the copy needs that space too), so
+  // a full segment of free space is needed on its own.
   Future<bool> _hasRoomForNextSegment({int reclaimableBytes = 0}) async {
     final freeBytes = await availableStorageBytes();
     if (freeBytes == null) {
@@ -1710,7 +1799,10 @@ class CameraProvider extends ChangeNotifier {
     }
   }
 
-  // Runs the orphan-sidecar prune shortly after a stop, off the stop path.
+  // Runs the orphan-sidecar prune shortly after a stop, off the stop path,
+  // then lets the recordings migration resume. The two never overlap: a
+  // queued or running prune pauses the migration, and the prune first waits
+  // for a run that is still abandoning its copy.
   void _queueDeferredMaintenance() {
     _deferredMaintenanceTimer?.cancel();
     _deferredMaintenanceTimer = Timer(const Duration(seconds: 2), () async {
@@ -1719,10 +1811,12 @@ class CameraProvider extends ChangeNotifier {
       }
       _isDeferredMaintenanceRunning = true;
       try {
+        await _recordingsMigration.whenIdle();
         await _pruneOrphanTelemetryFiles();
       } finally {
         _isDeferredMaintenanceRunning = false;
       }
+      _maybeStartRecordingsMigration();
     });
   }
 
@@ -1733,8 +1827,10 @@ class CameraProvider extends ChangeNotifier {
     return Isolate.run(() => findOrphanTelemetryFiles(directoryPath));
   }
 
-  // Deletes unlocked telemetry sidecars whose videos are all gone. Parsing
-  // runs on a background isolate.
+  // Deletes unlocked telemetry sidecars whose videos are all gone, from the
+  // top level of the recordings root only (never a legacy root, where a
+  // ride being migrated can look orphaned, and never staging). Parsing runs
+  // on a background isolate.
   Future<void> _pruneOrphanTelemetryFiles() async {
     final recordingsDirectoryPath = _recordingsDirectory;
     if (recordingsDirectoryPath == null || recordingsDirectoryPath.isEmpty) {
@@ -2051,13 +2147,17 @@ class CameraProvider extends ChangeNotifier {
     } finally {
       _isStoppingRecording = false;
       notifyListeners();
+      // Resumes at once only when no prune was queued (a failed stop).
+      _maybeStartRecordingsMigration();
     }
   }
 
   /// Lists every file (videos, telemetry sidecars, markers) under the
-  /// recordings directory and the roots earlier builds fell back to, in no
-  /// particular order. Returns an empty list when the recordings directory
-  /// cannot be set up or listing fails.
+  /// recordings directory and, on Android, the legacy roots earlier builds
+  /// recorded to (until the migration has emptied them), in no particular
+  /// order. The migration's staging directory lies outside all of them.
+  /// Returns an empty list when the recordings directory cannot be set up
+  /// or listing fails.
   Future<List<FileSystemEntity>> getRecordings() async {
     if (_recordingsDirectory == null) {
       await _setupRecordingsDirectory();
@@ -2069,7 +2169,7 @@ class CameraProvider extends ChangeNotifier {
       final seenPaths = <String>{};
       final directories = <String?>[
         _recordingsDirectory,
-        ...await _legacyFallbackRecordingsDirectories(),
+        ...await _legacyRecordingsDirectories(),
       ];
       for (final directoryPath in directories) {
         await _appendFilesFromDirectory(
@@ -2161,6 +2261,7 @@ class CameraProvider extends ChangeNotifier {
   /// A gallery export still running afterwards reports no result.
   @override
   void dispose() {
+    // Also pauses a recordings migration run at its next check.
     _isDisposed = true;
     _segmentTimer?.cancel();
     _deferredMaintenanceTimer?.cancel();

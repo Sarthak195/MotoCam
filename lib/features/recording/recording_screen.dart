@@ -20,6 +20,7 @@ import '../camera/providers/camera_init_status.dart';
 import '../camera/providers/camera_provider.dart';
 import '../telemetry/providers/telemetry_provider.dart';
 import '../history/rides_list_screen.dart';
+import '../history/widgets/recordings_migration_banner.dart';
 import 'recording_screen_logic.dart';
 import 'widgets/recording_settings_sheet.dart';
 import 'start_preflight_evaluator.dart';
@@ -1617,6 +1618,12 @@ class _RecordingScreenState extends State<RecordingScreen>
                           children: [
                             _buildHeader(camera),
                             _buildActiveProfileBar(),
+                            // Rides moving into private storage (idle only:
+                            // a run pauses while recording).
+                            if (!camera.isRecording)
+                              RecordingsMigrationBanner(
+                                migration: camera.recordingsMigration,
+                              ),
                             Expanded(child: _buildCameraPreview()),
                             _buildTelemetryStats(),
                             _buildControls(),
