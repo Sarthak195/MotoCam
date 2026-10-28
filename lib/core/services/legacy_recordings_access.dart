@@ -71,6 +71,70 @@ class LegacyRecordingsAccess implements LegacyRideDocumentSource {
   /// The picked tree.
   final String treeUri;
 
+  /// Authority of the system provider for shared storage volumes.
+  static const String _externalStorageAuthority =
+      'com.android.externalstorage.documents';
+
+  /// The folder older versions recorded to, relative to a storage volume.
+  static const String recordingsFolderPath = 'Movies/MotoCam/Recordings';
+
+  /// The document id of [treeUri] (for example
+  /// `primary:Movies/MotoCam/Recordings`), or `null` when it is not a tree
+  /// URI.
+  static String? treeDocumentId(String treeUri) {
+    try {
+      final segments = Uri.parse(treeUri).pathSegments;
+      final index = segments.indexOf('tree');
+      if (index < 0 || index + 1 >= segments.length) {
+        return null;
+      }
+      final id = segments[index + 1];
+      return id.isEmpty ? null : id;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Whether [treeUri] is the folder older versions recorded to: the
+  /// [recordingsFolderPath] folder of a storage volume (internal storage or
+  /// an SD card), compared ignoring case and a trailing slash. The import
+  /// refuses any other folder, so it never copies, or offers to delete,
+  /// videos that MotoCam did not record.
+  static bool isRecordingsFolder(String treeUri) {
+    final Uri uri;
+    try {
+      uri = Uri.parse(treeUri);
+    } catch (_) {
+      return false;
+    }
+    if (uri.scheme != 'content' || uri.authority != _externalStorageAuthority) {
+      return false;
+    }
+    final id = treeDocumentId(treeUri);
+    final colon = id?.indexOf(':') ?? -1;
+    if (id == null || colon <= 0) {
+      return false;
+    }
+    var path = id.substring(colon + 1);
+    while (path.endsWith('/')) {
+      path = path.substring(0, path.length - 1);
+    }
+    return path.toLowerCase() == recordingsFolderPath.toLowerCase();
+  }
+
+  /// The picked folder for a message, for example 'Download' or
+  /// 'DCIM/Camera' (the part of its document id after the volume), or
+  /// `null` when it cannot be told.
+  static String? describeTree(String treeUri) {
+    final id = treeDocumentId(treeUri);
+    if (id == null) {
+      return null;
+    }
+    final colon = id.indexOf(':');
+    final path = colon >= 0 ? id.substring(colon + 1) : id;
+    return path.isEmpty ? null : path;
+  }
+
   /// Opens the system folder picker, starting in Movies/MotoCam/Recordings
   /// on Android 8 and later, and returns the picked tree URI, or `null`
   /// when the rider cancelled. The grant is not persisted: it ends with the

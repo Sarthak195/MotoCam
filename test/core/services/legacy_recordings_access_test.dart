@@ -93,4 +93,40 @@ void main() {
     // cancelCopy never throws.
     await access.cancelCopy();
   });
+
+  test('only the Movies/MotoCam/Recordings folder of a volume is accepted', () {
+    const storage = 'content://com.android.externalstorage.documents/tree/';
+    bool accepted(String uri) => LegacyRecordingsAccess.isRecordingsFolder(uri);
+
+    expect(
+      accepted('${storage}primary%3AMovies%2FMotoCam%2FRecordings'),
+      isTrue,
+    );
+    expect(
+      accepted('${storage}1234-ABCD%3Amovies%2Fmotocam%2Frecordings%2F'),
+      isTrue,
+    );
+    expect(accepted('${storage}primary%3ADCIM%2FCamera'), isFalse);
+    expect(accepted('${storage}primary%3AMovies%2FMotoCam'), isFalse);
+    expect(
+      accepted('${storage}primary%3AMovies%2FMotoCam%2FRecordings%2FOld'),
+      isFalse,
+    );
+    expect(accepted('${storage}primary%3A'), isFalse);
+    expect(
+      accepted(
+        'content://com.android.providers.downloads.documents/tree/downloads',
+      ),
+      isFalse,
+    );
+    expect(accepted('not a uri %%'), isFalse);
+    expect(accepted(''), isFalse);
+
+    expect(
+      LegacyRecordingsAccess.describeTree('${storage}primary%3ADCIM%2FCamera'),
+      'DCIM/Camera',
+    );
+    expect(LegacyRecordingsAccess.describeTree('${storage}primary%3A'), isNull);
+    expect(LegacyRecordingsAccess.describeTree('not a uri %%'), isNull);
+  });
 }

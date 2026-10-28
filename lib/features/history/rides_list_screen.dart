@@ -766,6 +766,15 @@ class _RidesListScreenState extends State<RidesListScreen> {
     if (treeUri == null || !mounted) {
       return;
     }
+    if (!LegacyRecordingsAccess.isRecordingsFolder(treeUri)) {
+      final picked = LegacyRecordingsAccess.describeTree(treeUri);
+      show(
+        '${picked == null ? 'That folder' : '"$picked"'} is not '
+        'Movies/MotoCam/Recordings, the folder older versions recorded to. '
+        'Nothing was imported; choose that folder to import its rides.',
+      );
+      return;
+    }
 
     final source = LegacyRecordingsAccess(treeUri);
     final summary = await camera.importLegacyRides(source);
