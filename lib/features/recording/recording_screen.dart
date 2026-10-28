@@ -86,6 +86,8 @@ class _RecordingScreenState extends State<RecordingScreen>
   String? _handledRecordingError;
   // Gallery export summary already shown.
   String? _shownGalleryExportMessage;
+  // Storage budget notice already shown.
+  String? _shownStorageBudgetMessage;
   // Segment and lock state of the last ride checkpoint.
   final RideCheckpointTracker _checkpointTracker = RideCheckpointTracker();
   bool _isOfferingBatteryExemption = false;
@@ -119,7 +121,8 @@ class _RecordingScreenState extends State<RecordingScreen>
 
   /// Reacts to camera-provider state that needs more than a rebuild: a
   /// recording failure while recording (stop and save the ride once, then
-  /// tell the rider) and a finished gallery export.
+  /// tell the rider), a finished gallery export and the storage budget's
+  /// notice.
   void _onCameraChanged() {
     final camera = _cameraProvider;
     if (!mounted || camera == null) {
@@ -154,6 +157,26 @@ class _RecordingScreenState extends State<RecordingScreen>
             SnackBar(
               content: Text(exportMessage),
               duration: const Duration(seconds: 5),
+            ),
+          );
+        }),
+      );
+    }
+
+    // At most one per recording session (the provider sets it once).
+    final budgetMessage = camera.lastStorageBudgetMessage;
+    if (budgetMessage != null &&
+        !identical(budgetMessage, _shownStorageBudgetMessage)) {
+      _shownStorageBudgetMessage = budgetMessage;
+      unawaited(
+        Future<void>.microtask(() {
+          if (!mounted) {
+            return;
+          }
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(budgetMessage),
+              duration: const Duration(seconds: 6),
             ),
           );
         }),
@@ -769,6 +792,9 @@ class _RecordingScreenState extends State<RecordingScreen>
 
     // Gallery export of locked clips is opt-in (off by default).
     camera.autoExportLockedClipsToGallery = settings.exportLockedClipsToGallery;
+    // Off by default; the budget never deletes the ride being recorded.
+    camera.storageBudgetBytes = settings.recordingsStorageBudgetBytes;
+    camera.currentRideSessionIdSource = () => telemetry.rideSessionId;
     final started = await camera.startRecording();
     var backgroundProtected = true;
     if (started && camera.isRecording) {

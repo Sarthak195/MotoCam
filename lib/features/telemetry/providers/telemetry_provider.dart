@@ -212,6 +212,11 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
   /// is pending. Failed saves can be retried with [retryPendingPersist].
   String? get lastPersistError => _lastPersistError;
 
+  /// The `rideSessionId` of the ride being recorded, from
+  /// [startRideSession] until the ride is saved or cancelled; `null`
+  /// otherwise.
+  String? get rideSessionId => _rideSessionId;
+
   /// Whether one or more failed ride saves are waiting for
   /// [retryPendingPersist]. Only tests read it.
   @visibleForTesting

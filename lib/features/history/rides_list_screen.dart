@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 
+import '../../core/providers/app_settings_provider.dart';
 import '../../core/services/ride_signing_service.dart';
 import '../../core/utils/format_utils.dart';
 import '../../core/utils/path_utils.dart' as path_utils;
@@ -115,20 +116,24 @@ class _RidesListScreenState extends State<RidesListScreen> {
   }
 
   /// While rides are being moved into private storage their files change
-  /// paths, so opening, unlocking and deleting wait: shows a notice and
-  /// returns `true` while a run is moving files.
-  bool _refuseWhileMigrating() {
-    if (!(_migration?.isRunning ?? false)) {
+  /// paths, and while the storage budget deletes old rides their files go
+  /// away, so opening, unlocking and deleting wait: shows a notice and
+  /// returns `true` while either runs.
+  bool _refuseWhileFilesChange() {
+    final String message;
+    if (_migration?.isRunning ?? false) {
+      message =
+          'Rides are being moved to private storage. Try again when the '
+          'move finishes.';
+    } else if (context.read<CameraProvider>().isStorageBudgetRunning) {
+      message =
+          'Old rides are being deleted for the storage budget. Try again in '
+          'a moment.';
+    } else {
       return false;
     }
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text(
-          'Rides are being moved to private storage. Try again when the '
-          'move finishes.',
-        ),
-        duration: Duration(seconds: 3),
-      ),
+      SnackBar(content: Text(message), duration: const Duration(seconds: 3)),
     );
     return true;
   }
@@ -254,18 +259,25 @@ class _RidesListScreenState extends State<RidesListScreen> {
 
   Future<void> _confirmAndUnlock(RideRecord ride) async {
     final lockKey = _lockKeyFor(ride);
-    if (_lockUpdatesInFlight.contains(lockKey) || _refuseWhileMigrating()) {
+    if (_lockUpdatesInFlight.contains(lockKey) || _refuseWhileFilesChange()) {
       return;
     }
 
+    final budgetOn =
+        context.read<AppSettingsProvider>().recordingsStorageBudgetGb > 0;
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (dialogContext) => AlertDialog(
         title: const Text('Unlock this clip?'),
-        content: const Text(
-          'Unlocking only removes the lock marker. MotoCam never deletes '
-          'past rides automatically; the ride moves from Locked Clips to '
-          'All Rides.',
+        content: Text(
+          budgetOn
+              ? 'Unlocking removes the lock marker; the ride moves from '
+                    'Locked Clips to All Rides. With the storage budget on, '
+                    'an unlocked ride can be deleted automatically once it '
+                    'is among the oldest.'
+              : 'Unlocking only removes the lock marker. MotoCam never '
+                    'deletes past rides automatically; the ride moves from '
+                    'Locked Clips to All Rides.',
         ),
         actions: [
           TextButton(
@@ -279,7 +291,7 @@ class _RidesListScreenState extends State<RidesListScreen> {
         ],
       ),
     );
-    if (confirmed != true || !mounted || _refuseWhileMigrating()) {
+    if (confirmed != true || !mounted || _refuseWhileFilesChange()) {
       return;
     }
 
@@ -354,7 +366,7 @@ class _RidesListScreenState extends State<RidesListScreen> {
 
   Future<void> _confirmAndDelete(RideRecord ride) async {
     final key = _lockKeyFor(ride);
-    if (_deletesInFlight.contains(key) || _refuseWhileMigrating()) {
+    if (_deletesInFlight.contains(key) || _refuseWhileFilesChange()) {
       return;
     }
     final messenger = ScaffoldMessenger.of(context);
@@ -396,7 +408,7 @@ class _RidesListScreenState extends State<RidesListScreen> {
         ],
       ),
     );
-    if (confirmed != true || !mounted || _refuseWhileMigrating()) {
+    if (confirmed != true || !mounted || _refuseWhileFilesChange()) {
       return;
     }
 
@@ -756,7 +768,7 @@ class _RidesListScreenState extends State<RidesListScreen> {
           ),
         ),
         onTap: () async {
-          if (_isOpeningRide || _refuseWhileMigrating()) {
+          if (_isOpeningRide || _refuseWhileFilesChange()) {
             return;
           }
           _isOpeningRide = true;

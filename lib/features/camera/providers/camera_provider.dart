@@ -12,6 +12,9 @@ import '../../../core/utils/path_utils.dart' as path_utils;
 import 'camera_init_status.dart';
 import 'recording_retention.dart';
 import 'recordings_migration.dart';
+import 'storage_budget.dart';
+import '../../history/models/ride_index.dart';
+import '../../history/services/ride_deletion.dart';
 import 'dart:io';
 import 'dart:async';
 import 'dart:isolate';
@@ -108,6 +111,21 @@ class CameraProvider extends ChangeNotifier {
   /// and are never removed by MotoCam, so export is opt-in.
   bool autoExportLockedClipsToGallery = false;
 
+  /// Storage budget for all recordings in bytes; 0 (the default) is off.
+  ///
+  /// Set from the `recordings_storage_budget_gb` setting at every START.
+  /// While recording, shortly after START and after each segment roll, the
+  /// oldest unlocked rides are deleted (whole rides, through the shared ride
+  /// deletion routine) until the recordings root fits; see
+  /// [selectRidesForStorageBudget] for what is never deleted.
+  int storageBudgetBytes = 0;
+
+  /// Returns the `rideSessionId` of the ride being recorded (the telemetry
+  /// provider's), so the storage budget never deletes it. Set by the
+  /// recording screen. While it returns `null` during a recording, the
+  /// budget is not enforced.
+  String? Function()? currentRideSessionIdSource;
+
   ResolutionPreset _resolutionPreset = ResolutionPreset.medium;
   int _recordingFps = 30;
   int _videoBitrateBps = 8 * 1000 * 1000;
@@ -135,6 +153,14 @@ class CameraProvider extends ChangeNotifier {
   bool _hasPrunedTelemetryTempFiles = false;
   final RecordingsMigrationController _recordingsMigration =
       RecordingsMigrationController();
+  Timer? _storageBudgetTimer;
+  bool _isStorageBudgetRunning = false;
+  int _sessionBudgetDeletedRides = 0;
+  int _sessionBudgetDeletedBytes = 0;
+  int _sessionBudgetFailedFiles = 0;
+  bool _sessionBudgetUnattainable = false;
+  bool _sessionBudgetNoticeShown = false;
+  String? _lastStorageBudgetMessage;
   String? _lastGalleryExportMessage;
   String? _lastRecordingError;
   int _consecutiveRollStopFailures = 0;
@@ -219,6 +245,18 @@ class CameraProvider extends ChangeNotifier {
 
   /// Directory that holds this app's segments and telemetry sidecars.
   String? get recordingsDirectory => _recordingsDirectory;
+
+  /// The storage budget's notice for the current or last recording
+  /// session, for example 'Storage budget: deleted 2 oldest unlocked rides
+  /// (3.1 GB).'; at most one per session, `null` until the budget deleted
+  /// something or found it cannot be met. A new String is built for each
+  /// notice, so identity tells a new one from one already shown. Listeners
+  /// are notified when it is set.
+  String? get lastStorageBudgetMessage => _lastStorageBudgetMessage;
+
+  /// Whether the storage budget is scanning or deleting rides now; Ride
+  /// History holds its delete and unlock actions meanwhile.
+  bool get isStorageBudgetRunning => _isStorageBudgetRunning;
 
   /// The move of rides from the legacy roots into [recordingsDirectory]
   /// (Android only): progress, summary and idle signal for the UI.
@@ -1023,6 +1061,7 @@ class CameraProvider extends ChangeNotifier {
       !_isStartingRecording &&
       !_isStoppingRecording &&
       !_isDeferredMaintenanceRunning &&
+      !_isStorageBudgetRunning &&
       !(_deferredMaintenanceTimer?.isActive ?? false);
 
   // Starts (or resumes) the move of rides out of the legacy roots when it
@@ -1360,6 +1399,12 @@ class CameraProvider extends ChangeNotifier {
       _consecutiveRollStopFailures = 0;
       _recordingStartTime = null;
       _elapsedTime = Duration.zero;
+      _sessionBudgetDeletedRides = 0;
+      _sessionBudgetDeletedBytes = 0;
+      _sessionBudgetFailedFiles = 0;
+      _sessionBudgetUnattainable = false;
+      _sessionBudgetNoticeShown = false;
+      _lastStorageBudgetMessage = null;
 
       _log('Starting recording...');
       _log(
@@ -1386,6 +1431,9 @@ class CameraProvider extends ChangeNotifier {
       _currentSegmentStartMs = 0;
       _state = RecordingState.recording;
       _armSegmentTimer();
+      // Never delays START: the budget runs a few seconds later, once the
+      // telemetry session (and its id) exists.
+      _scheduleStorageBudget(const Duration(seconds: 5));
 
       // Emit elapsed time once per second to reduce rebuild pressure.
       _timerStream?.cancel();
@@ -1656,6 +1704,10 @@ class CameraProvider extends ChangeNotifier {
     if (!restarted && !_isStoppingRecording && isRecording) {
       _enterRecordingFault(faultMessage);
     }
+    if (restarted) {
+      // Off the roll's critical path.
+      _scheduleStorageBudget(const Duration(seconds: 3));
+    }
     return restarted;
   }
 
@@ -1797,6 +1849,159 @@ class CameraProvider extends ChangeNotifier {
         _lastSettledSegmentSequence = sequence;
       }
     }
+  }
+
+  // Runs the storage budget after [delay], unless a run is queued already.
+  void _scheduleStorageBudget(Duration delay) {
+    if (storageBudgetBytes <= 0 || (_storageBudgetTimer?.isActive ?? false)) {
+      return;
+    }
+    _storageBudgetTimer = Timer(delay, () {
+      unawaited(_enforceStorageBudget());
+    });
+  }
+
+  // The budget may delete only while a ride records (so its session is
+  // known) and no other bulk file work (the migration) runs.
+  bool get _canEnforceStorageBudget =>
+      !_isDisposed &&
+      isRecording &&
+      !_isStoppingRecording &&
+      _recordingsMigration.isIdle;
+
+  // Static so the isolate closure cannot capture the provider.
+  static Future<StorageBudgetInventory> _scanStorageBudgetInBackground(
+    String root,
+    String? indexFilePath,
+  ) {
+    return Isolate.run(
+      () => scanStorageBudgetInventory(root, indexFilePath: indexFilePath),
+    );
+  }
+
+  // Deletes the oldest unlocked rides while the recordings root exceeds
+  // storageBudgetBytes (see selectRidesForStorageBudget) and sets
+  // lastStorageBudgetMessage once per session.
+  Future<void> _enforceStorageBudget() async {
+    final root = _recordingsDirectory;
+    final budget = storageBudgetBytes;
+    if (budget <= 0 ||
+        root == null ||
+        _isStorageBudgetRunning ||
+        !_canEnforceStorageBudget) {
+      return;
+    }
+    if (_rollInFlight != null) {
+      // Retried once the segment is registered.
+      _scheduleStorageBudget(const Duration(seconds: 3));
+      return;
+    }
+    final sessionId = currentRideSessionIdSource?.call();
+    if (sessionId == null) {
+      // The telemetry session has not started; the next roll retries.
+      return;
+    }
+    _isStorageBudgetRunning = true;
+    try {
+      final store = await RideIndexStore.shared();
+      final inventory = await _scanStorageBudgetInBackground(
+        root,
+        store?.file.path,
+      );
+      if (!_canEnforceStorageBudget) {
+        return;
+      }
+      final selection = selectRidesForStorageBudget(
+        budgetBytes: budget,
+        fileSizes: inventory.fileSizes,
+        rides: inventory.rides,
+        recordingsRoot: root,
+        currentRideSessionId: sessionId,
+        currentSessionPaths: _liveSessionPaths(),
+        currentSessionStartedAt: _recordingStartTime,
+      );
+      if (!selection.isOverBudget) {
+        return;
+      }
+      if (!selection.attainable) {
+        _logError(
+          'Storage budget: ${selection.totalBytes} bytes recorded, budget '
+          '$budget; rides it may not delete use ${selection.protectedBytes} '
+          'bytes, so nothing was deleted',
+        );
+        _sessionBudgetUnattainable = true;
+        _publishStorageBudgetNotice(budget);
+        return;
+      }
+
+      var deletedRides = 0;
+      var deletedBytes = 0;
+      final sizes = <String, int>{
+        for (final entry in inventory.fileSizes.entries)
+          _normalizePath(entry.key): entry.value,
+      };
+      for (final ride in selection.ridesToDelete) {
+        if (!_canEnforceStorageBudget) {
+          break;
+        }
+        // A segment registered since the scan is never deleted.
+        final live = _liveSessionPaths().map(_normalizePath).toSet();
+        if (ride.files.map(_normalizePath).any(live.contains)) {
+          continue;
+        }
+        final record = inventory.records[ride.id];
+        if (record == null) {
+          continue;
+        }
+        final result = await deleteRideFiles(record, indexStore: store);
+        _sessionBudgetFailedFiles += result.failed;
+        if (result.deletedPaths.isNotEmpty) {
+          deletedRides++;
+          for (final path in result.deletedPaths) {
+            deletedBytes += sizes[_normalizePath(path)] ?? 0;
+          }
+        }
+      }
+      _sessionBudgetDeletedRides += deletedRides;
+      _sessionBudgetDeletedBytes += deletedBytes;
+      _logError(
+        'Storage budget: deleted $deletedRides ride(s), $deletedBytes bytes '
+        '(${selection.totalBytes} bytes recorded, budget $budget)',
+      );
+      _publishStorageBudgetNotice(budget);
+    } catch (e) {
+      _logError('Storage budget run failed: $e');
+    } finally {
+      _isStorageBudgetRunning = false;
+      notifyListeners();
+      // The migration may have been waiting for this run (after a stop).
+      _maybeStartRecordingsMigration();
+    }
+  }
+
+  // Every path of the session being recorded: its registered segments and
+  // the segment registered last.
+  List<String> _liveSessionPaths() => <String>[
+    ..._sessionSegmentPaths,
+    ?_currentVideoPath,
+  ];
+
+  void _publishStorageBudgetNotice(int budget) {
+    if (_sessionBudgetNoticeShown) {
+      return;
+    }
+    final notice = storageBudgetNotice(
+      deletedRides: _sessionBudgetDeletedRides,
+      deletedBytes: _sessionBudgetDeletedBytes,
+      unattainable: _sessionBudgetUnattainable,
+      budgetBytes: budget,
+      failedFiles: _sessionBudgetFailedFiles,
+    );
+    if (notice == null) {
+      return;
+    }
+    _sessionBudgetNoticeShown = true;
+    _lastStorageBudgetMessage = notice;
   }
 
   // Runs the orphan-sidecar prune shortly after a stop, off the stop path,
@@ -2265,6 +2470,7 @@ class CameraProvider extends ChangeNotifier {
     _isDisposed = true;
     _segmentTimer?.cancel();
     _deferredMaintenanceTimer?.cancel();
+    _storageBudgetTimer?.cancel();
     _timerStream?.cancel();
     unawaited(_timerController.close());
     unawaited(_controller?.dispose());
