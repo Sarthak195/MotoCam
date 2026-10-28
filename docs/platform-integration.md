@@ -1,6 +1,6 @@
 # Native platform integration
 
-How MotoCam's Dart code talks to native Android code through five method channels, what the Android manifest, resources and runtime permission flow look like, and the current state of the iOS project. All native behaviour described here is Android-only unless a section says otherwise; iOS has no native channel handlers.
+How MotoCam's Dart code talks to native Android code through six method channels, what the Android manifest, resources and runtime permission flow look like, and the current state of the iOS project. All native behaviour described here is Android-only unless a section says otherwise; iOS has no native channel handlers.
 
 ## Contents
 
@@ -11,6 +11,7 @@ How MotoCam's Dart code talks to native Android code through five method channel
   - [pip](#comexamplemotocampip)
   - [media](#comexamplemotocammedia)
   - [integrity](#comexamplemotocamintegrity)
+  - [legacy_recordings](#comexamplemotocamlegacy_recordings)
 - [Android details](#android-details)
   - [Foreground service](#foreground-service)
   - [Camera lifecycle hold](#camera-lifecycle-hold)
@@ -19,6 +20,8 @@ How MotoCam's Dart code talks to native Android code through five method channel
   - [Media scanning and gallery export](#media-scanning-and-gallery-export)
   - [Battery and thermal status](#battery-and-thermal-status)
   - [Ride signing key](#ride-signing-key)
+  - [Activity results and request codes](#activity-results-and-request-codes)
+  - [Old public folder access (Storage Access Framework)](#old-public-folder-access-storage-access-framework)
 - [Android manifest permission matrix](#android-manifest-permission-matrix)
 - [Runtime permission flow](#runtime-permission-flow)
 - [iOS: current state](#ios-current-state)
@@ -29,8 +32,9 @@ How MotoCam's Dart code talks to native Android code through five method channel
 
 | File | Platform | Role |
 |---|---|---|
-| [MainActivity.kt](../android/app/src/main/kotlin/com/example/motocam/MainActivity.kt) | Android | `MainActivity : FlutterActivity`. `configureFlutterEngine` registers the handlers for four channels and, with one line, the `integrity` channel of `RideSigner`. Also owns the PiP hooks (`onUserLeaveHint`, `onPause`, `onPictureInPictureModeChanged`), the camera lifecycle hold (it overrides `lifecycle`; see [Camera lifecycle hold](#camera-lifecycle-hold)), the keep-screen-on window flag, the `BroadcastReceiver` for the notification Stop and the service's stopped broadcast (registered in `onCreate`, unregistered in `onDestroy`), `readBatteryStatus`, `thermalStatusLabel`, `isPipSupported` and `stopBackgroundRecordingService`. `onDestroy` also clears the keep-screen-on flag, releases the hold and stops the foreground service if this activity started it. There are no `onResume` or `onNewIntent` overrides. |
+| [MainActivity.kt](../android/app/src/main/kotlin/com/example/motocam/MainActivity.kt) | Android | `MainActivity : FlutterActivity`. `configureFlutterEngine` registers the handlers for four channels and, with one line each, the `integrity` channel of `RideSigner` and the `legacy_recordings` channel of `LegacyRecordingsAccess` (created once per activity, its picker request code registered with the activity's `ActivityResultDispatcher`). `onActivityResult` calls `super` first and then dispatches by request code (see [Activity results and request codes](#activity-results-and-request-codes)). Also owns the PiP hooks (`onUserLeaveHint`, `onPause`, `onPictureInPictureModeChanged`), the camera lifecycle hold (it overrides `lifecycle`; see [Camera lifecycle hold](#camera-lifecycle-hold)), the keep-screen-on window flag, the `BroadcastReceiver` for the notification Stop and the service's stopped broadcast (registered in `onCreate`, unregistered in `onDestroy`), `readBatteryStatus`, `thermalStatusLabel`, `isPipSupported` and `stopBackgroundRecordingService`. `onDestroy` also disposes `LegacyRecordingsAccess` (an open picker call is answered with `null` and a copy in progress is cancelled), clears the keep-screen-on flag, releases the hold and stops the foreground service if this activity started it. There are no `onResume` or `onNewIntent` overrides. |
 | [BackgroundRecordingService.kt](../android/app/src/main/kotlin/com/example/motocam/BackgroundRecordingService.kt) | Android | `BackgroundRecordingService : Service`. The foreground service that shows the recording notification and holds a partial wake lock while recording. Not bound (`onBind` returns `null`); driven entirely by intent actions. Overrides `onCreate` (creates the notification channel), `onStartCommand`, `onTaskRemoved` and `onDestroy`. Its `companion object` holds the action and extra constants and `grantedForegroundServiceTypes(context)`. When it stops it sends `FOREGROUND_STOPPED` with the hold token it was started with. |
+| [LegacyRecordingsAccess.kt](../android/app/src/main/kotlin/com/example/motocam/LegacyRecordingsAccess.kt) | Android | `LegacyRecordingsAccess : MethodChannel.MethodCallHandler`, the `legacy_recordings` channel: Storage Access Framework access to the v0.1.11/v0.1.12 public folder (see [Old public folder access](#old-public-folder-access-storage-access-framework)). The same file holds `ActivityRequestCodes` and `ActivityResultDispatcher`. |
 | [RideSigner.kt](../android/app/src/main/kotlin/com/example/motocam/RideSigner.kt) | Android | `RideSigner : MethodChannel.MethodCallHandler`, the `integrity` channel: the device-bound ride signing key (see [Ride signing key](#ride-signing-key)). `RideSigner.register(messenger)` creates the channel; Keystore work runs on one background thread shared by every engine. |
 | [AppDelegate.swift](../ios/Runner/AppDelegate.swift) | iOS | `AppDelegate : FlutterAppDelegate, FlutterImplicitEngineDelegate`. `didInitializeImplicitFlutterEngine` only calls `GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)`. No method channels. |
 | [SceneDelegate.swift](../ios/Runner/SceneDelegate.swift) | iOS | An empty `SceneDelegate : FlutterSceneDelegate`, named by the `UIApplicationSceneManifest` in `Info.plist` (see [iOS](#ios-current-state)). |
@@ -46,15 +50,17 @@ The Dart side of each channel lives in a small service class:
 | [pip_service.dart](../lib/core/services/pip_service.dart) | `PipService` (singleton, `instance`) | `pip` |
 | [camera_provider.dart](../lib/features/camera/providers/camera_provider.dart) | `CameraProvider.platform` (public static constant) | `media` |
 | [ride_signing_service.dart](../lib/core/services/ride_signing_service.dart) | `RideSigningService` (`instance`); the same file holds `SignedRideRegistry` and `loadRideSignerContext` | `integrity` |
+| [legacy_recordings_access.dart](../lib/core/services/legacy_recordings_access.dart) | `LegacyRecordingsAccess` (static `pickRecordingsTree`; an instance per picked tree implements `LegacyRideDocumentSource`) | `legacy_recordings` |
 | [app_permission_service.dart](../lib/core/services/app_permission_service.dart) | `AppPermissionService` | none (uses `permission_handler`, `BackgroundRecordingService` and a `DeviceStatusService`, an optional const-constructor parameter that defaults to `const DeviceStatusService()`) |
 
-The four service classes above other than `CameraProvider` and `RideSigningService` are created or first used by [recording_screen.dart](../lib/features/recording/recording_screen.dart) (`RecordingScreen` is the app's home screen), whose `initState` calls `PipService.initialize`, `BackgroundRecordingService.initialize`, starts device-status polling and runs the permission bootstrap. The `media` channel belongs to `CameraProvider`, which `main.dart` creates in its `MultiProvider`. The `integrity` channel is used by `TelemetryProvider` (signing the final save), `RidesListScreen` (reading this phone's key) and `RideRecord.setLockState` (re-signing).
+The four service classes above other than `CameraProvider` and `RideSigningService` are created or first used by [recording_screen.dart](../lib/features/recording/recording_screen.dart) (`RecordingScreen` is the app's home screen), whose `initState` calls `PipService.initialize`, `BackgroundRecordingService.initialize`, starts device-status polling and runs the permission bootstrap. The `media` channel belongs to `CameraProvider`, which `main.dart` creates in its `MultiProvider`. The `integrity` channel is used by `TelemetryProvider` (signing the final save), `RidesListScreen` (reading this phone's key) and `RideRecord.setLockState` (re-signing). The `legacy_recordings` channel is used only by `RidesListScreen`'s import (the picker, and the source it hands to `CameraProvider.importLegacyRides`).
 
 Platform gating on the Dart side:
 
 - `BackgroundRecordingService`, `DeviceStatusService` and the Android block of `AppPermissionService` check `defaultTargetPlatform == TargetPlatform.android`. Under `flutter test`, `defaultTargetPlatform` is Android, so these calls reach the channels in tests; the widget test mocks them.
 - `PipService` is not gated; it relies on catching the exception and returning `false`.
 - `RideSigningService` is not gated: on iOS and in tests the `MissingPluginException` (like a `PlatformException`, a malformed reply or the 5 s timeout) gives `null`, so rides are saved unsigned (envelope version 2) and no ride shows as signed by this phone.
+- `LegacyRecordingsAccess` is not gated itself: Ride History builds the import menu only when `Platform.isAndroid`, and `CameraProvider.legacyImportBlockedReason` refuses off Android.
 - In `CameraProvider`, the gallery export is gated with `dart:io` `Platform.isAndroid`. `availableStorageBytes` is not gated: on iOS the call fails, returns `null`, and an unknown free space never blocks recording.
 
 ## Method-channel reference
@@ -119,6 +125,18 @@ Dart: `RideSigningService` ([ride_signing_service.dart](../lib/core/services/rid
 | `signPayloadHash` | D→N | `payloadHash` (String, 64 lowercase hex characters) | Map: `alg` (`ES256`), `keyId`, `publicKey` (as above), `sig` (base64 `NO_WRAP` of the DER ECDSA signature from `SHA256withECDSA` over the UTF-8 bytes of `payloadHash`) | `INVALID_ARGS` (missing or not 64 lowercase hex characters, checked before any Keystore work), `SIGNING_FAILED` (exception message) | `TelemetryProvider._persistRide` (final save only, through `sealAndSignRidePayload`) and `RideRecord.setLockState` (re-signing a ride this phone signed) | Loads or creates the key, then signs | `MissingPluginException` → `null` |
 
 Dart checks every signature it receives (on a background isolate) before storing it; one that does not verify is treated as a failure.
+
+### com.example.motocam/legacy_recordings
+
+Dart: `LegacyRecordingsAccess` ([legacy_recordings_access.dart](../lib/core/services/legacy_recordings_access.dart)). Kotlin: `LegacyRecordingsAccess` ([LegacyRecordingsAccess.kt](../android/app/src/main/kotlin/com/example/motocam/LegacyRecordingsAccess.kt)), registered in `configureFlutterEngine`. Listing, copying and deleting run on one background thread per activity (`Executors.newSingleThreadExecutor`) and reply on the main thread; the picker runs on the main thread. See [Old public folder access](#old-public-folder-access-storage-access-framework).
+
+| Method | Dir | Arguments | Return | Errors | Dart caller | Kotlin handler behaviour | iOS |
+|---|---|---|---|---|---|---|---|
+| `pickRecordingsTree` | D→N | none | String: the picked tree URI, or `null` when the rider cancelled (or the activity was destroyed meanwhile) | `BUSY` (a picker is already open), `NO_PICKER` (`ActivityNotFoundException`). Dart throws them as `PlatformException` | `RidesListScreen._importFromOlderVersion` | Starts `ACTION_OPEN_DOCUMENT_TREE` (read and write grant flags; on API 26+ `EXTRA_INITIAL_URI` = `DocumentsContract.buildDocumentUri("com.android.externalstorage.documents", "primary:Movies/MotoCam/Recordings")`) with `startActivityForResult` and request code `PICK_LEGACY_RECORDINGS_TREE` (7101). The `Result` is kept until `onTreePicked` answers it. The grant is never persisted | Never called (the menu is Android only) |
+| `listTree` | D→N | `treeUri` (String) | List of maps: `uri` (document URI built with `buildDocumentUriUsingTree`), `name`, `size` (Long, -1 when unknown; Dart turns it into `null`), `canDelete` (`FLAG_SUPPORTS_DELETE`) | `INVALID_ARGS`, `LIST_FAILED` (exception message) | `LegacyRideImporter.run`, through `LegacyRecordingsAccess.list` (malformed entries are dropped) | Queries the tree's child documents (`buildChildDocumentsUriUsingTree`) for id, display name, size, MIME type and flags, and skips directories | Never called |
+| `copyDocument` | D→N | `uri`, `targetPath` (Strings) | Long: bytes copied | `INVALID_ARGS`, `CANCELLED` (Dart: `LegacyCopyCancelled`), `COPY_FAILED` (exception message); a partial target is deleted | `LegacyRideImporter` (staging copies) | Resets the cancel flag on the main thread, then on the background thread streams `openInputStream(uri)` into a `FileOutputStream` in 1 MiB buffers, checking the cancel flag before each buffer, then `flush` and `fd.sync()` | Never called |
+| `cancelCopy` | D→N | none | `true` | Dart ignores every error | `LegacyRideImporter`, when its pause check turns true during a copy | Sets the cancel flag (an `AtomicBoolean`), so the copy in progress, or one already queued, stops at its next buffer | Never called |
+| `deleteDocuments` | D→N | `uris` (List of Strings) | List of Strings: the URIs that could not be deleted | `DELETE_FAILED` (exception message) | `deleteImportedOriginals`, after the rider confirms | `DocumentsContract.deleteDocument` for each URI in order; a `false` result or an exception adds the URI to the returned list | Never called |
 
 ## Android details
 
@@ -218,6 +236,28 @@ The activity is declared with `android:supportsPictureInPicture="true"`, `androi
 | Lifetime | Deleted with the app. A reinstall creates a new key, so rides signed before it show as signed by another key, and the signed-ride registry (SharedPreferences, also cleared) starts empty. `allowBackup` is `false`, so neither the key nor the registry is restored from a backup |
 
 The key only proves which app install signed a ride. It does not prove the footage is genuine: on a rooted phone, or with a modified app, anything can be signed with it. No manifest permission is needed.
+
+### Activity results and request codes
+
+`FlutterActivity` is not a `ComponentActivity`, so the Activity Result API (`registerForActivityResult`) is not available. `MainActivity.onActivityResult` calls `super.onActivityResult` first (plugins receive their results through `FlutterActivity`'s delegate), then `ActivityResultDispatcher.dispatch(requestCode, resultCode, data)`, which calls the handler registered for that request code, if any. Handlers are registered once per activity in `configureFlutterEngine`; registering a code twice throws. `ActivityRequestCodes` lists the app's codes, which are unique in the app (plugins use their own, for example permission_handler 209 to 214 and geolocator 109) and below 65536:
+
+| Code | Constant | Used by |
+|---|---|---|
+| 7101 | `PICK_LEGACY_RECORDINGS_TREE` | `LegacyRecordingsAccess.pickRecordingsTree` (answered by `onTreePicked`) |
+| 7102 | `MEDIA_STORE_DELETE_REQUEST` | Reserved for a MediaStore delete request; nothing uses it yet |
+
+The dispatcher has no unit test (the project has no Android unit-test source set); its routing is a map lookup.
+
+### Old public folder access (Storage Access Framework)
+
+v0.1.11 and v0.1.12 recorded to the public `Movies/MotoCam/Recordings` folder. This install usually cannot read it directly: it has another signing key, so on Android 10 and later (scoped storage) it does not own those files, and it has no all-files access (only `WRITE_EXTERNAL_STORAGE` up to API 28, for the gallery export). The import therefore asks the rider for the folder with `ACTION_OPEN_DOCUMENT_TREE`, which needs no manifest permission:
+
+- **Picker.** It opens at `primary:Movies/MotoCam/Recordings` on API 26+ (`EXTRA_INITIAL_URI`; the hint is ignored below). Android 11+ blocks picking the root of shared storage, `Download` and `Android/data`, but not this folder.
+- **Grant.** `takePersistableUriPermission` is never called: the temporary grant lasts while the activity lives, so the import and the optional delete of the originals happen in the same visit to Ride History. A new import asks again.
+- **Threading.** One single-thread executor per `LegacyRecordingsAccess` runs the listing, every copy and the deletes in order; replies are posted to the main looper. A copy streams 1 MiB buffers and is never held in memory; `cancelCopy` sets an `AtomicBoolean` checked before each buffer. `onDestroy` answers an open picker with `null`, cancels a copy and shuts the executor down.
+- **Deletes.** `DocumentsContract.deleteDocument` through the external storage provider, only for the documents Dart passes (those with a verified copy in private storage, after the rider confirms).
+
+The Dart side (planning, collisions, staging and journal) is in [data-formats.md](data-formats.md#import-from-the-old-public-folder).
 
 ### Battery-optimization exemption
 
@@ -328,7 +368,7 @@ Details:
 
 ## iOS: current state
 
-The iOS project builds the Flutter app with cross-platform plugins only. None of the native integrations above is implemented for it: the `pip`, `device_status`, `media`, `background_recording` and `integrity` channels have no iOS handlers. iOS rides are therefore saved with a version 2 envelope (not signed), and a signed ride copied to an iOS device shows as signed with the signer unknown ("DATA UNMODIFIED").
+The iOS project builds the Flutter app with cross-platform plugins only. None of the native integrations above is implemented for it: the `pip`, `device_status`, `media`, `background_recording`, `integrity` and `legacy_recordings` channels have no iOS handlers. iOS rides are therefore saved with a version 2 envelope (not signed), and a signed ride copied to an iOS device shows as signed with the signer unknown ("DATA UNMODIFIED").
 
 **Info.plist** ([Info.plist](../ios/Runner/Info.plist)) follows the Flutter 3.41.2 app template and adds MotoCam's keys:
 
@@ -426,7 +466,7 @@ MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "com.example.motocam/f
 
 **6. iOS.** Either gate the Dart call so it never runs on iOS, or add a handler in `AppDelegate.didInitializeImplicitFlutterEngine`, where the bridge's `applicationRegistrar.messenger()` (or `pluginRegistry.registrar(forPlugin:)`) provides a `FlutterBinaryMessenger` for a `FlutterMethodChannel`. Add any required usage strings to `Info.plist`, and if the feature uses another `permission_handler` permission, add its macro to the Podfile's `post_install`.
 
-**7. Tests and docs.** The service tests in [test/core/services/](../test/core/services/) mock the `background_recording`, `device_status` and `pip` channels (and the `permission_handler` channel) with `TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler`. [widget_test.dart](../test/widget_test.dart) mocks the permissions, `background_recording`, `device_status` and `pip` channels before pumping `MotoCamApp`. No test mocks the `media` channel. [ride_signing_service_test.dart](../test/core/services/ride_signing_service_test.dart) mocks the `integrity` channel (replies, `PlatformException`, a malformed reply, the timeout) and runs without a handler for the `MissingPluginException` case. Add a service test for the new channel, add the channel to the widget-test mocks if `RecordingScreen` reaches it, and add it to the [method-channel reference](#method-channel-reference) above.
+**7. Tests and docs.** The service tests in [test/core/services/](../test/core/services/) mock the `background_recording`, `device_status` and `pip` channels (and the `permission_handler` channel) with `TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler`. [widget_test.dart](../test/widget_test.dart) mocks the permissions, `background_recording`, `device_status` and `pip` channels before pumping `MotoCamApp`. No test mocks the `media` channel. [ride_signing_service_test.dart](../test/core/services/ride_signing_service_test.dart) mocks the `integrity` channel (replies, `PlatformException`, a malformed reply, the timeout) and runs without a handler for the `MissingPluginException` case. [legacy_recordings_access_test.dart](../test/core/services/legacy_recordings_access_test.dart) mocks the `legacy_recordings` channel (listing, a cancelled and a failed copy, deletes); the import itself is tested against a fake `LegacyRideDocumentSource`. Add a service test for the new channel, add the channel to the widget-test mocks if `RecordingScreen` reaches it, and add it to the [method-channel reference](#method-channel-reference) above.
 
 ## Related documents
 
