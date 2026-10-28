@@ -14,6 +14,7 @@ This document describes every file MotoCam writes: where it goes, how it is name
 - [Path scope and quarantine](#path-scope-and-quarantine)
 - [Atomic-write procedure](#atomic-write-procedure)
 - [Ride index (cache)](#ride-index-cache)
+- [Gallery-link store](#gallery-link-store)
 - [Backward compatibility](#backward-compatibility)
 - [Related documents](#related-documents)
 
@@ -64,16 +65,16 @@ v0.1.11 and v0.1.12 recorded to `legacyPublicRecordingsDirectory` (`/storage/emu
 
 The `ride_import` directory lies under `filesDir`, so the `file`-domain backup exclusion below covers it.
 
-**Android only: public copies.** When a recording stops, segments that were locked in that session can be copied to shared storage (see [File inventory](#file-inventory)). This is opt-in: `CameraProvider.autoExportLockedClipsToGallery` defaults to `false` and is set from the `exportLockedClipsToGallery` setting at every START (see [settings.md](settings.md)). The copy uses `exportVideoToGallery` on the `com.example.motocam/media` channel ([MainActivity.kt](../android/app/src/main/kotlin/com/example/motocam/MainActivity.kt)) with `relativePath` `Movies/MotoCam/Recordings`:
+**Android only: public copies.** Segments are copied to shared storage in two cases (see [File inventory](#file-inventory)): when a recording stops, the segments locked in that session, only when the rider opted in (`CameraProvider.autoExportLockedClipsToGallery` defaults to `false` and is set from the `exportLockedClipsToGallery` setting at every START; see [settings.md](settings.md)); and every existing video file of a ride when the rider taps Save to gallery in Ride History. A telemetry JSON is never copied. Both go through the persisted queue in the [gallery-link store](#gallery-link-store) and `exportVideoToGallery` on the `com.example.motocam/media` channel ([MainActivity.kt](../android/app/src/main/kotlin/com/example/motocam/MainActivity.kt)) with `relativePath` `Movies/MotoCam/Recordings` and `reuseExisting: true`:
 
 | API level | Destination |
 |---|---|
-| 29 and above | MediaStore item in `MediaStore.Video.Media.EXTERNAL_CONTENT_URI` with `RELATIVE_PATH` `Movies/MotoCam/Recordings`, `MIME_TYPE` `video/mp4`, `DISPLAY_NAME` = the segment's file name. The item is inserted with `IS_PENDING` 1; if the copy fails, the pending item is deleted. |
-| below 29 | `Environment.getExternalStorageDirectory()/Movies/MotoCam/Recordings/<file name>`, written directly and then media-scanned. This needs `WRITE_EXTERNAL_STORAGE`; without it the method returns `PERMISSION_DENIED`, and the Dart side requests `Permission.storage` once per export run and retries that clip once. |
+| 29 and above | MediaStore item in `MediaStore.Video.Media.EXTERNAL_CONTENT_URI` with `RELATIVE_PATH` `Movies/MotoCam/Recordings`, `MIME_TYPE` `video/mp4`, `DISPLAY_NAME` = the segment's file name (MediaStore renames it when the name is taken). The item is inserted with `IS_PENDING` 1; if the copy fails, the pending item is deleted. An item this app inserted with the same name, folder and size is reused instead. |
+| below 29 | `Environment.getExternalStorageDirectory()/Movies/MotoCam/Recordings/<file name>` (or `<name>_1.mp4` and so on when the name is taken by another file), written directly, synced and then media-scanned for its content URI; the private file is never scanned. This needs `WRITE_EXTERNAL_STORAGE`; without it the method returns `PERMISSION_DENIED`, and the Dart side requests `Permission.storage` once per export run (never in the launch retry) and retries that clip once. A file of the same name and size there is reused instead. |
 
-There is no Dart copy fallback: a clip that cannot be exported stays only in the recordings directory. The rider sees a summary SnackBar after each export run.
+Either way the call returns the copy's content URI, which the store keeps so that Ride History can offer to remove the copy. There is no Dart copy fallback: a clip that cannot be exported stays only in the recordings directory. The rider sees a summary SnackBar after each export run.
 
-**Android backup.** The manifest sets `allowBackup="false"`. Both `backup_rules.xml` and `data_extraction_rules.xml` (cloud backup and device transfer) exclude `domain="root" path="."`, `domain="file" path="."` and `domain="external" path="."`. The `file` domain is `getFilesDir`, which holds the recordings and ride telemetry, the migration journal and the ride index; the `external` domain is `getExternalFilesDir`, the legacy root. See [platform-integration.md](platform-integration.md).
+**Android backup.** The manifest sets `allowBackup="false"`. Both `backup_rules.xml` and `data_extraction_rules.xml` (cloud backup and device transfer) exclude `domain="root" path="."`, `domain="file" path="."` and `domain="external" path="."`. The `file` domain is `getFilesDir`, which holds the recordings and ride telemetry, the migration journal, the ride index and the gallery-link store; the `external` domain is `getExternalFilesDir`, the legacy root. See [platform-integration.md](platform-integration.md).
 
 **iOS** uses the same file formats. Paths in the JSON are absolute paths inside the app container. When the container path changes, the reader relocates segment paths by file name (see [Path scope and quarantine](#path-scope-and-quarantine)). iOS has no public export. The recordings directory is inside Documents, and the app sets no backup exclusion on it, so iOS device and iCloud backups include it.
 
@@ -112,7 +113,8 @@ Plugin-generated segment names carry no timestamp or ride identifier; only the b
 | Telemetry temp file `<telemetry path>.<suffix>.tmp` | Same content as the target | `writeTelemetryAtomically` | Nothing | Renamed over the target, or deleted after the copy fallback or a failure. A leftover is deleted by `pruneStaleTelemetryTempFiles` once it is more than 10 minutes old. Discovery ignores it. |
 | `.nomedia` (Android only) | Empty file | `CameraProvider._ensureNoMediaMarker` | The Android media scanner | Never deleted by the app |
 | Write probe `.__motocam_write_probe.tmp` | The text `ok` | `RecordingScreen._verifyRecordingDirectoryWritable` (the start preflight's Media Write Access check) | Nothing | Deleted straight after it is written |
-| Android public copy (Android only, opt-in) | Byte copy of a locked segment | `CameraProvider._drainGalleryExportQueue` through the native exporter, about 2 s after stop | The system gallery | Never deleted by the app; the in-app ride delete does not touch it |
+| Android public copy `Movies/MotoCam/Recordings/<file name>` (Android only, opt-in or on request) | Byte copy of a locked segment (gallery export at stop) or of any segment (Save to gallery) | `GalleryExporter.drain` through the native exporter: about 2 s after stop, at the next launch for a queue left by a killed process, or at once for Save to gallery | The system gallery and any app with media access; it survives an uninstall | Only when the rider confirms in Ride History (after an unlock, before a delete, or from the ride's menu): `removeGalleryCopies` through the `gallery` channel. The ride delete itself, retention, the storage budget, the migration and the import never touch it |
+| Gallery-link store `<application support>/gallery_links/gallery_links.json` (Android only) | UTF-8 JSON, compact; see [Gallery-link store](#gallery-link-store) | `GalleryLinkStore` on the UI isolate, through `writeTelemetryAtomically` | `GalleryLinkStore.read` (the export queue, Ride History) | Never deleted by the app; entries are removed as described in its section |
 | Telemetry file with the legacy name `<video base>.telemetry.json` | Older telemetry JSON (see [Backward compatibility](#backward-compatibility)) | Builds before commit 76974c1 | Same readers as the ride telemetry file; `RideRecord.fromVideoFile` also looks for it next to an unreferenced video | Same as the ride telemetry file |
 | Migration journal `<application support>/ride_migration/migration_journal.json` (Android only) | UTF-8 JSON, compact; see [Legacy roots and their migration](#legacy-roots-and-their-migration) | `RecordingsMigrator`, through a `.new` file plus rename | `RecordingsMigrator` at the start of each run | Never deleted; a leftover `.new` file is deleted at the start of a run |
 | Staging copy `<application support>/ride_migration/staging/<name>.migrating` (Android only) | Byte copy of a legacy file being moved | `RecordingsMigrator` when a rename fails | `RecordingsMigrator` (size check, then renamed into the recordings directory) | Renamed into the recordings directory, or deleted on a pause, a failed check and at the start of every run. Outside every scanned root, so no sweeper or history scan sees it. |
@@ -570,6 +572,29 @@ Content (all fields are written; readers need them all, and an entry missing one
 | Unlock (`setLockState`) | Segment hashes, as playback. The ride entry is removed after the rewrite (the JSON, and so its key, changed). |
 
 Samples are never cached: `RideRecord` instances built from the index are sample-less (`samplesLoaded: false`), and playback reads the full ride in `Isolate.run` with `RideRecord.loadSamples`. Sample timestamps are parsed on first access (`TelemetryData.timestamp`).
+
+## Gallery-link store
+
+[gallery_links.dart](../lib/features/history/services/gallery_links.dart) remembers, outside the ride JSON (which is hashed and signed, so it stays byte-identical), the gallery copies MotoCam made and the segments still waiting to be copied.
+
+- **Location**: `getApplicationSupportDirectory()/gallery_links/gallery_links.json` (Android), resolved with path_provider on the UI isolate (`GalleryLinkStore.shared`); when it cannot be resolved nothing is exported or remembered. It is under `filesDir`, so it is excluded from backup and deleted with the app.
+- **One writer**: `GalleryLinkStore` on the UI isolate keeps the content in memory once read and writes the whole file with `writeTelemetryAtomically` after every `update` (queued; `update` completes once its write finished). Listeners are notified after each change.
+- **Corrupt file**: content that is not JSON, not an object or with a `format` other than 1 reads as empty, and the next write replaces it (the links in it are lost: those copies are no longer offered for removal); a malformed entry is skipped.
+- **Keys**: `<rideSessionId>|<segment file name>`, or the file name alone for a video without a ride id (`galleryLinkKey`). Keys never contain a path, so the migration and the import, which move rides, leave the store valid; the entry's own fields decide its key when the file is read.
+
+| Field | Content |
+|---|---|
+| `format` | `1` |
+| `links` | Object by key. Each entry: `rideSessionId` (String or `null`), `fileName` (the private segment's name), `contentUri` (as `exportVideoToGallery` returned it), `displayName` (the name requested for the copy), `relativePath` (`Movies/MotoCam/Recordings`) and `exportedAtMs`. `fileName`, `contentUri` and `exportedAtMs` are required; the others default to the file name and `""` |
+| `pending` | Object by key, in queue order. Each entry: `rideSessionId`, `fileName`, `sourcePath` (where the segment was when queued), `queuedAtMs` and `attempts` (failed attempts so far; optional, default 0). `fileName`, `sourcePath` and `queuedAtMs` are required |
+
+How entries come and go:
+
+- **Queued** by `GalleryExporter.enqueue` before anything is copied: at stop for the session's locked segments (with gallery export on) and by Save to gallery for a ride's existing video files. A key that is already queued or linked is not queued again.
+- **Drained** by `GalleryExporter.drain`, one at a time: an entry whose key is linked is dropped (never copied twice); its file is found at `sourcePath` when that still exists inside the recordings directory or a legacy root, else by file name directly in the recordings directory and then each legacy root; when none exists the entry is dropped. A copy moves the entry to `links`. A failure increments `attempts`, and the third failure drops it. A queue left by a killed process is drained once per launch when nothing records.
+- **Forgotten** when the copy is removed (`removeGalleryCopies` drops the links reported `deleted` or `missing`), when Save to gallery finds through `galleryItemsExist` that a linked copy no longer exists (the segment is then copied again), and when `deleteRideFiles` deleted a ride's video files (their links and pending entries go, the gallery copies stay). The storage budget deletes through `deleteRideFiles` and never touches a gallery copy.
+
+A copy made by a build before this store existed has no link and is never offered for removal. A copy that a killed process finished but did not record is linked on the next try through `reuseExisting` instead of being copied again.
 
 ## Backward compatibility
 

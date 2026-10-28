@@ -135,7 +135,7 @@ Locking (`CameraProvider.markIncident`):
 - **Automatic.** When `lastIncidentDetectedAt` changes while recording, `RecordingScreen._handleIncidentAutoLock` calls `markIncident(protectPastSegments: 2, protectCurrentSegment: true, reason: 'auto-crash')` at once, also while the app is hidden. Only the feedback (a haptic pulse and the notice) waits for the next frame. The notice reads `Incident detected. Locked: current clip` or `Incident detected. Locked: current clip + <n> previous`.
 - **Manual.** The **LOCK** button (enabled only while recording and not stopping) makes the same call with reason `manual-emergency`, gives a haptic pulse (as does an automatic lock) and shows `Locked: current clip` or `Locked: current clip + <n> previous` (`incidentLockNotice`).
 - **Effect.** Up to two already-saved segments of the current ride are locked at once. Every segment not yet registered is also marked for locking: the one being recorded and, during a roll, the one still being saved. Repeated calls within one segment lock nothing extra.
-- Locked segments are never deleted automatically, in the current ride or in past rides. With gallery export turned on, they are copied to the gallery at stop (Android). Detected incidents (not manual locks) are saved in the ride JSON's `incidents` list and shown on the playback seekbar.
+- Locked segments are never deleted automatically, in the current ride or in past rides. With gallery export turned on, they are copied to the gallery after the stop (Android; see [Export to gallery](#export-to-gallery)). Detected incidents (not manual locks) are saved in the ride JSON's `incidents` list and shown on the playback seekbar.
 
 ## Blackout mode
 
@@ -193,7 +193,7 @@ Free space:
 Consequences:
 
 - With the storage budget off (the default), earlier rides are never deleted automatically, by age, size or count; the rider deletes them in Ride History. With it on, only whole unlocked rides are deleted, oldest first, and the free-space stop stays the hard limit.
-- Gallery copies, and files left in the camera plugin's temporary folder (such as the segment in progress when the app is killed), are never cleaned up. The on-device map tile cache (up to 25 MB) is not cleared with ride history.
+- Gallery copies are removed only when the rider confirms it in Ride History (see [Export to gallery](#export-to-gallery)); no automatic deletion, the storage budget included, touches them. Files left in the camera plugin's temporary folder (such as the segment in progress when the app is killed) are never cleaned up. The on-device map tile cache (up to 25 MB) is not cleared with ride history.
 - If the app is killed during a ride, the segments already registered stay on disk and the last checkpoint keeps the ride JSON; the ride appears in history marked `RECOVERED (INCOMPLETE)`. A ride killed before its first segment was registered has no JSON. Video files that no ride JSON lists appear as separate `VIDEO ONLY (RECOVERED)` entries.
 
 ## Rides list
@@ -211,10 +211,11 @@ Consequences:
   - `RECOVERED (INCOMPLETE)`: the JSON is a checkpoint; the app stopped before the ride was saved normally.
   - `LOCKED`.
 - The card also shows distance, duration, `Video: <kept> of <duration> kept` when loop deletion removed part of the ride's video, max and average speed, `Segments: n` (or `Segments: a of n available`), sample count, the integrity line, a video check line ("Videos verified: unmodified since recording", "Videos not checked yet (open the ride to check)", "Videos: k of n segments checked, no failure so far (open the ride to finish)" or "Videos: f of n segment(s) failed the check") and whether telemetry is available.
-- **Unlock clip** (locked rides only) asks `Unlock this clip?` first. Unlocking only removes the lock marker, and the ride moves from Locked Clips to All Rides. The dialog says past rides are never deleted automatically, or, with the storage budget on, that an unlocked ride can be deleted automatically once it is among the oldest. `RideRecord.setLockState(false)` re-reads and fully re-verifies the ride, including segment hashes (segments with a still-valid stored result are not hashed again), and refuses when any check fails. A progress ring counts the checked segments. The SnackBar reads `Clip unlocked.` or `Could not unlock this clip: its files failed the integrity check or could not be saved.` The button is disabled for rides with an integrity warning, quarantined paths or a stored failed video check.
-- **Delete ride** asks `Delete this ride?` and then deletes the ride's segment files, main video and telemetry JSON (never quarantined paths, files outside the ride's folder or gallery copies) through the same routine as the storage budget, which also updates the ride index and the signed-ride registry. A locked ride must be unlocked first. A locked ride that cannot be unlocked (integrity warning or quarantined paths) can still be deleted after the dialog warns about it.
+- **Unlock clip** (locked rides only) asks `Unlock this clip?` first. Unlocking only removes the lock marker, and the ride moves from Locked Clips to All Rides. The dialog says past rides are never deleted automatically, or, with the storage budget on, that an unlocked ride can be deleted automatically once it is among the oldest. `RideRecord.setLockState(false)` re-reads and fully re-verifies the ride, including segment hashes (segments with a still-valid stored result are not hashed again), and refuses when any check fails. A progress ring counts the checked segments. The SnackBar reads `Clip unlocked.` or `Could not unlock this clip: its files failed the integrity check or could not be saved.` The button is disabled for rides with an integrity warning, quarantined paths or a stored failed video check. After an unlock, a ride with gallery copies that MotoCam recorded gets the offer to remove them (default: keep; Android).
+- **Delete ride** asks `Delete this ride?` and then deletes the ride's segment files, main video and telemetry JSON (never quarantined paths or files outside the ride's folder) through the same routine as the storage budget, which also updates the ride index, the signed-ride registry and the gallery-link store. When the ride has gallery copies that MotoCam recorded (Android), it first offers to remove them (default: keep); see [Export to gallery](#export-to-gallery). A locked ride must be unlocked first. A locked ride that cannot be unlocked (integrity warning or quarantined paths) can still be deleted after the dialog warns about it.
 - **Import rides from an older version** (Android, app bar menu): see [Storage and retention](#storage-and-retention).
-- Pull to refresh reloads the list (not available when it is empty). There is no share or export action.
+- **Gallery menu** (Android, the "more" button on every card): **Save to gallery** and, for a ride with gallery copies, **Remove gallery copies**; a card with copies shows `Gallery copies: n (readable by other apps)`. See [Export to gallery](#export-to-gallery).
+- Pull to refresh reloads the list (not available when it is empty). There is no share action.
 
 ## Playback
 
@@ -272,15 +273,18 @@ The rides list shows the status like this:
 
 ## Export to gallery
 
-Export is Android-only, opt-in and automatic. The settings sheet switch **Copy locked clips to gallery** is off by default. There is no manual export button.
+Android only. A gallery copy is a public copy of a video segment in `Movies/MotoCam/Recordings`: other apps can read it, it includes the audio when it was recorded, and it stays on the phone when MotoCam is uninstalled. The ride's telemetry JSON (the GPS route) is never copied. There are two ways to make copies:
 
-1. At stop, when the switch is on, the ride's locked segments are queued (`_enqueueDeferredGalleryExport`).
-2. About 2 s later each one is copied over the `media` channel (`exportVideoToGallery`) to `Movies/MotoCam/Recordings`:
-   - API 29 and later: inserted through MediaStore. A failed copy removes its unfinished MediaStore item.
-   - Below API 29: copied into `Movies/MotoCam/Recordings` on shared storage, then media-scanned. This needs the storage permission. The permission audit asks for it when the switch is on, and an export that is refused for lack of it asks once more per export run and retries the clip.
-3. When the run ends, a SnackBar summarizes it, for example `2 locked clips copied to the gallery.`, `1 locked clip not copied (storage permission denied).` or `1 locked clip could not be copied to the gallery.`
+- **Automatic, opt-in.** The settings sheet switch **Copy locked clips to gallery** is off by default. When it is on, the ride's locked segments are written to a saved export queue at stop and copied about 2 s later. If the app is killed before they are copied, they are copied at the next launch (when nothing records), exactly once.
+- **Save to gallery.** In Ride History, the ride's menu offers **Save to gallery** for any ride, locked or not, whatever the switch says. A dialog explains what a gallery copy means first; a progress ring counts the segments; a summary such as `Saved 3 segments to Movies/MotoCam/Recordings; 1 segment already in the gallery.` follows. Segments already in the gallery are not copied again (one deleted in a gallery app is copied again).
 
-The original stays in app storage. Gallery copies are visible to other apps, include audio when it was recorded, and are never removed by MotoCam, also when the ride is deleted. The export queue is kept only in memory, so clips still queued when the process dies are not exported.
+How copies are made (`exportVideoToGallery` on the `media` channel, through the persisted queue in the gallery-link store; see [platform-integration.md](platform-integration.md#media-scanning-and-gallery-export)):
+
+- API 29 and later: inserted through MediaStore. A failed copy removes its unfinished MediaStore item.
+- Below API 29: copied into `Movies/MotoCam/Recordings` on shared storage (never over another file), then that copy is media-scanned; the private recording is never scanned. This needs the storage permission: the permission audit asks for it when the switch is on, Save to gallery asks when a copy is refused for lack of it, and a denial is explained in the summary (`... not saved: storage access was denied. Allow Storage for MotoCam in the phone's settings to save to the gallery.`). The launch retry never asks.
+- After an automatic export run, a SnackBar summarizes it, for example `2 locked clips copied to the gallery.`, `1 locked clip not copied (storage permission denied).` or `1 locked clip could not be copied to the gallery.` A failed copy is tried again at the next run, up to three times.
+
+**Removing copies.** MotoCam stores each copy's content URI (in `gallery_links.json`, outside the ride file, which stays unchanged). When a ride with copies is unlocked, before it is deleted, and from **Remove gallery copies** in its menu, Ride History asks `Remove N gallery copies?` with **Keep copies** as the default. **Remove copies** deletes them without a prompt where it can (MotoCam owns what it inserted); when Android requires consent, one system prompt covers all of the ride's copies (Android 11 and later; one prompt per copy on Android 10), and on Android 9 and lower the storage permission is asked for. A copy already gone counts as removed. The SnackBar says what was not removed. Copies made by versions before this one were not recorded and are not offered; neither are copies of a deleted ride the rider chose to keep. Retention, the storage budget, the migration and the import never touch gallery copies.
 
 ## Settings overview
 
@@ -317,7 +321,7 @@ Requested by `AppPermissionService.ensureRequiredPermissions` ([app_permission_s
 | Microphone | required only if audio is on | Audio track |
 | Location when in use | required | Speed, distance, route, and starting the accelerometer. During a ride the location-type foreground service keeps GPS working in the background; no background-location permission is requested |
 | Notifications (Android) | recommended | Visible foreground-service notification |
-| Storage (Android 9 and lower) | recommended, only when gallery export is on | Writing gallery copies to shared storage |
+| Storage (Android 9 and lower) | recommended, only when gallery export is on; also asked by Save to gallery and by the removal of gallery copies when needed | Writing and deleting gallery copies in shared storage |
 | Battery optimization exemption (Android) | never requested automatically | Offered once, see below |
 
 - A missing required permission shows the **Permissions Required** dialog (Later / Request Again / Open Settings) and blocks START. Its note about permanently denied permissions lists only required ones.
@@ -342,7 +346,7 @@ Based on the platform checks in the code today. In the iOS column, "Yes" means t
 | Picture-in-Picture | API 26+ with the PiP system feature | No (`Recording active. Stop first to exit.`) |
 | Foreground service, notification Stop, wake lock | Yes | No |
 | Stall recovery on resume | Yes | Yes (Dart lifecycle logic) |
-| Gallery export | Yes (opt-in) | No (the switch is hidden) |
+| Gallery export (automatic opt-in, Save to gallery, removal of copies) | Yes | No (the switch and the menu are hidden) |
 | Rides list, delete, playback, route map, integrity checks | Yes | Yes (Dart only) |
 | Storage budget | Yes | Yes (Dart only) |
 | Import rides from an older version | Yes (Storage Access Framework) | No (the menu is not shown) |
