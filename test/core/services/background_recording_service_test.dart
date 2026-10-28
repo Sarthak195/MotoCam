@@ -142,6 +142,28 @@ void main() {
       expect(calls, isEmpty);
     });
 
+    test('releaseCameraHold calls the native side only', () async {
+      await service.releaseCameraHold();
+      expect(calls, ['releaseCameraHold']);
+    });
+
+    test('releaseCameraHold swallows platform errors', () async {
+      messenger().setMockMethodCallHandler(_channel, (call) async {
+        throw PlatformException(code: 'ERROR');
+      });
+      await expectLater(service.releaseCameraHold(), completes);
+
+      // An older native side without the method.
+      messenger().setMockMethodCallHandler(_channel, null);
+      await expectLater(service.releaseCameraHold(), completes);
+    });
+
+    test('releaseCameraHold is a no-op off Android', () async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      await service.releaseCameraHold();
+      expect(calls, isEmpty);
+    });
+
     test('a failing notification update does not throw', () async {
       throwOnUpdate = true;
       await expectLater(
@@ -171,6 +193,29 @@ void main() {
       await sendFromNative('onStopRequested');
 
       expect(calls, contains('stopForegroundRecording'));
+    });
+  });
+
+  group('service stopped on its own', () {
+    test('is forwarded as protectionLost', () async {
+      await service.initialize();
+      final events = <BackgroundRecordingEvent>[];
+      final subscription = service.events.listen(events.add);
+
+      await sendFromNative('onForegroundStopped');
+      await Future<void>.delayed(Duration.zero);
+
+      expect(events, [BackgroundRecordingEvent.protectionLost]);
+      expect(calls, isEmpty);
+      await subscription.cancel();
+    });
+
+    test('calls nothing back when nobody listens', () async {
+      await service.initialize();
+
+      await sendFromNative('onForegroundStopped');
+
+      expect(calls, isEmpty);
     });
   });
 }

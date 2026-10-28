@@ -164,7 +164,9 @@ class MainActivity: FlutterActivity() {
                     // The service stopped on its own (start failure, Stop
                     // timeout, system stop): it no longer backs the camera,
                     // so the hold ends with it. Stopping the recording is
-                    // up to Dart; the keep-screen-on flag stays.
+                    // up to Dart; the keep-screen-on flag stays. Dart is
+                    // told, so the rider is warned that the recording is no
+                    // longer protected.
                     val token = intent.getLongExtra(
                         BackgroundRecordingService.EXTRA_HOLD_TOKEN,
                         0L,
@@ -172,6 +174,14 @@ class MainActivity: FlutterActivity() {
                     if (token != 0L && token == cameraHoldToken) {
                         isForegroundServiceStarted = false
                         releaseCameraHold()
+                        if (isRecordingActive) {
+                            try {
+                                backgroundRecordingMethodChannel
+                                    ?.invokeMethod("onForegroundStopped", null)
+                            } catch (e: Exception) {
+                                Log.e("MotoCam", "onForegroundStopped failed", e)
+                            }
+                        }
                     }
                 }
             }
@@ -264,6 +274,13 @@ class MainActivity: FlutterActivity() {
                         applyKeepScreenOn()
                         releaseCameraHold()
                         stopBackgroundRecordingService()
+                        result.success(true)
+                    }
+                    "releaseCameraHold" -> {
+                        // Capture has stopped; the service and wake lock stay
+                        // up until stopForegroundRecording, while the ride is
+                        // saved, but the camera no longer needs to stay open.
+                        releaseCameraHold()
                         result.success(true)
                     }
                     "setKeepScreenOn" -> {

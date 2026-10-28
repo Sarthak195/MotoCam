@@ -625,7 +625,21 @@ class _RecordingScreenState extends State<RecordingScreen>
     _backgroundEventSubscription = _backgroundRecordingService.events.listen((
       event,
     ) async {
-      if (event != BackgroundRecordingEvent.stopRequested || !mounted) {
+      if (!mounted) {
+        return;
+      }
+      if (event == BackgroundRecordingEvent.protectionLost) {
+        if (context.read<CameraProvider>().isRecording) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text(_backgroundProtectionUnavailableMessage),
+              duration: Duration(seconds: 6),
+            ),
+          );
+        }
+        return;
+      }
+      if (event != BackgroundRecordingEvent.stopRequested) {
         return;
       }
 
@@ -808,10 +822,7 @@ class _RecordingScreenState extends State<RecordingScreen>
     if (!backgroundProtected) {
       messenger.showSnackBar(
         const SnackBar(
-          content: Text(
-            'Background protection unavailable: recording may stop if the '
-            'app is in the background or the screen turns off.',
-          ),
+          content: Text(_backgroundProtectionUnavailableMessage),
           duration: Duration(seconds: 6),
         ),
       );
@@ -1327,8 +1338,15 @@ class _RecordingScreenState extends State<RecordingScreen>
       _recordingTimerSubscription = null;
 
       // The foreground service (and its wake lock) stays up until the ride
-      // is saved; it is stopped in the finally block below.
-      final videoPath = await camera.stopRecording();
+      // is saved; it is stopped in the finally block below. The camera
+      // lifecycle hold ends as soon as capture has stopped, so the camera
+      // does not stay open during the save with the screen off.
+      final String? videoPath;
+      try {
+        videoPath = await camera.stopRecording();
+      } finally {
+        await _backgroundRecordingService.releaseCameraHold();
+      }
       final sessionSegmentPaths = camera.lastSessionSegmentPaths;
       final resolvedVideoPath =
           videoPath ??
@@ -2882,3 +2900,9 @@ enum _StopOutcome {
 // Label AppPermissionService uses for a missing battery-optimization
 // exemption in PermissionAuditResult.missingRecommended.
 const String _batteryOptimizationIssueLabel = 'Ignore battery optimizations';
+
+// Warning shown when the foreground service did not start, or stopped on its
+// own during a recording.
+const String _backgroundProtectionUnavailableMessage =
+    'Background protection unavailable: recording may stop if the app is in '
+    'the background or the screen turns off.';

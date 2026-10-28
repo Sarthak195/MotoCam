@@ -8,6 +8,11 @@ import 'package:shared_preferences/shared_preferences.dart';
 enum BackgroundRecordingEvent {
   /// The rider tapped Stop in the recording notification.
   stopRequested,
+
+  /// The foreground service stopped on its own during a recording (for
+  /// example its start failed after it was accepted), so the camera is no
+  /// longer kept open with the screen off.
+  protectionLost,
 }
 
 /// Flutter-side bridge for the native Android foreground-service that keeps
@@ -62,6 +67,9 @@ class BackgroundRecordingService {
             // service and its notification behind.
             await stopForegroundRecording();
           }
+          break;
+        case 'onForegroundStopped':
+          _eventsController.add(BackgroundRecordingEvent.protectionLost);
           break;
       }
       return null;
@@ -188,6 +196,24 @@ class BackgroundRecordingService {
       debugPrint('[MotoCam] setKeepScreenOn failed: $error');
     } on MissingPluginException catch (error) {
       debugPrint('[MotoCam] setKeepScreenOn unavailable: $error');
+    }
+  }
+
+  /// Ends the camera lifecycle hold once capture has stopped, so the camera
+  /// can close while the ride is still being saved. The foreground service,
+  /// its wake lock and the keep-screen-on flag stay until
+  /// [stopForegroundRecording], which also releases the hold. Best effort:
+  /// platform errors are logged, not thrown. A no-op off Android.
+  Future<void> releaseCameraHold() async {
+    if (!_isAndroid) {
+      return;
+    }
+    try {
+      await _channel.invokeMethod<void>('releaseCameraHold');
+    } on PlatformException catch (error) {
+      debugPrint('[MotoCam] releaseCameraHold failed: $error');
+    } on MissingPluginException catch (error) {
+      debugPrint('[MotoCam] releaseCameraHold unavailable: $error');
     }
   }
 
