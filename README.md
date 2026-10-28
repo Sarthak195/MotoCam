@@ -67,7 +67,7 @@ Prerequisites (details and troubleshooting in [docs/development.md](docs/develop
 
 - Flutter 3.41.2 stable (Dart 3.11.0) is the verified version. `pubspec.yaml` requires at least Flutter 3.41 and Dart 3.11.
 - JDK 17 to 24 (Gradle 8.14.4 does not run on JDK 25 or later).
-- Android SDK platform 36 and NDKs 28.1.13356709 (pinned by the app) and 28.2.13676358 (used by the `jni` plugin that path_provider_android pulls in). Gradle installs CMake 3.22.1 on the first build.
+- Android SDK platform 36 and NDK 28.2.13676358 (pinned by the app; the `jni` plugin that path_provider_android pulls in requires the same one). Gradle installs CMake 3.22.1 on the first build.
 - A physical Android device is recommended. Recording needs camera and location permission (plus microphone permission while audio recording is on) and location services turned on.
 
 ```sh
@@ -185,7 +185,7 @@ Versions are the ones resolved in `pubspec.lock`, and the toolchain the maintain
 | Coordinates | `latlong2` | 0.9.1 |
 | Lints (dev) | `flutter_lints` | 6.0.0 |
 | Android build | Gradle / Android Gradle Plugin / Kotlin | 8.14.4 / 8.11.1 / 2.2.20 |
-| Android SDK | compileSdk / targetSdk / NDK / JVM target | 36 / 36 / 28.1.13356709 / 17 |
+| Android SDK | compileSdk / targetSdk / NDK / JVM target | 36 / 36 / 28.2.13676358 / 17 |
 
 Map tiles come from `tile.openstreetmap.org`, so the route map needs a network connection.
 

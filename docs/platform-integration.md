@@ -106,7 +106,7 @@ Dart always sends `relativePath` `Movies/MotoCam/Recordings`. Kotlin uses `Movie
 
 ## Android details
 
-Build targets that affect the native code ([build.gradle.kts](../android/app/build.gradle.kts)): `applicationId` and `namespace` `com.example.motocam`, `compileSdk` and `targetSdk` 36, `minSdk = flutter.minSdkVersion` (24 in Flutter 3.41.2), NDK 28.1.13356709, Java and JVM target 17. The plugins in [settings.gradle](../android/settings.gradle) are AGP 8.11.1 and Kotlin 2.2.20. Because minSdk is 24, the `SDK_INT < M` (API 23) branches in `MainActivity` never run, while the `< O` (API 26), `< Q` (API 29) and `< R` (API 30) branches are live on older devices. Build and signing are covered in [development.md](development.md) and [release.md](release.md).
+Build targets that affect the native code ([build.gradle.kts](../android/app/build.gradle.kts)): `applicationId` and `namespace` `com.example.motocam`, `compileSdk` and `targetSdk` 36, `minSdk = flutter.minSdkVersion` (24 in Flutter 3.41.2), NDK 28.2.13676358, Java and JVM target 17. The plugins in [settings.gradle](../android/settings.gradle) are AGP 8.11.1 and Kotlin 2.2.20. Because minSdk is 24, the `SDK_INT < M` (API 23) branches in `MainActivity` never run, while the `< O` (API 26), `< Q` (API 29) and `< R` (API 30) branches are live on older devices. Build and signing are covered in [development.md](development.md) and [release.md](release.md).
 
 ### Foreground service
 
