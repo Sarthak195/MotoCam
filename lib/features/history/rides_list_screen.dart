@@ -246,10 +246,10 @@ class _RidesListScreenState extends State<RidesListScreen> {
       _lockProgress[lockKey] = null;
     });
 
-    var unlocked = false;
+    var result = RideLockChangeResult.failed;
     final store = await RideIndexStore.shared();
     try {
-      unlocked = await ride.setLockState(
+      result = await ride.changeLockState(
         false,
         hashSegment: SegmentVerifier(store: store).lockHasher(
           onChecked: () {
@@ -263,8 +263,9 @@ class _RidesListScreenState extends State<RidesListScreen> {
         ),
       );
     } catch (_) {
-      unlocked = false;
+      result = RideLockChangeResult.failed;
     }
+    final unlocked = result == RideLockChangeResult.saved;
     final telemetryPath = ride.telemetryPath;
     if (unlocked && store != null && telemetryPath != null) {
       // The ride JSON changed, so its index entry is stale; the reload
@@ -288,11 +289,15 @@ class _RidesListScreenState extends State<RidesListScreen> {
     });
     messenger.showSnackBar(
       SnackBar(
-        content: Text(
-          unlocked
-              ? 'Clip unlocked.'
-              : 'Could not unlock this clip: its files failed the integrity check or could not be saved.',
-        ),
+        content: Text(switch (result) {
+          RideLockChangeResult.saved => 'Clip unlocked.',
+          RideLockChangeResult.refused =>
+            'Could not unlock this clip: its files failed the integrity check or could not be read.',
+          RideLockChangeResult.signingFailed =>
+            'Could not sign this ride again on this phone. The ride is unchanged; try again.',
+          RideLockChangeResult.failed =>
+            'Could not unlock this clip: the change could not be saved.',
+        }),
         duration: const Duration(seconds: 3),
       ),
     );

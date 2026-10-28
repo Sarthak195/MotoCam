@@ -371,9 +371,49 @@ void main() {
         (_) async => phone.sign('0' * 64),
       ];
       for (final signer in signers) {
-        expect(await ride.setLockState(false, signer: signer), isFalse);
+        expect(
+          await ride.changeLockState(false, signer: signer),
+          RideLockChangeResult.signingFailed,
+        );
         expect(await file.readAsString(), before);
       }
+    });
+
+    test('who signed is decided from the re-read file', () async {
+      // Listed while signed by another key, then replaced by a ride this
+      // phone signed: it is re-signed, not resealed as version 2.
+      final file = await writeRide('swap', signer: other);
+      final ride = await loadRide(file, contextFor(phone));
+      expect(ride.integrity.signedBy, RideSignedBy.otherKey);
+      await writeRide('swap', signer: phone);
+      expect(
+        await ride.changeLockState(false, signer: phone.signer),
+        RideLockChangeResult.saved,
+      );
+      final integrity = (await readJson(file))['integrity'] as Map;
+      expect(integrity['envelopeVersion'], 3);
+      expect(
+        (await loadRide(file, contextFor(phone))).integrity.signedBy,
+        RideSignedBy.thisDevice,
+      );
+
+      // Listed as signed here, then stripped back to version 2 while
+      // registered: refused, file untouched.
+      final registered = contextFor(phone, ids: const <String>{'swap'});
+      final listed = await loadRide(file, registered);
+      expect(listed.integrity.status, RideIntegrityStatus.verified);
+      final json = await readJson(file);
+      final envelope = json['integrity'] as Map<String, dynamic>
+        ..remove('signature')
+        ..['envelopeVersion'] = 2;
+      envelope['payloadHash'] = computeRidePayloadHash(json);
+      await file.writeAsString(jsonEncode(json));
+      final before = await file.readAsString();
+      expect(
+        await listed.changeLockState(true, signer: phone.signer),
+        RideLockChangeResult.refused,
+      );
+      expect(await file.readAsString(), before);
     });
 
     test('a ride signed by another key is re-sealed as version 2', () async {

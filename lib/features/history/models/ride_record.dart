@@ -25,6 +25,25 @@ export '../../../core/ride_file/ride_telemetry_codec.dart'
         RideSignedBy,
         RideSignerContext;
 
+/// What [RideRecord.changeLockState] did.
+enum RideLockChangeResult {
+  /// The change was written.
+  saved,
+
+  /// Refused before anything was written: the ride failed its integrity
+  /// check, has a quarantined path, or its telemetry file is missing or
+  /// unreadable.
+  refused,
+
+  /// Refused because a ride signed on this phone could not be signed again
+  /// (the key failed, timed out or answered with another key or a bad
+  /// signature). The file is untouched; trying again may work.
+  signingFailed,
+
+  /// The file could not be written, or an unexpected error occurred.
+  failed,
+}
+
 /// Represents a persisted ride session loaded from a telemetry JSON file.
 ///
 /// A ride record holds references to video segments, GPS/telemetry samples,
@@ -520,138 +539,171 @@ class RideRecord {
     return ride?.withSignerContext(integrity.signerContext) ?? this;
   }
 
+  /// Locks ([locked] `true`) or unlocks every segment of this ride and
+  /// returns whether the change was saved; see [changeLockState].
+  Future<bool> setLockState(
+    bool locked, {
+    ride_codec.SegmentFileHasher hashSegment = ride_codec.hashSegmentFile,
+    ride_codec.RidePayloadSigner? signer,
+  }) async =>
+      await changeLockState(locked, hashSegment: hashSegment, signer: signer) ==
+      RideLockChangeResult.saved;
+
   /// Locks ([locked] `true`) or unlocks every segment of this ride in its
-  /// telemetry JSON, and returns whether the change was saved.
+  /// telemetry JSON, and returns what happened.
   ///
   /// The ride is re-read and fully re-verified, including segment hashes,
-  /// first. The change is refused when any check fails or a path is
-  /// quarantined. For a verified ride the existing segment hashes are kept
-  /// and only the payload hash is recomputed; a legacy ride without an
-  /// envelope is updated without creating one, so it stays unverified.
+  /// first. The change is refused ([RideLockChangeResult.refused]) when any
+  /// check fails or a path is quarantined. For a verified ride the existing
+  /// segment hashes are kept and only the payload hash is recomputed; a
+  /// legacy ride without an envelope is updated without creating one, so
+  /// it stays unverified.
   ///
-  /// A ride validly signed by this phone (or by an unknown signer, when
-  /// this phone's key could not be read) is re-signed with [signer]
-  /// (default: this phone's Keystore key through
+  /// Who signed the ride is decided again from the re-read file with this
+  /// record's signer context. A ride validly signed by this phone (or by an
+  /// unknown signer, when this phone's key could not be read) is re-signed
+  /// with [signer] (default: this phone's Keystore key through
   /// [RideSigningService.instance]) and stays a version 3 file. When the
   /// signer fails, or its key differs from the signer of a ride this phone
-  /// signed, the change is refused and the file is left untouched. A ride
-  /// signed by another key, or unsigned, is re-sealed as version 2: a
-  /// foreign signature is dropped, since it signed the old hash.
+  /// signed, the change is refused with
+  /// [RideLockChangeResult.signingFailed] and the file is left untouched.
+  /// A ride signed by another key, or unsigned, is re-sealed as version 2:
+  /// a foreign signature is dropped, since it signed the old hash.
   ///
   /// Segment files are hashed with [hashSegment]; Ride History passes one
   /// that reuses still-valid results from the ride index
   /// (`SegmentVerifier.lockHasher`) and hashes the rest off the UI isolate.
   /// Call it on the UI isolate (the signer uses a platform channel).
-  Future<bool> setLockState(
+  Future<RideLockChangeResult> changeLockState(
     bool locked, {
     ride_codec.SegmentFileHasher hashSegment = ride_codec.hashSegmentFile,
     ride_codec.RidePayloadSigner? signer,
   }) async {
     if (integrity.status == RideIntegrityStatus.modified ||
         hasQuarantinedSegments) {
-      return false;
+      return RideLockChangeResult.refused;
     }
 
     final path = telemetryPath;
     if (path == null) {
-      return false;
+      return RideLockChangeResult.refused;
     }
 
-    return integrity_utils.runExclusiveForPath<bool>(path, () async {
-      try {
-        final telemetryFile = File(path);
-        if (!await telemetryFile.exists()) {
-          return false;
-        }
+    return integrity_utils.runExclusiveForPath<RideLockChangeResult>(
+      path,
+      () async {
+        try {
+          final telemetryFile = File(path);
+          if (!await telemetryFile.exists()) {
+            return RideLockChangeResult.refused;
+          }
 
-        final json = await ride_codec.readRideFileJson(telemetryFile);
-        if (json == null) {
-          return false;
-        }
+          final json = await ride_codec.readRideFileJson(telemetryFile);
+          if (json == null) {
+            return RideLockChangeResult.refused;
+          }
 
-        final segments = await ride_codec.resolveRideSegments(
-          telemetryFile: telemetryFile,
-          json: json,
-        );
-        if (segments == null || segments.quarantinedSegmentPaths.isNotEmpty) {
-          return false;
-        }
+          final segments = await ride_codec.resolveRideSegments(
+            telemetryFile: telemetryFile,
+            json: json,
+          );
+          if (segments == null || segments.quarantinedSegmentPaths.isNotEmpty) {
+            return RideLockChangeResult.refused;
+          }
 
-        final report = await ride_codec.checkRideFileIntegrity(
-          json: json,
-          segments: segments,
-          verifySegments: true,
-          hashSegment: hashSegment,
-        );
-        if (report.status == RideIntegrityStatus.modified) {
-          return false;
-        }
+          final report = await ride_codec.checkRideFileIntegrity(
+            json: json,
+            segments: segments,
+            verifySegments: true,
+            hashSegment: hashSegment,
+          );
+          // Decide who signed from the file just read, not from the list.
+          final fileId = json['rideSessionId'];
+          final current = ride_codec.applySignerContext(
+            report,
+            rideSessionId: fileId is String ? fileId : null,
+            context: integrity.signerContext,
+            telemetryFileName: path_utils.fileNameFromPath(path),
+            segmentFileNames: segments.segmentPaths.map(
+              path_utils.fileNameFromPath,
+            ),
+          );
+          if (current.status == RideIntegrityStatus.modified) {
+            return RideLockChangeResult.refused;
+          }
 
-        final facts = report.signature;
-        final resign =
-            report.status == RideIntegrityStatus.verified &&
-            facts != null &&
-            facts.valid &&
-            integrity.signedBy != RideSignedBy.otherKey;
-        if (!resign) {
-          ride_codec.applyLockState(
+          final facts = report.signature;
+          final signedBy = current.signedBy;
+          final resign =
+              report.status == RideIntegrityStatus.verified &&
+              facts != null &&
+              facts.valid &&
+              signedBy != RideSignedBy.otherKey;
+          if (!resign) {
+            ride_codec.applyLockState(
+              json,
+              segments: segments,
+              locked: locked,
+              reseal: report.status == RideIntegrityStatus.verified,
+            );
+            await integrity_utils.writeTelemetryAtomically(
+              telemetryFile: telemetryFile,
+              content: ride_codec.encodeRideFileJson(json),
+            );
+            return RideLockChangeResult.saved;
+          }
+
+          final payloadHash = ride_codec.applyLockState(
             json,
             segments: segments,
             locked: locked,
-            reseal: report.status == RideIntegrityStatus.verified,
-          );
-          await integrity_utils.writeTelemetryAtomically(
-            telemetryFile: telemetryFile,
-            content: ride_codec.encodeRideFileJson(json),
-          );
-          return true;
-        }
-
-        final payloadHash = ride_codec.applyLockState(
-          json,
-          segments: segments,
-          locked: locked,
-          reseal: true,
-          envelopeVersion: ride_codec.signedIntegrityEnvelopeVersion,
-        )!;
-        final signature =
-            await (signer ?? RideSigningService.instance.signPayloadHash)(
+            reseal: true,
+            envelopeVersion: ride_codec.signedIntegrityEnvelopeVersion,
+          )!;
+          ride_codec.RideSignatureData? signature;
+          try {
+            signature =
+                await (signer ?? RideSigningService.instance.signPayloadHash)(
+                  payloadHash,
+                );
+          } catch (_) {
+            signature = null;
+          }
+          if (signature == null) {
+            return RideLockChangeResult.signingFailed;
+          }
+          var updated = json;
+          if (ride_codec.sameRideSigningKey(
+            signature.publicKey,
+            facts.signerPublicKey,
+          )) {
+            final valid = await ride_codec.verifyRideSignatureInBackground(
+              signature,
               payloadHash,
             );
-        if (signature == null) {
-          return false;
-        }
-        var updated = json;
-        if (ride_codec.sameRideSigningKey(
-          signature.publicKey,
-          facts.signerPublicKey,
-        )) {
-          final valid = await ride_codec.verifyRideSignatureInBackground(
-            signature,
-            payloadHash,
-          );
-          if (!valid) {
-            return false;
+            if (!valid) {
+              return RideLockChangeResult.signingFailed;
+            }
+            updated = ride_codec.withRideSignature(json, signature);
+          } else if (signedBy == RideSignedBy.thisDevice) {
+            // This phone signed the ride but now answers with another key.
+            return RideLockChangeResult.signingFailed;
+          } else {
+            // The signer was unknown and is not this phone: drop the foreign
+            // signature and seal as version 2.
+            ride_codec.resealIntegrityEnvelope(json);
           }
-          updated = ride_codec.withRideSignature(json, signature);
-        } else if (integrity.signedBy == RideSignedBy.thisDevice) {
-          // This phone signed the ride but now answers with another key.
-          return false;
-        } else {
-          // The signer was unknown and is not this phone: drop the foreign
-          // signature and seal as version 2.
-          ride_codec.resealIntegrityEnvelope(json);
-        }
 
-        await integrity_utils.writeTelemetryAtomically(
-          telemetryFile: telemetryFile,
-          content: ride_codec.encodeRideFileJson(updated),
-        );
-        return true;
-      } catch (_) {
-        return false;
-      }
-    });
+          await integrity_utils.writeTelemetryAtomically(
+            telemetryFile: telemetryFile,
+            content: ride_codec.encodeRideFileJson(updated),
+          );
+          return RideLockChangeResult.saved;
+        } catch (_) {
+          return RideLockChangeResult.failed;
+        }
+      },
+    );
   }
 
   /// Re-reads the telemetry JSON and returns a copy of this ride whose
