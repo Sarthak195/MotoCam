@@ -16,11 +16,13 @@ import '../../core/services/app_permission_service.dart';
 import '../../core/services/background_recording_service.dart';
 import '../../core/services/device_status_service.dart';
 import '../../core/services/pip_service.dart';
+import '../camera/providers/camera_init_status.dart';
 import '../camera/providers/camera_provider.dart';
 import '../telemetry/providers/telemetry_provider.dart';
 import '../history/rides_list_screen.dart';
 import 'recording_screen_logic.dart';
 import 'widgets/recording_settings_sheet.dart';
+import 'start_preflight_evaluator.dart';
 import 'widgets/start_preflight_sheet.dart';
 
 /// The app's home screen: camera preview, live telemetry and the controls
@@ -64,8 +66,6 @@ class _RecordingScreenState extends State<RecordingScreen>
   bool _cameraInitAttempted = false;
   // Camera settings saved while recording; applied before the next START.
   bool _hasPendingCameraSettings = false;
-  // Whether LOCK or an auto-lock was used in the current recording.
-  bool _hasLockedThisSession = false;
   // Completed on the next AppLifecycleState.resumed after a system settings
   // screen was opened.
   Completer<void>? _resumeWaiter;
@@ -243,7 +243,13 @@ class _RecordingScreenState extends State<RecordingScreen>
         permissionAudit,
         audioEnabled: settings.audioEnabled,
       );
-      if (!mounted || resolvedAudit.hasBlockingIssues) {
+      if (!mounted) {
+        return;
+      }
+      if (resolvedAudit.hasBlockingIssues) {
+        // The camera is not initialized; say why instead of leaving the
+        // preview area without a reason.
+        await _reportPermissionBlock(settings);
         return;
       }
 
@@ -256,6 +262,27 @@ class _RecordingScreenState extends State<RecordingScreen>
         });
       }
     }
+  }
+
+  /// Records why setup stopped at the permission audit as the camera's init
+  /// failure, from the current permission statuses. A missing required
+  /// permission that is neither camera nor microphone is the location one.
+  Future<void> _reportPermissionBlock(AppSettingsProvider settings) async {
+    final cameraStatus = await Permission.camera.status;
+    final microphoneStatus = await Permission.microphone.status;
+    if (!mounted) {
+      return;
+    }
+    final failure =
+        cameraInitFailureForPermissions(
+          camera: cameraStatus,
+          microphone: microphoneStatus,
+          audioEnabled: settings.audioEnabled,
+        ) ??
+        const CameraInitFailure(
+          CameraInitFailureReason.locationPermissionDenied,
+        );
+    context.read<CameraProvider>().reportInitBlocked(failure);
   }
 
   /// Retries the permission audit and camera initialization (Retry button
@@ -747,9 +774,6 @@ class _RecordingScreenState extends State<RecordingScreen>
       if (!mounted) {
         return;
       }
-      setState(() {
-        _hasLockedThisSession = false;
-      });
       _handledRecordingError = null;
       // The previous ride's export summary stays in the provider; mark it as
       // shown so it is not repeated during this ride.
@@ -985,10 +1009,7 @@ class _RecordingScreenState extends State<RecordingScreen>
       return false;
     }
 
-    final hasBlockingIssue = checks.any(
-      (check) =>
-          check.isBlocking && check.status == StartPreflightStatus.failed,
-    );
+    final hasBlockingIssue = StartPreflightEvaluator.hasBlockingIssue(checks);
     if (!startPreflightNeedsSheet(checks)) {
       return true;
     }
@@ -1021,188 +1042,60 @@ class _RecordingScreenState extends State<RecordingScreen>
       await _initializeCamera();
     }
 
-    final checks = <StartPreflightCheck>[];
-
-    final cameraPermissionStatus = await Permission.camera.status;
-    final hasCameraPermission = AppPermissionService.isPermissionGranted(
-      cameraPermissionStatus,
+    final cameraGranted = AppPermissionService.isPermissionGranted(
+      await Permission.camera.status,
     );
-    checks.add(
-      StartPreflightCheck(
-        title: 'Camera Permission',
-        detail: hasCameraPermission
-            ? 'Granted'
-            : 'Camera permission is required',
-        status: hasCameraPermission
-            ? StartPreflightStatus.ok
-            : StartPreflightStatus.failed,
-        isBlocking: true,
-      ),
+    final micGranted =
+        settings.audioEnabled &&
+        AppPermissionService.isPermissionGranted(
+          await Permission.microphone.status,
+        );
+    final locationGranted = AppPermissionService.isPermissionGranted(
+      await Permission.locationWhenInUse.status,
     );
-
-    if (settings.audioEnabled) {
-      final micStatus = await Permission.microphone.status;
-      final micGranted = AppPermissionService.isPermissionGranted(micStatus);
-      checks.add(
-        StartPreflightCheck(
-          title: 'Microphone Permission',
-          detail: micGranted ? 'Granted' : 'Microphone is required for audio',
-          status: micGranted
-              ? StartPreflightStatus.ok
-              : StartPreflightStatus.failed,
-          isBlocking: true,
-        ),
-      );
-    }
-
-    final locationPermissionStatus = await Permission.locationWhenInUse.status;
-    final hasLocationPermission = AppPermissionService.isPermissionGranted(
-      locationPermissionStatus,
-    );
-    checks.add(
-      StartPreflightCheck(
-        title: 'Location Permission',
-        detail: hasLocationPermission
-            ? 'Granted'
-            : 'Required for speed, distance, and route telemetry',
-        status: hasLocationPermission
-            ? StartPreflightStatus.ok
-            : StartPreflightStatus.failed,
-        isBlocking: true,
-      ),
-    );
-
     final locationEnabled = await Geolocator.isLocationServiceEnabled();
-    checks.add(
-      StartPreflightCheck(
-        title: 'Location Services',
-        detail: locationEnabled
-            ? 'Enabled'
-            : 'Turn ON location services in system settings',
-        status: locationEnabled
-            ? StartPreflightStatus.ok
-            : StartPreflightStatus.failed,
-        isBlocking: true,
-      ),
-    );
-
     final cameraReady =
         camera.isInitialized &&
         camera.controller != null &&
         camera.controller!.value.isInitialized;
-    checks.add(
-      StartPreflightCheck(
-        title: 'Camera Ready',
-        detail: cameraReady
-            ? 'Preview and encoder are initialized'
-            : 'Camera initialization failed, retry from Recording screen',
-        status: cameraReady
-            ? StartPreflightStatus.ok
-            : StartPreflightStatus.failed,
-        isBlocking: true,
-      ),
-    );
-
     final canWriteMedia = await _verifyRecordingDirectoryWritable(camera);
-    checks.add(
-      StartPreflightCheck(
-        title: 'Media Write Access',
-        detail: canWriteMedia
-            ? 'App recording storage is writable'
-            : 'Unable to write to app recording storage',
-        status: canWriteMedia
-            ? StartPreflightStatus.ok
-            : StartPreflightStatus.failed,
-        isBlocking: true,
-      ),
-    );
 
-    if (Platform.isAndroid) {
-      final notificationsGranted = AppPermissionService.isPermissionGranted(
+    final isAndroid = Platform.isAndroid;
+    var notificationsGranted = false;
+    var ignoresBatteryOptimization = false;
+    var batteryOfferShown = false;
+    if (isAndroid) {
+      notificationsGranted = AppPermissionService.isPermissionGranted(
         await Permission.notification.status,
       );
-      checks.add(
-        StartPreflightCheck(
-          title: 'Foreground Notification',
-          detail: notificationsGranted
-              ? 'Allowed'
-              : 'Recommended so background recording status stays visible',
-          status: notificationsGranted
-              ? StartPreflightStatus.ok
-              : StartPreflightStatus.warning,
-          isBlocking: false,
-        ),
-      );
-
-      final ignoresBatteryOptimization = await _backgroundRecordingService
+      ignoresBatteryOptimization = await _backgroundRecordingService
           .isIgnoringBatteryOptimizations();
-      // After the one-time exemption offer the rider has decided, so the row
-      // is still listed but no longer opens the sheet on every START.
-      final batteryOfferShown =
+      batteryOfferShown =
           !ignoresBatteryOptimization &&
           await _backgroundRecordingService
               .hasOfferedBatteryOptimizationExemption();
-      checks.add(
-        StartPreflightCheck(
-          title: 'Battery Optimization Exemption',
-          detail: ignoresBatteryOptimization
-              ? 'Enabled'
-              : 'Recommended for stable screen-off recording',
-          status: ignoresBatteryOptimization
-              ? StartPreflightStatus.ok
-              : StartPreflightStatus.warning,
-          isBlocking: false,
-          opensSheet: !batteryOfferShown,
-        ),
-      );
     }
 
-    if (mounted &&
-        !context.read<TelemetryProvider>().isIncidentDetectionAvailable) {
-      checks.add(
-        const StartPreflightCheck(
-          title: 'Incident Detection',
-          detail:
-              'Unavailable: no motion sensor. Clips are not auto-locked; '
-              'use LOCK.',
-          status: StartPreflightStatus.warning,
-          isBlocking: false,
-        ),
-      );
-    }
-
-    final batteryLevel = _deviceStatus.batteryLevelPercent;
-    if (batteryLevel != null) {
-      final lowBattery = batteryLevel < 15;
-      checks.add(
-        StartPreflightCheck(
-          title: 'Battery Level',
-          detail: '$batteryLevel%${lowBattery ? ' (low for long rides)' : ''}',
-          status: lowBattery
-              ? StartPreflightStatus.warning
-              : StartPreflightStatus.ok,
-          isBlocking: false,
-        ),
-      );
-    }
-
-    final batteryTemp = _deviceStatus.batteryTemperatureC;
-    if (batteryTemp != null) {
-      final hotDevice = batteryTemp >= 43.0;
-      checks.add(
-        StartPreflightCheck(
-          title: 'Device Temperature',
-          detail:
-              '${batteryTemp.toStringAsFixed(1)} C${hotDevice ? ' (high temperature)' : ''}',
-          status: hotDevice
-              ? StartPreflightStatus.warning
-              : StartPreflightStatus.ok,
-          isBlocking: false,
-        ),
-      );
-    }
-
-    return checks;
+    return StartPreflightEvaluator.evaluate(
+      StartPreflightInputs(
+        cameraPermissionGranted: cameraGranted,
+        audioEnabled: settings.audioEnabled,
+        microphonePermissionGranted: micGranted,
+        locationPermissionGranted: locationGranted,
+        locationServicesEnabled: locationEnabled,
+        cameraReady: cameraReady,
+        recordingStorageWritable: canWriteMedia,
+        isAndroid: isAndroid,
+        notificationsGranted: notificationsGranted,
+        ignoresBatteryOptimization: ignoresBatteryOptimization,
+        batteryExemptionOffered: batteryOfferShown,
+        incidentDetectionAvailable:
+            !mounted ||
+            context.read<TelemetryProvider>().isIncidentDetectionAvailable,
+        batteryLevelPercent: _deviceStatus.batteryLevelPercent,
+        batteryTemperatureC: _deviceStatus.batteryTemperatureC,
+      ),
+    );
   }
 
   Future<bool> _verifyRecordingDirectoryWritable(CameraProvider camera) async {
@@ -1554,15 +1447,6 @@ class _RecordingScreenState extends State<RecordingScreen>
     }
   }
 
-  void _markLockedThisSession() {
-    if (_hasLockedThisSession || !mounted) {
-      return;
-    }
-    setState(() {
-      _hasLockedThisSession = true;
-    });
-  }
-
   void _handleIncidentAutoLock({
     required CameraProvider camera,
     required TelemetryProvider telemetry,
@@ -1586,7 +1470,6 @@ class _RecordingScreenState extends State<RecordingScreen>
       protectCurrentSegment: true,
       reason: 'auto-crash',
     );
-    _markLockedThisSession();
     _checkpointRideIfChanged(camera);
 
     // Only the feedback waits for the next frame.
@@ -2269,14 +2152,18 @@ class _RecordingScreenState extends State<RecordingScreen>
         }
 
         if (!camera.isInitialized || camera.controller == null) {
-          final initFailed =
-              _cameraInitAttempted &&
-              !_isBootstrapping &&
-              !_isNavigatingHistory &&
-              !camera.isInitializing &&
-              !camera.isRecording;
-          if (initFailed) {
-            return _buildCameraUnavailable();
+          final mode = cameraPreviewMode(
+            cameraReady: false,
+            initState: camera.initState,
+            initAttempted: _cameraInitAttempted,
+            setupBusy:
+                _isBootstrapping ||
+                _isNavigatingHistory ||
+                camera.isInitializing ||
+                camera.isRecording,
+          );
+          if (mode == CameraPreviewMode.failed) {
+            return _buildCameraUnavailable(camera.initFailure);
           }
           return const Center(
             child: CircularProgressIndicator(color: Colors.white),
@@ -2348,7 +2235,7 @@ class _RecordingScreenState extends State<RecordingScreen>
                           fontWeight: FontWeight.bold,
                         ),
                       ),
-                      if (_hasLockedThisSession) ...[
+                      if (camera.isRecordingSegmentLocked) ...[
                         const SizedBox(width: 10),
                         const Icon(Icons.lock, color: Colors.white, size: 14),
                         const SizedBox(width: 4),
@@ -2370,7 +2257,8 @@ class _RecordingScreenState extends State<RecordingScreen>
     );
   }
 
-  Widget _buildCameraUnavailable() {
+  Widget _buildCameraUnavailable(CameraInitFailure? failure) {
+    final panel = cameraInitPanelFor(failure);
     return Center(
       child: SingleChildScrollView(
         padding: const EdgeInsets.all(24),
@@ -2379,21 +2267,20 @@ class _RecordingScreenState extends State<RecordingScreen>
           children: [
             const Icon(Icons.videocam_off, color: Colors.white54, size: 40),
             const SizedBox(height: 12),
-            const Text(
-              'Camera not available',
+            Text(
+              panel.title,
               textAlign: TextAlign.center,
-              style: TextStyle(
+              style: const TextStyle(
                 color: Colors.white,
                 fontSize: 16,
                 fontWeight: FontWeight.bold,
               ),
             ),
             const SizedBox(height: 6),
-            const Text(
-              'Allow camera access (and microphone while audio recording is '
-              'on), or close other apps using the camera, then retry.',
+            Text(
+              panel.message,
               textAlign: TextAlign.center,
-              style: TextStyle(color: Colors.white70, fontSize: 13),
+              style: const TextStyle(color: Colors.white70, fontSize: 13),
             ),
             const SizedBox(height: 16),
             Wrap(
@@ -2401,24 +2288,26 @@ class _RecordingScreenState extends State<RecordingScreen>
               spacing: 12,
               runSpacing: 8,
               children: [
-                ElevatedButton(
-                  onPressed: _retryCameraSetup,
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: recordingStartButtonColor,
-                    foregroundColor: recordingButtonLabelColor,
-                  ),
-                  child: const Text('Retry'),
-                ),
-                OutlinedButton(
-                  onPressed: () => unawaited(_openAppSettingsAndRetry()),
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: Colors.white,
-                    side: BorderSide(
-                      color: Colors.white.withValues(alpha: 0.4),
+                if (panel.showRetry)
+                  ElevatedButton(
+                    onPressed: _retryCameraSetup,
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: recordingStartButtonColor,
+                      foregroundColor: recordingButtonLabelColor,
                     ),
+                    child: const Text('Retry'),
                   ),
-                  child: const Text('Open Settings'),
-                ),
+                if (panel.showOpenSettings)
+                  OutlinedButton(
+                    onPressed: () => unawaited(_openAppSettingsAndRetry()),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: Colors.white,
+                      side: BorderSide(
+                        color: Colors.white.withValues(alpha: 0.4),
+                      ),
+                    ),
+                    child: const Text('Open Settings'),
+                  ),
               ],
             ),
           ],
@@ -2763,7 +2652,6 @@ class _RecordingScreenState extends State<RecordingScreen>
                                 protectCurrentSegment: true,
                                 reason: 'manual-emergency',
                               );
-                              _markLockedThisSession();
                               _checkpointRideIfChanged(camera);
                               unawaited(HapticFeedback.heavyImpact());
                               _showInAppNotice(

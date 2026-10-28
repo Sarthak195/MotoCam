@@ -82,6 +82,20 @@ Set<int> unsettledSegmentSequences({
   return result;
 }
 
+/// Whether the LOCKED badge is shown: a recording is active and the segment
+/// being recorded ([activeSequence]) is among the [pendingLockSequences], so
+/// it will be locked when it is registered.
+///
+/// The badge ends when that segment rolls (the next segment has a different
+/// sequence) or the recording stops.
+bool isActiveSegmentLocked({
+  required bool isRecording,
+  required int activeSequence,
+  required Set<int> pendingLockSequences,
+}) {
+  return isRecording && pendingLockSequences.contains(activeSequence);
+}
+
 /// Lists the `*.telemetry.json` sidecars under [directoryPath] (recursively)
 /// whose ride no longer has any video segment on disk.
 ///

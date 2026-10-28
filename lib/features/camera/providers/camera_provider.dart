@@ -8,6 +8,7 @@ import 'package:path_provider/path_provider.dart';
 import '../../../core/services/app_permission_service.dart';
 import '../../../core/utils/integrity_utils.dart' as integrity_utils;
 import '../../../core/utils/path_utils.dart' as path_utils;
+import 'camera_init_status.dart';
 import 'recording_retention.dart';
 import 'dart:io';
 import 'dart:async';
@@ -86,6 +87,8 @@ class CameraProvider extends ChangeNotifier {
   RecordingState _state = RecordingState.idle;
   String? _currentVideoPath;
   bool _isInitialized = false;
+  CameraInitState _initState = CameraInitState.idle;
+  CameraInitFailure? _initFailure;
   String? _recordingsDirectory;
 
   /// Whether verbose `[MotoCam]` logs (timings, state) are printed.
@@ -167,6 +170,16 @@ class CameraProvider extends ChangeNotifier {
 
   /// Whether a camera initialization is in progress.
   bool get isInitializing => _initInFlight != null;
+
+  /// Phase of the camera initialization: [CameraInitState.ready] exactly
+  /// while [isInitialized] is true, [CameraInitState.failed] after a failed
+  /// attempt (see [initFailure]), [CameraInitState.initializing] while one
+  /// runs and [CameraInitState.idle] otherwise.
+  CameraInitState get initState => _initState;
+
+  /// Why the last initialization failed; non-null exactly while [initState]
+  /// is [CameraInitState.failed].
+  CameraInitFailure? get initFailure => _initFailure;
 
   /// Whether a recording session is active.
   bool get isRecording => _state == RecordingState.recording;
@@ -259,6 +272,16 @@ class CameraProvider extends ChangeNotifier {
 
   /// Number of locked segments in the current or last session.
   int get lockedSegmentCount => _lockedSegmentPaths.length;
+
+  /// Whether the segment being recorded is locked: an incident lock is
+  /// pending for it, so it is registered as locked when it rolls or the
+  /// recording stops. `false` once the recording moves to the next segment
+  /// or stops (see [isActiveSegmentLocked] in recording_retention.dart).
+  bool get isRecordingSegmentLocked => isActiveSegmentLocked(
+    isRecording: isRecording,
+    activeSequence: _activeSegmentSequence,
+    pendingLockSequences: _pendingLockSequences,
+  );
 
   /// Presets that failed to initialize or record on the active camera.
   Set<ResolutionPreset> get knownUnsupportedResolutionPresets {
@@ -463,6 +486,13 @@ class CameraProvider extends ChangeNotifier {
     int? segmentDurationSeconds,
     int? maxRollingSegments,
   }) async {
+    final wasFailed = _initState == CameraInitState.failed;
+    _initState = CameraInitState.initializing;
+    _initFailure = null;
+    if (wasFailed) {
+      // Clears the failure panel while the retry runs.
+      notifyListeners();
+    }
     try {
       final previousController = _controller;
       final hadPreviousController = previousController != null;
@@ -518,24 +548,30 @@ class CameraProvider extends ChangeNotifier {
       if (!AppPermissionService.isPermissionGranted(cameraStatus) ||
           !AppPermissionService.isPermissionGranted(microphoneStatus)) {
         _log('Camera or microphone permission denied');
-        _isInitialized = false;
-        notifyListeners();
+        _failInit(
+          cameraInitFailureForPermissions(
+                camera: cameraStatus,
+                microphone: microphoneStatus,
+                audioEnabled: _audioEnabled,
+              ) ??
+              const CameraInitFailure(CameraInitFailureReason.unknown),
+        );
         return;
       }
 
       // Set up recordings directory
       if (!await _setupRecordingsDirectory()) {
         _log('Recordings directory is unavailable; camera init aborted.');
-        _isInitialized = false;
-        notifyListeners();
+        _failInit(
+          const CameraInitFailure(CameraInitFailureReason.storageUnavailable),
+        );
         return;
       }
 
       final cameras = await getAvailableCameras(refresh: true);
       if (cameras.isEmpty) {
         _log('No cameras detected on this device');
-        _isInitialized = false;
-        notifyListeners();
+        _failInit(const CameraInitFailure(CameraInitFailureReason.noCamera));
         return;
       }
       final selectedCamera = _resolveCamera(cameras);
@@ -598,13 +634,14 @@ class CameraProvider extends ChangeNotifier {
       }
 
       if (initializedController == null || initializedPreset == null) {
-        _isInitialized = false;
         _logError('Unable to initialize camera for any preset on this device.');
         // Every preset failing means the camera is busy or unavailable, not
         // that each preset is unsupported; forget this attempt's marks so
         // the next init retries the rider's request.
         _clearCapabilityCachesForCamera(selectedCamera.name);
-        notifyListeners();
+        _failInit(
+          const CameraInitFailure(CameraInitFailureReason.cameraUnavailable),
+        );
         return;
       }
 
@@ -613,6 +650,8 @@ class CameraProvider extends ChangeNotifier {
       _recordingFps = initializedFps;
 
       _isInitialized = true;
+      _initState = CameraInitState.ready;
+      _initFailure = null;
       _log('Camera initialized successfully');
       if (_resolutionPreset != requestedPreset) {
         _log(
@@ -630,10 +669,38 @@ class CameraProvider extends ChangeNotifier {
       _log('Recordings directory: $_recordingsDirectory');
       notifyListeners();
     } catch (e) {
-      _isInitialized = false;
-      notifyListeners();
       _logError('Error initializing camera: $e');
+      _failInit(
+        CameraInitFailure(CameraInitFailureReason.unknown, detail: '$e'),
+      );
     }
+  }
+
+  // Records a failed initialization: not initialized, the reason kept for the
+  // UI, listeners told.
+  void _failInit(CameraInitFailure failure) {
+    _isInitialized = false;
+    _initState = CameraInitState.failed;
+    _initFailure = failure;
+    notifyListeners();
+  }
+
+  /// Records that setup stopped before the camera could be initialized (for
+  /// example the permission audit found a required permission missing), so
+  /// [initState] is [CameraInitState.failed] with [failure] instead of
+  /// staying idle. Does nothing while the camera is initialized or
+  /// initializing, or a recording is starting, active or stopping.
+  void reportInitBlocked(CameraInitFailure failure) {
+    if (_isInitialized ||
+        isInitializing ||
+        isRecording ||
+        _isStartingRecording ||
+        _isStoppingRecording) {
+      return;
+    }
+    _initState = CameraInitState.failed;
+    _initFailure = failure;
+    notifyListeners();
   }
 
   /// Applies new recording settings by re-initializing the camera.
@@ -1297,6 +1364,8 @@ class CameraProvider extends ChangeNotifier {
 
       _controller = candidateController;
       _isInitialized = true;
+      _initState = CameraInitState.ready;
+      _initFailure = null;
       _resolutionPreset = candidatePreset;
       _recordingFps = candidateFps;
       _markResolutionSupported(activeCamera.name, candidatePreset);
@@ -1324,6 +1393,7 @@ class CameraProvider extends ChangeNotifier {
     final previousController = _controller;
     _controller = null;
     _isInitialized = false;
+    _initState = CameraInitState.idle;
     notifyListeners();
     if (previousController == null) {
       return;
@@ -1494,6 +1564,8 @@ class CameraProvider extends ChangeNotifier {
         _activeSegmentSequence++;
         _currentSegmentStartMs = _elapsedRideMs();
         _armSegmentTimer();
+        // The LOCKED badge ends when its segment rolls.
+        notifyListeners();
         return true;
       } catch (e) {
         _logError('Segment restart attempt $attempt failed: $e');
@@ -2049,6 +2121,8 @@ class CameraProvider extends ChangeNotifier {
 
     _controller = null;
     _isInitialized = false;
+    _initState = CameraInitState.idle;
+    _initFailure = null;
     _state = RecordingState.idle;
     _recordingStartTime = null;
     _elapsedTime = Duration.zero;

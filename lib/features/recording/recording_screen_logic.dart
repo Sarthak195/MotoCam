@@ -9,6 +9,7 @@ import 'dart:math' as math;
 import 'package:flutter/widgets.dart';
 
 import '../../core/utils/format_utils.dart';
+import '../camera/providers/camera_init_status.dart';
 
 /// Fill colour of the START RECORDING button (Material blue 700). White text
 /// on it reaches 4.6:1 contrast.
@@ -53,6 +54,149 @@ String incidentLockNotice({
     return '$prefix: current clip';
   }
   return '$prefix: current clip + $previous previous';
+}
+
+/// What the preview area shows.
+enum CameraPreviewMode {
+  /// The live camera preview.
+  preview,
+
+  /// A spinner: an initialization is pending or running.
+  loading,
+
+  /// The camera-unavailable panel with the failure reason.
+  failed,
+}
+
+/// Decides what the preview area shows.
+///
+/// The failure panel replaces the spinner as soon as an initialization has
+/// failed or finished without a camera, so a failed init never looks like
+/// loading. [setupBusy] covers the bootstrap, a history round trip, a
+/// recording in progress and a camera initialization still running.
+CameraPreviewMode cameraPreviewMode({
+  required bool cameraReady,
+  required CameraInitState initState,
+  required bool initAttempted,
+  required bool setupBusy,
+}) {
+  if (cameraReady) {
+    return CameraPreviewMode.preview;
+  }
+  if (setupBusy || initState == CameraInitState.initializing) {
+    return CameraPreviewMode.loading;
+  }
+  if (initState == CameraInitState.failed || initAttempted) {
+    return CameraPreviewMode.failed;
+  }
+  return CameraPreviewMode.loading;
+}
+
+/// Text and actions of the camera-unavailable panel.
+class CameraInitPanel {
+  /// Creates a panel description.
+  const CameraInitPanel({
+    required this.title,
+    required this.message,
+    required this.showRetry,
+    required this.showOpenSettings,
+  });
+
+  /// Headline.
+  final String title;
+
+  /// Explanation and what to do.
+  final String message;
+
+  /// Whether the Retry button is shown.
+  final bool showRetry;
+
+  /// Whether the Open Settings button is shown.
+  final bool showOpenSettings;
+}
+
+/// The panel for [failure]; `null` (a failed or finished init with no
+/// recorded reason) gives a generic one.
+CameraInitPanel cameraInitPanelFor(CameraInitFailure? failure) {
+  switch (failure?.reason) {
+    case CameraInitFailureReason.cameraPermissionDenied:
+      return const CameraInitPanel(
+        title: 'Camera permission needed',
+        message: 'MotoCam needs the camera to record. Allow it, then retry.',
+        showRetry: true,
+        showOpenSettings: true,
+      );
+    case CameraInitFailureReason.cameraPermissionPermanentlyDenied:
+      return const CameraInitPanel(
+        title: 'Camera permission needed',
+        message:
+            'The camera permission is blocked. Enable it in the app settings, '
+            'then retry.',
+        showRetry: true,
+        showOpenSettings: true,
+      );
+    case CameraInitFailureReason.microphonePermissionDenied:
+    case CameraInitFailureReason.microphonePermissionPermanentlyDenied:
+      return const CameraInitPanel(
+        title: 'Microphone denied: grant it or turn off audio',
+        message:
+            'Audio recording is on. Allow the microphone in the app settings, '
+            'or turn audio off in the recording settings, then retry.',
+        showRetry: true,
+        showOpenSettings: true,
+      );
+    case CameraInitFailureReason.locationPermissionDenied:
+      return const CameraInitPanel(
+        title: 'Location permission needed',
+        message:
+            'Recording needs location for speed and route telemetry. Allow '
+            'it, then retry.',
+        showRetry: true,
+        showOpenSettings: true,
+      );
+    case CameraInitFailureReason.noCamera:
+      return const CameraInitPanel(
+        title: 'No camera found',
+        message: 'This device reported no camera. Retry in a moment.',
+        showRetry: true,
+        showOpenSettings: false,
+      );
+    case CameraInitFailureReason.cameraUnavailable:
+      return const CameraInitPanel(
+        title: 'Camera unavailable',
+        message: 'Another app may be using the camera. Close it, then retry.',
+        showRetry: true,
+        showOpenSettings: false,
+      );
+    case CameraInitFailureReason.storageUnavailable:
+      return const CameraInitPanel(
+        title: 'Recording storage unavailable',
+        message:
+            'MotoCam cannot use its recordings folder. Free up storage or '
+            'check the storage permission, then retry.',
+        showRetry: true,
+        showOpenSettings: false,
+      );
+    case CameraInitFailureReason.unknown:
+      final detail = failure?.detail?.trim() ?? '';
+      return CameraInitPanel(
+        title: 'Camera error',
+        message: detail.isEmpty
+            ? 'The camera could not be started. Retry.'
+            : 'The camera could not be started: $detail',
+        showRetry: true,
+        showOpenSettings: false,
+      );
+    case null:
+      return const CameraInitPanel(
+        title: 'Camera not available',
+        message:
+            'Allow camera access (and microphone while audio recording is '
+            'on), or close other apps using the camera, then retry.',
+        showRetry: true,
+        showOpenSettings: true,
+      );
+  }
 }
 
 /// Decides when a recording should attempt stall recovery after the app

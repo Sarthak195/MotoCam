@@ -4,6 +4,7 @@ import 'dart:math' as math;
 
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:motocam/features/camera/providers/camera_init_status.dart';
 import 'package:motocam/features/recording/recording_screen_logic.dart';
 import 'package:motocam/features/recording/widgets/recording_settings_sheet.dart';
 import 'package:motocam/features/recording/widgets/start_preflight_sheet.dart';
@@ -794,6 +795,128 @@ void main() {
     test('throws when the directory is missing', () async {
       final missing = Directory('${dir.path}/missing');
       await expectLater(newestRecordingFileIn(missing), throwsA(anything));
+    });
+  });
+
+  group('cameraPreviewMode', () {
+    CameraPreviewMode mode({
+      bool ready = false,
+      CameraInitState state = CameraInitState.idle,
+      bool attempted = false,
+      bool busy = false,
+    }) {
+      return cameraPreviewMode(
+        cameraReady: ready,
+        initState: state,
+        initAttempted: attempted,
+        setupBusy: busy,
+      );
+    }
+
+    test('shows the preview when the camera is ready', () {
+      expect(
+        mode(ready: true, state: CameraInitState.ready),
+        CameraPreviewMode.preview,
+      );
+    });
+
+    test('shows a spinner while initializing or busy', () {
+      expect(
+        mode(state: CameraInitState.initializing, attempted: true),
+        CameraPreviewMode.loading,
+      );
+      expect(
+        mode(state: CameraInitState.failed, attempted: true, busy: true),
+        CameraPreviewMode.loading,
+      );
+    });
+
+    test('shows a spinner before the first attempt', () {
+      expect(mode(), CameraPreviewMode.loading);
+    });
+
+    test('a failed init is never a spinner once nothing is running', () {
+      expect(mode(state: CameraInitState.failed), CameraPreviewMode.failed);
+      expect(
+        mode(state: CameraInitState.failed, attempted: true),
+        CameraPreviewMode.failed,
+      );
+    });
+
+    test('an attempted init that left the camera idle shows the panel', () {
+      expect(mode(attempted: true), CameraPreviewMode.failed);
+    });
+  });
+
+  group('cameraInitPanelFor', () {
+    CameraInitPanel panel(CameraInitFailureReason reason, {String? detail}) {
+      return cameraInitPanelFor(CameraInitFailure(reason, detail: detail));
+    }
+
+    test('camera permission offers Open Settings', () {
+      for (final reason in [
+        CameraInitFailureReason.cameraPermissionDenied,
+        CameraInitFailureReason.cameraPermissionPermanentlyDenied,
+      ]) {
+        final result = panel(reason);
+        expect(result.title, 'Camera permission needed');
+        expect(result.showOpenSettings, isTrue);
+      }
+    });
+
+    test('microphone denial offers both actions', () {
+      for (final reason in [
+        CameraInitFailureReason.microphonePermissionDenied,
+        CameraInitFailureReason.microphonePermissionPermanentlyDenied,
+      ]) {
+        final result = panel(reason);
+        expect(result.title, 'Microphone denied: grant it or turn off audio');
+        expect(result.showRetry, isTrue);
+        expect(result.showOpenSettings, isTrue);
+      }
+    });
+
+    test('camera unavailable only offers Retry', () {
+      final result = panel(CameraInitFailureReason.cameraUnavailable);
+      expect(result.title, 'Camera unavailable');
+      expect(result.showRetry, isTrue);
+      expect(result.showOpenSettings, isFalse);
+    });
+
+    test('no camera and storage failures have their own messages', () {
+      expect(panel(CameraInitFailureReason.noCamera).title, 'No camera found');
+      final storage = panel(CameraInitFailureReason.storageUnavailable);
+      expect(storage.title, 'Recording storage unavailable');
+      expect(storage.showRetry, isTrue);
+      expect(storage.showOpenSettings, isFalse);
+    });
+
+    test('location permission offers both actions', () {
+      final result = panel(CameraInitFailureReason.locationPermissionDenied);
+      expect(result.title, 'Location permission needed');
+      expect(result.showRetry, isTrue);
+      expect(result.showOpenSettings, isTrue);
+    });
+
+    test('an unknown error shows its text', () {
+      final result = panel(
+        CameraInitFailureReason.unknown,
+        detail: 'boom happened',
+      );
+      expect(result.title, 'Camera error');
+      expect(result.message, contains('boom happened'));
+      expect(result.showRetry, isTrue);
+    });
+
+    test('an unknown error without text still explains', () {
+      expect(panel(CameraInitFailureReason.unknown).message, isNotEmpty);
+    });
+
+    test('no recorded reason gives the generic panel with both actions', () {
+      final result = cameraInitPanelFor(null);
+      expect(result.title, 'Camera not available');
+      expect(result.showRetry, isTrue);
+      expect(result.showOpenSettings, isTrue);
     });
   });
 }

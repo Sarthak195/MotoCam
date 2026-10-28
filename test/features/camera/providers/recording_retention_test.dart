@@ -215,4 +215,76 @@ void main() {
       expect(findOrphanTelemetryFiles(root.path), isEmpty);
     });
   });
+
+  group('isActiveSegmentLocked', () {
+    test('is on while the recording segment has a pending lock', () {
+      expect(
+        isActiveSegmentLocked(
+          isRecording: true,
+          activeSequence: 3,
+          pendingLockSequences: {3},
+        ),
+        isTrue,
+      );
+    });
+
+    test('is off without a pending lock', () {
+      expect(
+        isActiveSegmentLocked(
+          isRecording: true,
+          activeSequence: 3,
+          pendingLockSequences: const <int>{},
+        ),
+        isFalse,
+      );
+    });
+
+    test('ends when the segment rolls: the next sequence is not pending', () {
+      // The lock covered segment 3 and segment 2, still being saved.
+      const pending = {2, 3};
+      expect(
+        isActiveSegmentLocked(
+          isRecording: true,
+          activeSequence: 3,
+          pendingLockSequences: pending,
+        ),
+        isTrue,
+      );
+      expect(
+        isActiveSegmentLocked(
+          isRecording: true,
+          activeSequence: 4,
+          pendingLockSequences: pending,
+        ),
+        isFalse,
+      );
+    });
+
+    test('is off when the recording stopped', () {
+      expect(
+        isActiveSegmentLocked(
+          isRecording: false,
+          activeSequence: 3,
+          pendingLockSequences: {3},
+        ),
+        isFalse,
+      );
+    });
+
+    test('covers a lock pressed during a roll for the new segment', () {
+      // Segment 3 is still being saved and segment 4 is being recorded.
+      final pending = unsettledSegmentSequences(
+        lastSettledSequence: 2,
+        activeSequence: 4,
+      );
+      expect(
+        isActiveSegmentLocked(
+          isRecording: true,
+          activeSequence: 4,
+          pendingLockSequences: pending,
+        ),
+        isTrue,
+      );
+    });
+  });
 }
