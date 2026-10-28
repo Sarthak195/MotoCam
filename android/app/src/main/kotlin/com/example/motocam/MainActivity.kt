@@ -20,6 +20,10 @@ import android.provider.Settings
 import android.provider.MediaStore
 import android.util.Log
 import android.util.Rational
+import android.view.WindowManager
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.LifecycleRegistry
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -48,10 +52,128 @@ class MainActivity: FlutterActivity() {
     // would create a plain, non-foreground service).
     private var isForegroundServiceStarted = false
 
+    // Rider's keep-screen-on choice for the current recording (Dart's
+    // setKeepScreenOn). FLAG_KEEP_SCREEN_ON is set only while it and
+    // isRecordingActive are both true; see applyKeepScreenOn.
+    private var keepScreenOnRequested = false
+
+    // ---- Camera lifecycle hold (F004) ----
+    //
+    // camera_android_camerax (0.7.2) binds every CameraX use case, and
+    // observes its LiveData, with the attached activity as LifecycleOwner
+    // (ProxyApiRegistrar.getLifecycleOwner returns the activity). CameraX
+    // closes the camera when that lifecycle drops below STARTED, so with
+    // FlutterActivity's own lifecycle every screen timeout, power-button
+    // lock or Home press without PiP stopped capture, although the
+    // camera-typed foreground service kept running.
+    //
+    // MainActivity therefore exposes recordingLifecycle as its lifecycle. It
+    // mirrors FlutterActivity's registry, except that while the hold is
+    // engaged (a recording whose foreground service was started) it does
+    // not drop below STARTED, so CameraX keeps the camera open with the
+    // screen off. ON_DESTROY is always forwarded, so the hold never outlives
+    // the activity. FlutterActivity dispatches its own events to its private
+    // registry, so only external callers see the mirror: the engine's
+    // plugin binding (FlutterActivityAndFragmentDelegate passes
+    // host.getLifecycle() to every plugin) and CameraX through the camera
+    // plugin. Of the app's plugins only camera_android_camerax observes the
+    // activity lifecycle. This relies on the camera plugin binding to the
+    // activity lifecycle: re-check it on every camera plugin upgrade.
+    // Everything here runs on the main thread.
+    private val recordingLifecycle = LifecycleRegistry(this)
+    private var isCameraHoldEngaged = false
+
+    // Token of the engaged hold, sent with ACTION_START and echoed by the
+    // service when it stops, so a late stop of an earlier service instance
+    // cannot release a newer recording's hold.
+    private var cameraHoldToken = 0L
+    private var nextCameraHoldToken = 1L
+
+    init {
+        super.lifecycle.addObserver(
+            LifecycleEventObserver { _, _ -> syncRecordingLifecycle() },
+        )
+    }
+
+    /**
+     * The lifecycle plugins and CameraX see: FlutterActivity's lifecycle,
+     * held at STARTED while a recording's foreground service runs (see
+     * [recordingLifecycle]).
+     */
+    override val lifecycle: Lifecycle
+        get() = recordingLifecycle
+
+    /**
+     * Moves [recordingLifecycle] to FlutterActivity's real state, except
+     * that an engaged hold keeps it at STARTED instead of letting it fall to
+     * CREATED. The hold never raises it: if it is not STARTED already (the
+     * activity was stopped when the hold was engaged) it follows the real
+     * state. DESTROYED is always forwarded.
+     */
+    private fun syncRecordingLifecycle() {
+        val real = super.lifecycle.currentState
+        val target = if (
+            isCameraHoldEngaged &&
+            real == Lifecycle.State.CREATED &&
+            recordingLifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)
+        ) {
+            Lifecycle.State.STARTED
+        } else {
+            real
+        }
+        if (recordingLifecycle.currentState != target) {
+            recordingLifecycle.currentState = target
+        }
+    }
+
+    private fun engageCameraHold(token: Long) {
+        cameraHoldToken = token
+        isCameraHoldEngaged = true
+        syncRecordingLifecycle()
+    }
+
+    /**
+     * Releases the hold. When the activity is stopped (screen off, app in
+     * the background) the mirrored lifecycle falls to CREATED and CameraX
+     * closes the camera.
+     */
+    private fun releaseCameraHold() {
+        cameraHoldToken = 0L
+        if (!isCameraHoldEngaged) {
+            return
+        }
+        isCameraHoldEngaged = false
+        syncRecordingLifecycle()
+    }
+
+    private fun applyKeepScreenOn() {
+        if (isRecordingActive && keepScreenOnRequested) {
+            window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        } else {
+            window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+    }
+
     private val backgroundStopReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
-            if (intent?.action == BackgroundRecordingService.ACTION_STOP_REQUESTED) {
-                backgroundRecordingMethodChannel?.invokeMethod("onStopRequested", null)
+            when (intent?.action) {
+                BackgroundRecordingService.ACTION_STOP_REQUESTED -> {
+                    backgroundRecordingMethodChannel?.invokeMethod("onStopRequested", null)
+                }
+                BackgroundRecordingService.ACTION_FOREGROUND_STOPPED -> {
+                    // The service stopped on its own (start failure, Stop
+                    // timeout, system stop): it no longer backs the camera,
+                    // so the hold ends with it. Stopping the recording is
+                    // up to Dart; the keep-screen-on flag stays.
+                    val token = intent.getLongExtra(
+                        BackgroundRecordingService.EXTRA_HOLD_TOKEN,
+                        0L,
+                    )
+                    if (token != 0L && token == cameraHoldToken) {
+                        isForegroundServiceStarted = false
+                        releaseCameraHold()
+                    }
+                }
             }
         }
     }
@@ -76,6 +198,7 @@ class MainActivity: FlutterActivity() {
                 when (call.method) {
                     "startForegroundRecording" -> {
                         isRecordingActive = true
+                        applyKeepScreenOn()
                         val elapsedMs = call.argument<Number>("elapsedMs")?.toLong() ?: 0L
                         // On API 34+ a foreground service must start with at
                         // least one type whose permission is granted; starting
@@ -86,9 +209,11 @@ class MainActivity: FlutterActivity() {
                             result.success(false)
                             return@setMethodCallHandler
                         }
+                        val holdToken = nextCameraHoldToken++
                         val serviceIntent = Intent(this, BackgroundRecordingService::class.java).apply {
                             action = BackgroundRecordingService.ACTION_START
                             putExtra(BackgroundRecordingService.EXTRA_ELAPSED_MS, elapsedMs)
+                            putExtra(BackgroundRecordingService.EXTRA_HOLD_TOKEN, holdToken)
                         }
                         try {
                             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -98,6 +223,9 @@ class MainActivity: FlutterActivity() {
                             }
                             foregroundStartWallMs = System.currentTimeMillis() - elapsedMs
                             isForegroundServiceStarted = true
+                            // Only once the service start was accepted: a
+                            // refused or failed start leaves the hold off.
+                            engageCameraHold(holdToken)
                             result.success(true)
                         } catch (e: Exception) {
                             // e.g. ForegroundServiceStartNotAllowedException (API 31+)
@@ -132,7 +260,15 @@ class MainActivity: FlutterActivity() {
                     "stopForegroundRecording" -> {
                         isRecordingActive = false
                         isForegroundServiceStarted = false
+                        keepScreenOnRequested = false
+                        applyKeepScreenOn()
+                        releaseCameraHold()
                         stopBackgroundRecordingService()
+                        result.success(true)
+                    }
+                    "setKeepScreenOn" -> {
+                        keepScreenOnRequested = call.argument<Boolean>("enabled") ?: false
+                        applyKeepScreenOn()
                         result.success(true)
                     }
                     "isIgnoringBatteryOptimizations" -> {
@@ -441,7 +577,9 @@ class MainActivity: FlutterActivity() {
         // Registered for the whole activity lifetime (not onStart/onStop) so a
         // Stop tapped in the notification while the screen is off or the app
         // is in the background still reaches Dart.
-        val filter = IntentFilter(BackgroundRecordingService.ACTION_STOP_REQUESTED)
+        val filter = IntentFilter(BackgroundRecordingService.ACTION_STOP_REQUESTED).apply {
+            addAction(BackgroundRecordingService.ACTION_FOREGROUND_STOPPED)
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             registerReceiver(
                 backgroundStopReceiver,
@@ -468,8 +606,13 @@ class MainActivity: FlutterActivity() {
         }
         // The Flutter engine and the camera go away with this activity, so the
         // foreground service (wake lock and ongoing notification) must not
-        // outlive it.
+        // outlive it. Releasing the hold first lets CameraX close the camera
+        // (ON_STOP) before the engine detaches; ON_DESTROY follows from
+        // super.onDestroy either way.
         isRecordingActive = false
+        keepScreenOnRequested = false
+        applyKeepScreenOn()
+        releaseCameraHold()
         if (isForegroundServiceStarted) {
             isForegroundServiceStarted = false
             stopBackgroundRecordingService()

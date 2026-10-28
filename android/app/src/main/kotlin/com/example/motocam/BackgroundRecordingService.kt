@@ -29,7 +29,17 @@ class BackgroundRecordingService : Service() {
         const val ACTION_STOP_FROM_NOTIFICATION = "com.example.motocam.action.STOP_FROM_NOTIFICATION"
         const val ACTION_STOP_REQUESTED = "com.example.motocam.action.STOP_REQUESTED"
 
+        // Broadcast to MainActivity when a service that was started with a
+        // hold token is destroyed, for any reason, so the activity releases
+        // its camera lifecycle hold (see MainActivity.recordingLifecycle).
+        const val ACTION_FOREGROUND_STOPPED = "com.example.motocam.action.FOREGROUND_STOPPED"
+
         const val EXTRA_ELAPSED_MS = "elapsedMs"
+
+        // Optional ACTION_START extra, echoed in ACTION_FOREGROUND_STOPPED.
+        // It lets MainActivity ignore the stop of an earlier service instance
+        // after a new recording has engaged a new hold.
+        const val EXTRA_HOLD_TOKEN = "holdToken"
         private const val TAG = "MotoCamRecordingService"
         private const val WAKE_LOCK_TAG = "MotoCam:RecordingWakeLock"
         private const val WAKE_LOCK_TIMEOUT_MS = 12 * 60 * 60 * 1000L
@@ -75,6 +85,10 @@ class BackgroundRecordingService : Service() {
 
     private var wakeLock: PowerManager.WakeLock? = null
     private var isForegroundActive = false
+
+    // Token of the camera lifecycle hold this service backs (0: none). Sent
+    // back once in ACTION_FOREGROUND_STOPPED, then cleared.
+    private var holdToken = 0L
 
     // Set once the notification's Stop was relayed to Dart, so a late
     // ACTION_UPDATE cannot replace the "stopping" notification with the
@@ -122,6 +136,7 @@ class BackgroundRecordingService : Service() {
         when (intent?.action) {
             ACTION_START -> {
                 val elapsedMs = intent.getLongExtra(EXTRA_ELAPSED_MS, 0L)
+                holdToken = intent.getLongExtra(EXTRA_HOLD_TOKEN, 0L)
                 mainHandler.removeCallbacks(stopRequestTimeout)
                 isStopRequested = false
                 acquireWakeLockIfNeeded()
@@ -203,7 +218,32 @@ class BackgroundRecordingService : Service() {
         isForegroundActive = false
         isStopRequested = false
         stopForeground(STOP_FOREGROUND_REMOVE)
+        notifyForegroundStopped()
         stopSelf()
+    }
+
+    /**
+     * Tells MainActivity, once per hold token, that this service no longer
+     * backs the recording, so it releases the camera lifecycle hold. Sent
+     * from [tearDown] and [onDestroy], which also covers the stopService
+     * fallback and a system stop that never pass through [tearDown].
+     */
+    private fun notifyForegroundStopped() {
+        val token = holdToken
+        if (token == 0L) {
+            return
+        }
+        holdToken = 0L
+        try {
+            sendBroadcast(
+                Intent(ACTION_FOREGROUND_STOPPED)
+                    .setPackage(packageName)
+                    .putExtra(EXTRA_HOLD_TOKEN, token),
+                internalBroadcastPermission(),
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Foreground-stopped broadcast failed", e)
+        }
     }
 
     /**
@@ -215,7 +255,7 @@ class BackgroundRecordingService : Service() {
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_stat_recording)
             .setContentTitle("MotoCam recording in progress")
-            .setContentText("Recording - screen can be off")
+            .setContentText("Designed to keep recording with the screen off")
             .setWhen(System.currentTimeMillis() - elapsedMs.coerceAtLeast(0L))
             .setShowWhen(true)
             .setUsesChronometer(true)
@@ -266,6 +306,7 @@ class BackgroundRecordingService : Service() {
         mainHandler.removeCallbacks(stopRequestTimeout)
         releaseWakeLockIfHeld()
         isForegroundActive = false
+        notifyForegroundStopped()
         super.onDestroy()
     }
 
