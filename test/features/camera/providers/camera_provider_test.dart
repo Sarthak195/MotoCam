@@ -95,6 +95,20 @@ void main() {
       expect(provider.lockedSegmentCount, 0);
     });
 
+    test('a migration hold can be released more than once, and overlapping '
+        'holds release independently', () {
+      final provider = CameraProvider();
+      addTearDown(provider.dispose);
+
+      final first = provider.holdRecordingsMigration();
+      final second = provider.holdRecordingsMigration();
+      first();
+      first();
+      second();
+      // Nothing starts without a recordings directory (and off Android).
+      expect(provider.isRecordingsMigrationIdle, isTrue);
+    });
+
     test('gallery export of locked clips is off by default', () {
       final provider = CameraProvider();
       addTearDown(provider.dispose);

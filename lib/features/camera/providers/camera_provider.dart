@@ -1134,11 +1134,35 @@ class CameraProvider extends ChangeNotifier {
     return roots;
   }
 
+  // Ride History actions holding the migration off (see
+  // holdRecordingsMigration).
+  int _recordingsMigrationHolds = 0;
+
+  /// Keeps the move of rides into private storage from starting or
+  /// resuming (a run in progress pauses at its next check) until the
+  /// returned callback is called. Ride History holds it while a ride is
+  /// open, being unlocked or being deleted, so no file of that ride moves
+  /// underneath it. Calling the callback again has no further effect.
+  VoidCallback holdRecordingsMigration() {
+    _recordingsMigrationHolds++;
+    var released = false;
+    return () {
+      if (released) {
+        return;
+      }
+      released = true;
+      _recordingsMigrationHolds--;
+      _maybeStartRecordingsMigration();
+    };
+  }
+
   // The migration may run only while nothing records or prunes: never while
-  // a recording is starting, active or stopping, and never while the
-  // deferred orphan prune is queued or running.
+  // a recording is starting, active or stopping, never while the deferred
+  // orphan prune is queued or running, and never while Ride History holds
+  // it.
   bool get _canRunRecordingsMigration =>
       !_isDisposed &&
+      _recordingsMigrationHolds == 0 &&
       !isRecording &&
       !_isStartingRecording &&
       !_isStoppingRecording &&
@@ -1256,9 +1280,18 @@ class CameraProvider extends ChangeNotifier {
         return movedPath;
       }
 
-      _log(
-        'Moved segment failed readiness check, keeping source path: $movedPath',
-      );
+      // An empty file: put it back where the plugin left it (or drop it),
+      // so it never sits unregistered in the recordings root.
+      _log('Moved segment failed readiness check, moving it back: $movedPath');
+      try {
+        await movedFile.rename(sourcePath);
+      } catch (_) {
+        try {
+          await movedFile.delete();
+        } catch (_) {
+          // Best effort.
+        }
+      }
       return sourcePath;
     } catch (renameError) {
       _log('Rename failed, falling back to copy/delete: $renameError');
@@ -1536,6 +1569,9 @@ class CameraProvider extends ChangeNotifier {
     } finally {
       _isStartingRecording = false;
       notifyListeners();
+      // A START that failed frees the migration it paused (a no-op while
+      // recording).
+      _maybeStartRecordingsMigration();
     }
   }
 

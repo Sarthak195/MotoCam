@@ -322,6 +322,10 @@ class _RidesListScreenState extends State<RidesListScreen> {
     });
 
     var result = RideLockChangeResult.failed;
+    // No file of the ride moves into private storage meanwhile.
+    final releaseMigration = context
+        .read<CameraProvider>()
+        .holdRecordingsMigration();
     final store = await RideIndexStore.shared();
     try {
       result = await ride.changeLockState(
@@ -339,6 +343,8 @@ class _RidesListScreenState extends State<RidesListScreen> {
       );
     } catch (_) {
       result = RideLockChangeResult.failed;
+    } finally {
+      releaseMigration();
     }
     final unlocked = result == RideLockChangeResult.saved;
     final telemetryPath = ride.telemetryPath;
@@ -429,10 +435,19 @@ class _RidesListScreenState extends State<RidesListScreen> {
     setState(() {
       _deletesInFlight.add(key);
     });
-    final result = await deleteRideFiles(
-      ride,
-      indexStore: await RideIndexStore.shared(),
-    );
+    // No file of the ride moves into private storage meanwhile.
+    final releaseMigration = context
+        .read<CameraProvider>()
+        .holdRecordingsMigration();
+    final RideDeletionResult result;
+    try {
+      result = await deleteRideFiles(
+        ride,
+        indexStore: await RideIndexStore.shared(),
+      );
+    } finally {
+      releaseMigration();
+    }
     final failed = result.failed;
     if (!mounted) {
       return;
@@ -963,12 +978,18 @@ class _RidesListScreenState extends State<RidesListScreen> {
           }
           _isOpeningRide = true;
           _openedRide = ride;
+          // No file of the ride moves into private storage while it is
+          // open.
+          final releaseMigration = context
+              .read<CameraProvider>()
+              .holdRecordingsMigration();
           try {
             await Navigator.of(context).push(
               MaterialPageRoute(builder: (_) => RidePlaybackScreen(ride: ride)),
             );
           } finally {
             _isOpeningRide = false;
+            releaseMigration();
           }
           // Playback stored the segments it checked; show the new state.
           // A segment still being hashed refreshes it again through
