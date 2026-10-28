@@ -317,6 +317,17 @@ void main() {
     expect(again.collisions, 1);
   });
 
+  test('a lone video already in private storage (a gallery copy) is never '
+      'offered for deletion', () async {
+    final copy = writePublic('REC123.mp4', 'exported clip');
+    File(
+      '${root.path}${_sep}REC123.mp4',
+    ).writeAsBytesSync(copy.readAsBytesSync());
+    final summary = await importer(_FakeSource(public)).run();
+    expect(summary.alreadyImported, 1);
+    expect(summary.importedDocuments, isEmpty);
+  });
+
   test('a JSON of the same size but other bytes is a collision', () async {
     final json = writeV012Ride('r5', <String>['f.mp4']);
     final bytes = json.readAsBytesSync().toList();
