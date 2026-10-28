@@ -117,7 +117,7 @@ The video check line (`describeVideoCheck`) appears only for a `verified` ride w
 
 Behaviour:
 
-- Tapping a card pushes `RidePlaybackScreen(ride: ride)` with the sample-less ride. An `_isOpeningRide` flag ignores further taps until the route is popped. The list is not reloaded on return; only that ride's video check state is re-read from the index (`_refreshVideoCheck`, a few stats, no hashing).
+- Tapping a card pushes `RidePlaybackScreen(ride: ride)` with the sample-less ride. An `_isOpeningRide` flag ignores further taps until the route is popped. The list is not reloaded on return; only that ride's video check state is re-read from the index (`_refreshVideoCheck`, a few stats, no hashing). The screen also listens to the `RideIndexStore` and re-reads the state of the ride last opened on every index update, so a segment that was still being hashed when playback closed shows once its result is stored; a refresh that finishes after a newer one is dropped.
 - Pull to refresh reloads everything (the list is replaced by the spinner while it runs). It is only available when the list is non-empty.
 - Unlock and delete are described under [Ride actions](#ride-actions-and-their-effect-on-disk). The screen has no lock, export, share or search action.
 
@@ -128,7 +128,7 @@ Behaviour:
 1. Records whether the app is in the foreground and registers the lifecycle observer.
 2. `_loadPlaybackPreferences()` (not awaited): reads the route-map panel preference and the online-map consent.
 3. `_start()` (not awaited), which runs in order:
-   1. For a sample-less ride, `RideRecord.loadSamples` in `Isolate.run` (on the UI isolate if that fails) re-reads the ride with its samples; the result replaces the screen's `_ride`. A ride that cannot be re-read plays without telemetry. The spinner shows meanwhile.
+   1. For a sample-less ride, `RideRecord.loadSamples` in `Isolate.run` (on the UI isolate if that fails) re-reads the ride with its samples; the result replaces the screen's `_ride`. A ride that cannot be re-read (the result is still sample-less) plays without telemetry from the saved summary, and the load-time notice adds "The ride file could not be read again: showing the saved summary without telemetry, and its videos were not checked." The segment check is then skipped, because the recorded hashes no longer come from a file on disk, and 'Check videos again' shows the same message instead of hashing. The spinner shows meanwhile.
    2. Computes the ride's maximum sample speed for the speed graph.
    3. `_showInitialIntegrityWarning()`: shows the load-time notices after the next frame, and marks segments that have no recorded hash (`missing-segment-hash` issues are known before any hashing).
    4. `_initializePlayback()`: builds the playlist and loads the first segment ([Playback engine](#playback-engine)).
@@ -150,7 +150,7 @@ The segment check (`_verifySegmentsAsync`) uses `SegmentVerifier` ([segment_veri
 
 - **Order** (`orderSegmentsForCheck`): the segment about to play (the active playlist entry) first, then the others in timeline order, then any other segment with a recorded hash. Segments without a recorded hash (already flagged at load) and missing files are skipped.
 - **One segment at a time.** Each segment is hashed with its own `Isolate.run` call (on the UI isolate if that fails). A `SegmentCheckToken` is checked before each segment; `dispose` and 'Check videos again' cancel it, so the work stops after the segment in flight, whose result is still stored.
-- **Stored results.** Before hashing, the verifier stats the segment; a result in the [ride index](data-formats.md#ride-index-cache) with the same normalised path, size, modification time, change time and expected hash is reused, so re-opening an unchanged ride (also after an app restart) hashes nothing. Every new hash is written to the index by `RideIndexStore`. Results are never carried across paths.
+- **Stored results.** Before hashing, the verifier stats the segment; a result in the [ride index](data-formats.md#ride-index-cache) with the same normalised path, size, modification time, change time and expected hash is reused, so re-opening an unchanged ride (also after an app restart) hashes nothing. A change that keeps the size and both times is therefore not seen until 'Check videos again'. Every new hash is written to the index by `RideIndexStore`. Results are never carried across paths.
 - **Failures.** A mismatch or an unreadable file adds a `segment-hash-mismatch` or `unreadable-segment-file` issue; the segment is painted purple on the seekbar as soon as it is found. At the end the notice below is shown if there is something new to say.
 - **'Check videos again'.** An app bar action (shown when the ride has recorded hashes; a small spinner while a check runs, disabled while the first segment loads). It cancels the running check, resets the purple marks to the load-time ones, shows "Checking the videos again...", hashes every segment while ignoring stored results, and then always reports: the integrity notice, or "Videos checked: all N segment(s) match the recording." A ride without recorded hashes says "This ride has no recorded video hashes to check."
 
