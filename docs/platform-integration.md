@@ -54,7 +54,7 @@ Platform gating on the Dart side:
 
 ## Method-channel reference
 
-All channel names are identical on both sides, and every Dart method name and argument key has a matching Kotlin case. Kotlin also handles two methods that Dart never calls (`pip.isPipSupported` and `media.scanMediaFile`). Unless a row says otherwise, a Kotlin handler that throws is converted by the Flutter embedding into a `PlatformException` with code `error`. Methods marked "N→D" are invoked by native code and handled in Dart.
+All channel names are identical on both sides, and every Dart method name and argument key has a matching Kotlin case. Unless a row says otherwise, a Kotlin handler that throws is converted by the Flutter embedding into a `PlatformException` with code `error`. Methods marked "N→D" are invoked by native code and handled in Dart.
 
 ### com.example.motocam/background_recording
 
@@ -88,7 +88,6 @@ Dart: `PipService` (static `enterPipMode`; instance `initialize`, `pipModeStream
 
 | Method | Dir | Arguments | Return | Errors | Dart caller | Kotlin handler behaviour | iOS |
 |---|---|---|---|---|---|---|---|
-| `isPipSupported` | D→N | none | `bool`: `SDK_INT >= 26` and `PackageManager.FEATURE_PICTURE_IN_PICTURE` is present | — | None; Dart has no wrapper for it | Returns `isPipSupported()` | — |
 | `enterPipMode` | D→N | none | `bool`: the result of `enterPictureInPictureMode`; `false` when PiP is not supported or the call throws | Dart: any exception → `false` | `RecordingScreen._handleBackPressWhileRecording` (system back and the MINIMISE button while recording) | If `isPipSupported()`, builds `PictureInPictureParams` with aspect ratio 9:16 and calls `enterPictureInPictureMode` inside try/catch | `MissingPluginException` → `false` |
 | `onPipModeChanged` | N→D | `bool` | Dart handler returns `null` | — | Handler registered by `PipService.initialize` on every platform; sets `isInPipMode` (`arguments == true`) and adds to `pipModeStream` | Invoked from `onPictureInPictureModeChanged` | Handler registered but never called |
 
@@ -99,7 +98,6 @@ Dart: `CameraProvider.platform`, used by `availableStorageBytes` and `_drainGall
 | Method | Dir | Arguments | Return | Errors | Dart caller | Kotlin handler behaviour | iOS |
 |---|---|---|---|---|---|---|---|
 | `getAvailableStorageBytes` | D→N | `path` (String, the recordings directory) | Long: free bytes on that volume | `STORAGE_QUERY_FAILED` (exception message). Dart catches everything and returns `null` | `CameraProvider.availableStorageBytes`, from the free-space check before START and at each segment roll | `StatFs(path).availableBytes`; uses `filesDir` when `path` is null or blank | `MissingPluginException` → `null`, so the check never blocks |
-| `scanMediaFile` | D→N | `path` (String) | `true`, sent from the scanner's completion callback | `INVALID_ARGS` "Path cannot be null" | None; Dart does not scan recordings | `MediaScannerConnection.scanFile(this, [path], null)` | — |
 | `exportVideoToGallery` | D→N | `sourcePath`, `displayName`, `relativePath` (Strings) | String: MediaStore item URI (API 29+) or absolute file path (API 24-28). Dart discards it | `INVALID_ARGS` (missing or blank `sourcePath`/`displayName`), `PERMISSION_DENIED` (API 24-28 without `WRITE_EXTERNAL_STORAGE`), `SOURCE_NOT_FOUND`, `EXPORT_FAILED` (exception message) | `_drainGalleryExportQueue`, one awaited call per queued locked segment, only when gallery export is on | Checks the permission on the calling thread, then copies on a new `Thread` and replies via `runOnUiThread`. See [Media scanning and gallery export](#media-scanning-and-gallery-export) | Never called |
 
 Dart always sends `relativePath` `Movies/MotoCam/Recordings`. Kotlin uses `Movies/MotoCam/Videos` only when the argument is absent. Both native branches honour the argument.

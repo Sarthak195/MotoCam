@@ -120,7 +120,7 @@ Notes:
 | `CameraProvider.platform` | `media` | Gallery export runs only on Android; a failed free-space query returns `null` | `getAvailableStorageBytes`, `exportVideoToGallery` | none |
 | `AppPermissionService` | none (uses `permission_handler`) | Android-only extras: notifications, legacy storage (gallery export on, Android 9 and lower), the battery-exemption status | n/a | n/a |
 
-Every Kotlin handler lives in `MainActivity.configureFlutterEngine`. The Kotlin side also answers `isPipSupported` on `pip` and `scanMediaFile` on `media`, which no Dart code calls. Channel contracts, manifest permissions, the foreground service and the iOS project state are covered in [platform-integration.md](platform-integration.md).
+Every Kotlin handler lives in `MainActivity.configureFlutterEngine`. Channel contracts, manifest permissions, the foreground service and the iOS project state are covered in [platform-integration.md](platform-integration.md).
 
 ## App startup sequence
 

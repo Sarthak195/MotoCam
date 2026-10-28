@@ -116,7 +116,7 @@ The negotiated preset and FPS never overwrite the saved settings. When they diff
 
 ## Recording state machine
 
-`RecordingState` has four values. `paused` is declared but never assigned.
+`RecordingState` has three values: `idle`, `recording` and `stopped`.
 
 ```mermaid
 stateDiagram-v2

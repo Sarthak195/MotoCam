@@ -304,9 +304,6 @@ class MainActivity: FlutterActivity() {
         pipMethodChannel
             ?.setMethodCallHandler { call, result ->
                 when (call.method) {
-                    "isPipSupported" -> {
-                        result.success(isPipSupported())
-                    }
                     "enterPipMode" -> {
                         if (isPipSupported()) {
                             val params = PictureInPictureParams.Builder()
@@ -341,20 +338,6 @@ class MainActivity: FlutterActivity() {
                             result.success(android.os.StatFs(target).availableBytes)
                         } catch (e: Exception) {
                             result.error("STORAGE_QUERY_FAILED", e.message, null)
-                        }
-                    }
-                    "scanMediaFile" -> {
-                        val path = call.argument<String>("path")
-                        if (path != null) {
-                            MediaScannerConnection.scanFile(
-                                this,
-                                arrayOf(path),
-                                null
-                            ) { _, _ ->
-                                result.success(true)
-                            }
-                        } else {
-                            result.error("INVALID_ARGS", "Path cannot be null", null)
                         }
                     }
                     "exportVideoToGallery" -> {

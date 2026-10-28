@@ -24,9 +24,6 @@ enum RecordingState {
   /// [CameraProvider.lastRecordingError]).
   recording,
 
-  /// Not used: the provider never sets this state.
-  paused,
-
   /// [CameraProvider.stopRecording] ended the session.
   stopped,
 }
