@@ -295,6 +295,7 @@ The gear icon opens [recording_settings_sheet.dart](../lib/features/recording/wi
 | Video bitrate | 8 Mbps | 4, 8, 12, 16 Mbps. On Android: "No effect on this device: the Android camera plugin records at its own bitrate for the chosen resolution." |
 | Segment length | 5 min | 5 s to 10 min |
 | Loop buffer size | 24 segments | 6, 12, 18, 24, 36, 48 (unlocked segments kept per ride) |
+| Storage budget for all rides | Off | Off, 4, 8, 16, 32, 64 GB ("When recordings exceed it, the oldest unlocked rides are deleted while you record. Locked rides are never deleted."). Takes effect at the next START |
 | Speed UI refresh | 100 ms | 100, 200, 300, 500 ms (throttles GPS- and accelerometer-driven UI updates) |
 | Incident sensitivity | Medium | Low (fewer auto-locks), Medium, High (more auto-locks) |
 | Record audio | on | on/off ("Disable for lower CPU and storage usage") |
@@ -343,3 +344,5 @@ Based on the platform checks in the code today. In the iOS column, "Yes" means t
 | Stall recovery on resume | Yes | Yes (Dart lifecycle logic) |
 | Gallery export | Yes (opt-in) | No (the switch is hidden) |
 | Rides list, delete, playback, route map, integrity checks | Yes | Yes (Dart only) |
+| Storage budget | Yes | Yes (Dart only) |
+| Import rides from an older version | Yes (Storage Access Framework) | No (the menu is not shown) |

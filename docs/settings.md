@@ -117,7 +117,7 @@ sequenceDiagram
     participant Camera as CameraProvider
     Sheet->>Screen: pop(RecordingSettingsFormResult)
     Screen->>Settings: preset match? updateRecordingQualityProfile : resolution, FPS, bitrate setters
-    Screen->>Settings: audio, speed refresh, camera name, segment, loop, sensitivity, gallery export, keep-screen-on setters
+    Screen->>Settings: audio, speed refresh, camera name, segment, loop, sensitivity, gallery export, keep-screen-on, storage budget setters
     opt recording
         Screen->>Screen: setKeepScreenOn(keep-screen-on)
     end
