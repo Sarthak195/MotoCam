@@ -129,10 +129,11 @@ class LegacyImportSummary {
   final int remaining;
 
   /// Documents with a verified copy in private storage: every file of a
-  /// ride or lone video imported in this run, and every file of a ride
-  /// whose files were all there already. The only ones the rider may delete
-  /// afterwards. A lone video that was already there (most likely a
-  /// gallery copy exported to the same folder) is not included.
+  /// ride imported in this run, and every file of a ride whose files were
+  /// all there already. The only ones the rider may delete afterwards. A
+  /// lone video (no ride JSON claims it) is never included, whether it was
+  /// imported or already there: it may be a gallery copy exported to the
+  /// same folder, or a video the rider put there.
   final List<LegacyRideDocument> importedDocuments;
 
   /// Rides left out because a different file with the same name exists.
@@ -451,7 +452,13 @@ class LegacyRideImporter {
       switch (result) {
         case _UnitResult.imported:
           imported++;
-          verified.addAll(unit.documents);
+          // A lone video (no ride JSON claims it) may be a gallery copy this
+          // build exported to the same folder, kept after its ride was
+          // deleted, or a video the rider put there: imported, but never
+          // offered for deletion.
+          if (unit.json != null) {
+            verified.addAll(unit.documents);
+          }
         case _UnitResult.alreadyThere:
           alreadyThere++;
           // A lone video already in private storage is most likely a gallery

@@ -204,11 +204,11 @@ void main() {
       File('${root.path}${_sep}ride_r1.telemetry.json').readAsBytesSync(),
       json.readAsBytesSync(),
     );
+    // A lone video is imported but never offered for deletion.
     expect(summary.importedDocuments.map((d) => d.name).toSet(), <String>{
       'a.mp4',
       'b.mp4',
       'ride_r1.telemetry.json',
-      'lone.mp4',
     });
     // Sources are never touched and staging is empty.
     expect(public.listSync(), hasLength(5));
@@ -315,6 +315,23 @@ void main() {
     expect(again.imported, 0);
     expect(again.alreadyImported, 1);
     expect(again.collisions, 1);
+  });
+
+  test('a kept gallery copy whose ride was deleted is imported but never '
+      'offered for deletion (F016)', () async {
+    // No private twin: the ride and its link are gone, the copy was kept.
+    writePublic('REC456.mp4', 'kept gallery copy');
+    final source = _FakeSource(public);
+    final summary = await importer(source).run();
+    expect(summary.outcome, LegacyImportOutcome.completed);
+    expect(summary.imported, 1);
+    expect(rootNames(), <String>['REC456.mp4']);
+    expect(summary.importedDocuments, isEmpty);
+    expect(
+      await deleteImportedOriginals(source, summary.importedDocuments),
+      isEmpty,
+    );
+    expect(source.deleted, isEmpty);
   });
 
   test('a lone video already in private storage (a gallery copy) is never '
