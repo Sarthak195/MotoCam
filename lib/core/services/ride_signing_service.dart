@@ -124,8 +124,8 @@ class RideSigningService {
 }
 
 /// The rides this install wrote signed, kept in SharedPreferences under
-/// [prefsKey] as `{"keyFingerprint": <SHA-256 hex of the key DER>,
-/// "rideSessionIds": [...]}`.
+/// [prefsKey] as a JSON object: `keyFingerprint` (the SHA-256 hex of the
+/// key's DER) and `rideSessionIds` (a list of strings).
 ///
 /// It is consulted only for this phone's current key: a list stored for
 /// another key reads as empty and is replaced by the next [add]. Use it on

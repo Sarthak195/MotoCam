@@ -34,7 +34,8 @@ void main() {
             'publicKey': phone.publicKeyBase64,
           };
         }
-        return phone.sign(call.arguments['payloadHash'] as String).toJson();
+        final arguments = call.arguments as Map<Object?, Object?>;
+        return phone.sign(arguments['payloadHash'] as String).toJson();
       });
       final service = RideSigningService();
 
