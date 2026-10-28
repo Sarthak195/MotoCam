@@ -122,6 +122,18 @@ class RideIntegritySegment {
   final bool isMissing;
 }
 
+/// Computes the SHA-256 of the segment file at [path], whose envelope
+/// records [expectedHash], or returns `null` when it cannot be read.
+///
+/// [checkRideIntegrity] compares the result with [expectedHash]; a caller
+/// may answer from a cache of earlier results for the same file content.
+typedef SegmentFileHasher =
+    Future<String?> Function(String path, String expectedHash);
+
+/// The default [SegmentFileHasher]: hashes the file on this isolate.
+Future<String?> hashSegmentFile(String path, String expectedHash) =>
+    integrity_utils.hashFileSha256(path);
+
 /// Returns the envelope format version of [envelope]: the integer value of
 /// `envelopeVersion`, or 1 (legacy) when the field is absent or not numeric.
 int integrityEnvelopeVersionOf(Map<dynamic, dynamic> envelope) {
@@ -206,13 +218,15 @@ void resealIntegrityEnvelope(Map<String, dynamic> rideJson) {
 /// whose [schemaVersion] makes it mandatory, is reported as modified. A
 /// segment that exists but has no hash is an issue; a segment whose file is
 /// missing is not (readers report it as missing footage). Segment files are
-/// hashed only when [verifySegments] is `true`.
+/// hashed only when [verifySegments] is `true`, with [hashSegment]
+/// (default [hashSegmentFile]).
 Future<RideIntegrityReport> checkRideIntegrity({
   required Map<String, dynamic> json,
   required int schemaVersion,
   required bool sessionComplete,
   required List<RideIntegritySegment> segments,
   bool verifySegments = false,
+  SegmentFileHasher hashSegment = hashSegmentFile,
 }) async {
   final rawIntegrity = json['integrity'];
   if (rawIntegrity == null) {
@@ -284,7 +298,8 @@ Future<RideIntegrityReport> checkRideIntegrity({
       continue;
     }
 
-    final actualHash = await integrity_utils.hashFileSha256(segmentPath);
+    final expectedHash = expectedSegmentHashes[hashKey]!;
+    final actualHash = await hashSegment(segmentPath, expectedHash);
     if (actualHash == null) {
       if (await File(segmentPath).exists()) {
         issues.add('unreadable-segment-file:$segmentPath');
@@ -292,7 +307,7 @@ Future<RideIntegrityReport> checkRideIntegrity({
       continue;
     }
 
-    if (actualHash != expectedSegmentHashes[hashKey]) {
+    if (actualHash != expectedHash) {
       issues.add('segment-hash-mismatch:$segmentPath');
     }
   }

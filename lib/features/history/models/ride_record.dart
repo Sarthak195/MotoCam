@@ -301,9 +301,12 @@ class RideRecord {
   /// is returned with no telemetry, [RideIntegrityStatus.unknown] and
   /// [telemetryPath] `null` (so a sibling JSON that describes other
   /// segments is not listed a second time in place of this video).
+  ///
+  /// [loadSamples] is passed on to [fromTelemetryFile].
   static Future<RideRecord> fromVideoFile(
     File videoFile, {
     bool verifySegments = false,
+    bool loadSamples = true,
   }) async {
     final telemetryFile = File(
       ride_codec.legacyTelemetryPathForVideo(videoFile.path),
@@ -312,6 +315,7 @@ class RideRecord {
       final ride = await fromTelemetryFile(
         telemetryFile,
         verifySegments: verifySegments,
+        loadSamples: loadSamples,
       );
       final videoKey = path_utils.normalizePath(videoFile.path);
       if (ride != null &&
@@ -457,7 +461,14 @@ class RideRecord {
   /// quarantined. For a verified ride the existing segment hashes are kept
   /// and only the payload hash is recomputed; a legacy ride without an
   /// envelope is updated without creating one, so it stays unverified.
-  Future<bool> setLockState(bool locked) async {
+  ///
+  /// Segment files are hashed with [hashSegment]; Ride History passes one
+  /// that reuses still-valid results from the ride index
+  /// (`SegmentVerifier.hashFor`) and hashes the rest off the UI isolate.
+  Future<bool> setLockState(
+    bool locked, {
+    ride_codec.SegmentFileHasher hashSegment = ride_codec.hashSegmentFile,
+  }) async {
     if (integrity.status == RideIntegrityStatus.modified ||
         hasQuarantinedSegments) {
       return false;
@@ -492,6 +503,7 @@ class RideRecord {
           json: json,
           segments: segments,
           verifySegments: true,
+          hashSegment: hashSegment,
         );
         if (report.status == RideIntegrityStatus.modified) {
           return false;

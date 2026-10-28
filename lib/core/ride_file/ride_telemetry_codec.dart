@@ -760,11 +760,13 @@ List<String> decodeLockedSegmentPaths(
 }
 
 /// Checks the envelope of [json] for the trusted [segments] and then
-/// applies the quarantine rule ([applyQuarantineToIntegrity]).
+/// applies the quarantine rule ([applyQuarantineToIntegrity]). Segment
+/// files are hashed with [hashSegment] when [verifySegments] is `true`.
 Future<RideIntegrityReport> checkRideFileIntegrity({
   required Map<String, dynamic> json,
   required ResolvedRideSegments segments,
   bool verifySegments = false,
+  SegmentFileHasher hashSegment = hashSegmentFile,
 }) async {
   return applyQuarantineToIntegrity(
     await checkRideIntegrity(
@@ -777,6 +779,7 @@ Future<RideIntegrityReport> checkRideFileIntegrity({
       ),
       segments: segments.integritySegments,
       verifySegments: verifySegments,
+      hashSegment: hashSegment,
     ),
     segments.quarantinedSegmentPaths,
   );
