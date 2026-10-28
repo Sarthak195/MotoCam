@@ -46,9 +46,17 @@ app.*.map.json
 /android/.gradle/
 /ios/Pods/
 
-# Android signing material
-/android/key.properties
-/android/app/*.jks
-/android/app/*.keystore
-/android/*.jks
-/android/*.keystore
+# Android signing material (matched anywhere in the tree)
+key.properties
+*.jks
+*.keystore
+*.p12
+
+# Gradle output and Kotlin daemon state under android/
+/android/build/
+/android/.kotlin/
+
+# Third-party SDK credential/configuration blobs (e.g. Mappls *.a.conf/*.a.olf)
+*.a.conf
+*.a.olf
+/android/app/src/main/assets/mappls-conf.txt
