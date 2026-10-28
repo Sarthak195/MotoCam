@@ -123,9 +123,19 @@ class RideSigningService {
   }
 }
 
+/// What [SignedRideRegistry] holds for one key: the registered
+/// `rideSessionId`s and the segment file names (no directory) of those
+/// rides.
+typedef SignedRideRegistrations = ({
+  Set<String> rideSessionIds,
+  Set<String> segmentFileNames,
+});
+
 /// The rides this install wrote signed, kept in SharedPreferences under
 /// [prefsKey] as a JSON object: `keyFingerprint` (the SHA-256 hex of the
-/// key's DER) and `rideSessionIds` (a list of strings).
+/// key's DER), `rideSessionIds` (a list of strings) and, optional (older
+/// values lack it), `segmentFileNames` (an object from `rideSessionId` to
+/// the list of that ride's segment file names).
 ///
 /// It is consulted only for this phone's current key: a list stored for
 /// another key reads as empty and is replaced by the next [add]. Use it on
@@ -144,33 +154,68 @@ class SignedRideRegistry {
 
   /// The `rideSessionId`s registered for [publicKey] (base64 DER), or an
   /// empty set when the registry belongs to another key or cannot be read.
-  Future<Set<String>> idsFor(String publicKey) async {
+  Future<Set<String>> idsFor(String publicKey) async =>
+      (await registrationsFor(publicKey)).rideSessionIds;
+
+  /// Everything registered for [publicKey] (base64 DER): empty when the
+  /// registry belongs to another key or cannot be read.
+  Future<SignedRideRegistrations> registrationsFor(String publicKey) async {
+    final empty = (rideSessionIds: <String>{}, segmentFileNames: <String>{});
     try {
       await _queue;
       final stored = _read(await SharedPreferences.getInstance());
       final fingerprint = rideSigningKeyFingerprintOf(publicKey);
       if (stored == null || fingerprint != stored.fingerprint) {
-        return <String>{};
+        return empty;
       }
-      return stored.ids;
+      return (
+        rideSessionIds: stored.ids,
+        segmentFileNames: <String>{
+          for (final names in stored.segments.values) ...names,
+        },
+      );
     } catch (_) {
-      return <String>{};
+      return empty;
     }
   }
 
-  /// Registers [rideSessionId] as written signed with [publicKey]. Call it
+  /// Registers [rideSessionId], with its [segmentFileNames] (file names
+  /// without a directory), as written signed with [publicKey]. Call it
   /// only after the signed file was written.
-  Future<void> add(String publicKey, String rideSessionId) => _update((ids) {
-    ids.add(rideSessionId);
-  }, publicKey: publicKey);
+  Future<void> add(
+    String publicKey,
+    String rideSessionId, {
+    Iterable<String> segmentFileNames = const <String>[],
+  }) {
+    final names = segmentFileNames.toList();
+    return _update((ids, segments) {
+      ids.add(rideSessionId);
+      if (names.isEmpty) {
+        segments.remove(rideSessionId);
+      } else {
+        segments[rideSessionId] = names;
+      }
+    }, publicKey: publicKey);
+  }
 
-  /// Removes [rideSessionId] (the ride was deleted in the app).
-  Future<void> remove(String rideSessionId) => _update((ids) {
-    ids.remove(rideSessionId);
-  });
+  /// Removes [rideSessionId] and its segment file names (the ride was
+  /// deleted in the app). With a [telemetryFileName] (the deleted file's
+  /// name, no directory) nothing is removed unless it is the ride's own
+  /// name (`rideTelemetryFileNameFor`), so deleting a copy or a decoy that
+  /// carries a registered id leaves the real ride registered.
+  Future<void> remove(String rideSessionId, {String? telemetryFileName}) {
+    if (telemetryFileName != null &&
+        telemetryFileName != rideTelemetryFileNameFor(rideSessionId)) {
+      return Future<void>.value();
+    }
+    return _update((ids, segments) {
+      ids.remove(rideSessionId);
+      segments.remove(rideSessionId);
+    });
+  }
 
   Future<void> _update(
-    void Function(Set<String> ids) change, {
+    void Function(Set<String> ids, Map<String, List<String>> segments) change, {
     String? publicKey,
   }) {
     final next = _queue.then((_) async {
@@ -183,15 +228,17 @@ class SignedRideRegistry {
         if (fingerprint == null) {
           return;
         }
-        final ids = stored != null && stored.fingerprint == fingerprint
-            ? stored.ids
-            : <String>{};
-        change(ids);
+        final sameKey = stored != null && stored.fingerprint == fingerprint;
+        final ids = sameKey ? stored.ids : <String>{};
+        final segments = sameKey ? stored.segments : <String, List<String>>{};
+        change(ids, segments);
+        segments.removeWhere((id, _) => !ids.contains(id));
         await prefs.setString(
           prefsKey,
           jsonEncode(<String, Object?>{
             'keyFingerprint': fingerprint,
             'rideSessionIds': ids.toList()..sort(),
+            if (segments.isNotEmpty) 'segmentFileNames': segments,
           }),
         );
       } catch (error) {
@@ -202,9 +249,12 @@ class SignedRideRegistry {
     return next;
   }
 
-  static ({String fingerprint, Set<String> ids})? _read(
-    SharedPreferences prefs,
-  ) {
+  static ({
+    String fingerprint,
+    Set<String> ids,
+    Map<String, List<String>> segments,
+  })?
+  _read(SharedPreferences prefs) {
     final raw = prefs.getString(prefsKey);
     if (raw == null) {
       return null;
@@ -219,7 +269,22 @@ class SignedRideRegistry {
       if (fingerprint is! String || ids is! List) {
         return null;
       }
-      return (fingerprint: fingerprint, ids: ids.whereType<String>().toSet());
+      final rawSegments = json['segmentFileNames'];
+      final segments = <String, List<String>>{};
+      if (rawSegments is Map) {
+        for (final entry in rawSegments.entries) {
+          final id = entry.key;
+          final names = entry.value;
+          if (id is String && names is List) {
+            segments[id] = names.whereType<String>().toList();
+          }
+        }
+      }
+      return (
+        fingerprint: fingerprint,
+        ids: ids.whereType<String>().toSet(),
+        segments: segments,
+      );
     } catch (_) {
       return null;
     }
@@ -228,7 +293,8 @@ class SignedRideRegistry {
 
 /// Builds the [RideSignerContext] for this session on the UI isolate: this
 /// phone's key ([RideSigningService.sessionSigningKey]) and, only when it is
-/// known, the rides registered for it.
+/// known, the rides registered for it (their ids, telemetry file names and
+/// segment file names).
 Future<RideSignerContext> loadRideSignerContext({
   RideSigningService? service,
   SignedRideRegistry? registry,
@@ -238,10 +304,14 @@ Future<RideSignerContext> loadRideSignerContext({
   if (key == null) {
     return const RideSignerContext(thisDevicePublicKey: null);
   }
+  final registered = await (registry ?? SignedRideRegistry.instance)
+      .registrationsFor(key.publicKey);
   return RideSignerContext(
     thisDevicePublicKey: key.publicKey,
-    signedRideIds: await (registry ?? SignedRideRegistry.instance).idsFor(
-      key.publicKey,
-    ),
+    signedRideIds: registered.rideSessionIds,
+    signedTelemetryFileNames: <String>{
+      for (final id in registered.rideSessionIds) rideTelemetryFileNameFor(id),
+    },
+    signedSegmentFileNames: registered.segmentFileNames,
   );
 }

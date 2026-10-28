@@ -152,12 +152,18 @@ enum RideSignedBy {
 /// install wrote signed. Built on the UI isolate (platform channel and
 /// SharedPreferences) and passed into the history isolate and playback;
 /// all fields cross isolate boundaries.
+///
+/// A ride is matched to the registry by its `rideSessionId` and also by
+/// its telemetry file name and segment file names, so editing the id in
+/// the JSON does not take a ride out of the check.
 @immutable
 class RideSignerContext {
   /// Creates a signer context.
   const RideSignerContext({
     required this.thisDevicePublicKey,
     this.signedRideIds = const <String>{},
+    this.signedTelemetryFileNames = const <String>{},
+    this.signedSegmentFileNames = const <String>{},
   });
 
   /// Base64 SubjectPublicKeyInfo DER of this phone's signing key, or `null`
@@ -167,6 +173,14 @@ class RideSignerContext {
   /// `rideSessionId`s this install wrote signed with
   /// [thisDevicePublicKey]; empty when that key is unknown.
   final Set<String> signedRideIds;
+
+  /// Telemetry file names (`ride_<id>.telemetry.json`, no directory) of
+  /// the rides in [signedRideIds]; empty when that key is unknown.
+  final Set<String> signedTelemetryFileNames;
+
+  /// Segment file names (no directory) of the rides this install wrote
+  /// signed with [thisDevicePublicKey]; empty when that key is unknown.
+  final Set<String> signedSegmentFileNames;
 }
 
 /// The keyId of a public key: the first 16 lowercase hex characters of the
@@ -340,13 +354,20 @@ bool isValidRideSignature(RideSignatureData signature, String payloadHash) =>
 
 /// Decides who signed a ride from its [facts] (`null` when the file has no
 /// signature) and [context], and whether the ride's signature was removed:
-/// `true` when [rideSessionId] is in the registry of this phone's current
-/// key but the file is unsigned or validly signed by a key known to differ.
-/// Never reports a removal while this phone's key is unknown.
+/// `true` when the ride is in the registry of this phone's current key but
+/// the file is unsigned or validly signed by a key known to differ. Never
+/// reports a removal while this phone's key is unknown.
+///
+/// A ride is in the registry when its [rideSessionId], its
+/// [telemetryFileName] or any of its [segmentFileNames] (file names
+/// without a directory) is registered. Pass [segmentFileNames] only for a
+/// ride read from a telemetry file.
 ({RideSignedBy signedBy, bool signatureRemoved}) resolveRideSigner({
   required RideSignatureFacts? facts,
   required String? rideSessionId,
   required RideSignerContext context,
+  String? telemetryFileName,
+  Iterable<String> segmentFileNames = const <String>[],
 }) {
   final deviceKey = context.thisDevicePublicKey;
   final RideSignedBy signedBy;
@@ -362,8 +383,11 @@ bool isValidRideSignature(RideSignatureData signature, String payloadHash) =>
 
   final registered =
       deviceKey != null &&
-      rideSessionId != null &&
-      context.signedRideIds.contains(rideSessionId);
+      ((rideSessionId != null &&
+              context.signedRideIds.contains(rideSessionId)) ||
+          (telemetryFileName != null &&
+              context.signedTelemetryFileNames.contains(telemetryFileName)) ||
+          segmentFileNames.any(context.signedSegmentFileNames.contains));
   final signatureRemoved =
       registered && (facts == null || signedBy == RideSignedBy.otherKey);
   return (signedBy: signedBy, signatureRemoved: signatureRemoved);

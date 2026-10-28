@@ -147,6 +147,68 @@ void main() {
       expect(stored['keyFingerprint'], hasLength(64));
     });
 
+    test('keeps segment file names per ride', () async {
+      final registry = SignedRideRegistry();
+      await registry.add(
+        phone.publicKeyBase64,
+        'ride-1',
+        segmentFileNames: const <String>['segment_1.mp4', 'segment_2.mp4'],
+      );
+      await registry.add(phone.publicKeyBase64, 'ride-2');
+      var registered = await registry.registrationsFor(phone.publicKeyBase64);
+      expect(registered.rideSessionIds, <String>{'ride-1', 'ride-2'});
+      expect(registered.segmentFileNames, <String>{
+        'segment_1.mp4',
+        'segment_2.mp4',
+      });
+      expect(
+        (await registry.registrationsFor(
+          other.publicKeyBase64,
+        )).segmentFileNames,
+        isEmpty,
+      );
+
+      // Deleting a file of another name that carries the id (a copy or a
+      // decoy) leaves the ride registered; its own name removes it.
+      await registry.remove(
+        'ride-1',
+        telemetryFileName: 'ride_copy.telemetry.json',
+      );
+      registered = await registry.registrationsFor(phone.publicKeyBase64);
+      expect(registered.rideSessionIds, contains('ride-1'));
+      await registry.remove(
+        'ride-1',
+        telemetryFileName: 'ride_ride-1.telemetry.json',
+      );
+      registered = await registry.registrationsFor(phone.publicKeyBase64);
+      expect(registered.rideSessionIds, <String>{'ride-2'});
+      expect(registered.segmentFileNames, isEmpty);
+    });
+
+    test('a value without segment file names still reads', () async {
+      final registry = SignedRideRegistry();
+      await registry.add(phone.publicKeyBase64, 'ride-1');
+      final prefs = await SharedPreferences.getInstance();
+      final stored =
+          jsonDecode(prefs.getString(SignedRideRegistry.prefsKey)!) as Map;
+      expect(stored.containsKey('segmentFileNames'), isFalse);
+      SharedPreferences.setMockInitialValues(<String, Object>{
+        SignedRideRegistry.prefsKey: jsonEncode(<String, Object?>{
+          'keyFingerprint': stored['keyFingerprint'],
+          'rideSessionIds': <String>['ride-1'],
+          'segmentFileNames': <String, Object?>{
+            'ride-1': <Object?>['segment_1.mp4', 7],
+            'ride-9': 'not a list',
+          },
+        }),
+      });
+      final registered = await SignedRideRegistry().registrationsFor(
+        phone.publicKeyBase64,
+      );
+      expect(registered.rideSessionIds, <String>{'ride-1'});
+      expect(registered.segmentFileNames, <String>{'segment_1.mp4'});
+    });
+
     test('a corrupt value reads as empty', () async {
       SharedPreferences.setMockInitialValues(<String, Object>{
         SignedRideRegistry.prefsKey: '{not json',
@@ -171,13 +233,21 @@ void main() {
         };
       });
       final registry = SignedRideRegistry();
-      await registry.add(phone.publicKeyBase64, 'ride-1');
+      await registry.add(
+        phone.publicKeyBase64,
+        'ride/1',
+        segmentFileNames: const <String>['segment_1.mp4'],
+      );
       final context = await loadRideSignerContext(
         service: RideSigningService(),
         registry: registry,
       );
       expect(context.thisDevicePublicKey, phone.publicKeyBase64);
-      expect(context.signedRideIds, <String>{'ride-1'});
+      expect(context.signedRideIds, <String>{'ride/1'});
+      expect(context.signedTelemetryFileNames, <String>{
+        'ride_ride_1.telemetry.json',
+      });
+      expect(context.signedSegmentFileNames, <String>{'segment_1.mp4'});
     });
 
     test('an unknown key gives no registry', () async {

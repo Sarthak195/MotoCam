@@ -832,6 +832,12 @@ void main() {
         expect(await registry.idsFor(phone.publicKeyBase64), {
           json['rideSessionId'],
         });
+        expect(
+          (await registry.registrationsFor(
+            phone.publicKeyBase64,
+          )).segmentFileNames,
+          {'signed_a.mp4'},
+        );
       },
     );
 

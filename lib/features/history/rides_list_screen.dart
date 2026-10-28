@@ -8,6 +8,7 @@ import 'package:provider/provider.dart';
 
 import '../../core/services/ride_signing_service.dart';
 import '../../core/utils/format_utils.dart';
+import '../../core/utils/path_utils.dart' as path_utils;
 import '../camera/providers/camera_provider.dart';
 import 'models/ride_history_loader.dart';
 import 'models/ride_index.dart';
@@ -379,7 +380,12 @@ class _RidesListScreenState extends State<RidesListScreen> {
         telemetryPath != null &&
         !await File(telemetryPath).exists()) {
       // The ride is gone, so it no longer counts as written signed here.
-      await SignedRideRegistry.instance.remove(rideSessionId);
+      // Only its own file name unregisters the id: deleting a copy that
+      // carries the id of another ride leaves that ride registered.
+      await SignedRideRegistry.instance.remove(
+        rideSessionId,
+        telemetryFileName: path_utils.fileNameFromPath(telemetryPath),
+      );
     }
     if (!mounted) {
       return;

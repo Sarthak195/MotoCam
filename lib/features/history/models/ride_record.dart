@@ -282,10 +282,17 @@ class RideRecord {
   /// install wrote it signed but it no longer is. A `null` [context] gives
   /// the report from the file alone.
   RideRecord withSignerContext(RideSignerContext? context) {
+    final path = telemetryPath;
     final report = ride_codec.applySignerContext(
       integrity,
       rideSessionId: rideSessionId,
       context: context,
+      telemetryFileName: path == null
+          ? null
+          : path_utils.fileNameFromPath(path),
+      segmentFileNames: path == null
+          ? const <String>[]
+          : segmentPaths.map(path_utils.fileNameFromPath),
     );
     if (identical(report, integrity)) {
       return this;
@@ -686,6 +693,10 @@ class RideRecord {
           report,
           rideSessionId: rideSessionId,
           context: integrity.signerContext,
+          telemetryFileName: path_utils.fileNameFromPath(telemetryFile.path),
+          segmentFileNames: segments.segmentPaths.map(
+            path_utils.fileNameFromPath,
+          ),
         ),
         quarantinedSegmentPaths: segments.quarantinedSegmentPaths,
         missingSegmentPaths: segments.missingSegmentPaths,

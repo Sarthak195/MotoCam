@@ -318,6 +318,63 @@ void main() {
       ),
     );
 
+    test('a registered file or segment name is matched without the id', () {
+      const context = RideSignerContext(
+        thisDevicePublicKey: 'key',
+        signedRideIds: <String>{'ride-1'},
+        signedTelemetryFileNames: <String>{'ride_ride-1.telemetry.json'},
+        signedSegmentFileNames: <String>{'segment_1.mp4'},
+      );
+      bool removed({
+        String? id,
+        String? telemetryFileName,
+        List<String> segments = const <String>[],
+        String? deviceKey = 'key',
+      }) => resolveRideSigner(
+        facts: null,
+        rideSessionId: id,
+        context: deviceKey == null
+            ? RideSignerContext(
+                thisDevicePublicKey: null,
+                signedRideIds: context.signedRideIds,
+                signedTelemetryFileNames: context.signedTelemetryFileNames,
+                signedSegmentFileNames: context.signedSegmentFileNames,
+              )
+            : context,
+        telemetryFileName: telemetryFileName,
+        segmentFileNames: segments,
+      ).signatureRemoved;
+
+      expect(removed(id: 'ride-1'), isTrue);
+      expect(
+        removed(id: 'edited', telemetryFileName: 'ride_ride-1.telemetry.json'),
+        isTrue,
+      );
+      expect(
+        removed(
+          telemetryFileName: 'ride_renamed.telemetry.json',
+          segments: const <String>['segment_0.mp4', 'segment_1.mp4'],
+        ),
+        isTrue,
+      );
+      expect(
+        removed(
+          id: 'ride-2',
+          telemetryFileName: 'ride_ride-2.telemetry.json',
+          segments: const <String>['segment_2.mp4'],
+        ),
+        isFalse,
+      );
+      expect(
+        removed(
+          id: 'ride-1',
+          telemetryFileName: 'ride_ride-1.telemetry.json',
+          deviceKey: null,
+        ),
+        isFalse,
+      );
+    });
+
     test('a ride signed by this phone is thisDevice', () async {
       final report = withContext(
         await check(signedRide(phone)),

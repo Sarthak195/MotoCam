@@ -7,6 +7,7 @@ import 'package:sensors_plus/sensors_plus.dart';
 import '../../../core/ride_file/ride_telemetry_codec.dart' as ride_codec;
 import '../../../core/services/ride_signing_service.dart';
 import '../../../core/utils/integrity_utils.dart' as integrity_utils;
+import '../../../core/utils/path_utils.dart' as path_utils;
 import '../models/telemetry_data.dart';
 import 'dart:async';
 import 'dart:io';
@@ -1180,7 +1181,11 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
     await _enqueueWrite(telemetryPath, sealed.json);
     final signature = sealed.signature;
     if (signature != null) {
-      await _signedRideRegistry.add(signature.publicKey, ride.sessionId);
+      await _signedRideRegistry.add(
+        signature.publicKey,
+        ride.sessionId,
+        segmentFileNames: files.segmentPaths.map(path_utils.fileNameFromPath),
+      );
     }
     for (final path in files.segmentPaths) {
       _segmentHashCache.remove(path);

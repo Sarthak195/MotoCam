@@ -1257,6 +1257,16 @@ Future<SealedRidePayload> sealAndSignRidePayload(
 /// The file content of a ride JSON map: compact `jsonEncode`.
 String encodeRideFileJson(Map<String, dynamic> json) => jsonEncode(json);
 
+/// The telemetry file name of a ride: `ride_<rideSessionId>.telemetry.json`
+/// with every character of the id outside `[a-zA-Z0-9_-]` replaced by `_`.
+String rideTelemetryFileNameFor(String rideSessionId) {
+  final safeSessionId = rideSessionId.replaceAll(
+    RegExp(r'[^a-zA-Z0-9_-]'),
+    '_',
+  );
+  return 'ride_$safeSessionId$rideTelemetryFileSuffix';
+}
+
 /// The telemetry file path of a ride: `ride_<rideSessionId>.telemetry.json`
 /// (every character outside `[a-zA-Z0-9_-]` replaced by `_`) in the parent
 /// directory of the first of [segmentPaths], else of [videoPath], else a
@@ -1273,11 +1283,7 @@ String rideTelemetryPathFor({
     directoryPath = File(videoPath).parent.path;
   }
 
-  final safeSessionId = rideSessionId.replaceAll(
-    RegExp(r'[^a-zA-Z0-9_-]'),
-    '_',
-  );
-  final fileName = 'ride_$safeSessionId$rideTelemetryFileSuffix';
+  final fileName = rideTelemetryFileNameFor(rideSessionId);
 
   if (directoryPath == null || directoryPath.isEmpty) {
     return fileName;

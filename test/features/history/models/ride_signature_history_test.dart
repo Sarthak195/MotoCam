@@ -36,9 +36,14 @@ void main() {
   RideSignerContext contextFor(
     TestSigningKey? key, {
     Set<String> ids = const <String>{},
+    Set<String> segmentFileNames = const <String>{},
   }) => RideSignerContext(
     thisDevicePublicKey: key?.publicKeyBase64,
     signedRideIds: key == null ? const <String>{} : ids,
+    signedTelemetryFileNames: key == null
+        ? const <String>{}
+        : <String>{for (final id in ids) rideTelemetryFileNameFor(id)},
+    signedSegmentFileNames: key == null ? const <String>{} : segmentFileNames,
   );
 
   /// Writes a one-segment ride `ride_<id>` signed by [signer] (version 2
@@ -225,6 +230,56 @@ void main() {
         unknown.rides.single.integrity.signedBy,
         RideSignedBy.unknownSigner,
       );
+    });
+
+    test('editing or removing the id does not escape the check', () async {
+      final file = await writeRide('mine', signer: phone);
+      final registered = contextFor(
+        phone,
+        ids: const <String>{'mine'},
+        segmentFileNames: const <String>{'seg_mine.mp4'},
+      );
+
+      // Strip the signature, change or drop the id, recompute version 2.
+      Future<void> strip(File target, String? newId) async {
+        final json = await readJson(target);
+        if (newId == null) {
+          json.remove('rideSessionId');
+        } else {
+          json['rideSessionId'] = newId;
+        }
+        final integrity = json['integrity'] as Map<String, dynamic>
+          ..remove('signature')
+          ..['envelopeVersion'] = 2;
+        integrity['payloadHash'] = computeRidePayloadHash(json);
+        await target.writeAsString(jsonEncode(json));
+      }
+
+      Future<RideRecord> loadOnly() async => (await loadRideHistoryIndexed(
+        listing(),
+        signerContext: registered,
+      )).rides.single;
+
+      await strip(file, 'not-mine');
+      var ride = await loadOnly();
+      expect(ride.integrity.status, RideIntegrityStatus.modified);
+      expect(ride.integrity.issues, <String>['signature-removed']);
+
+      await strip(file, null);
+      ride = await loadOnly();
+      expect(ride.integrity.issues, <String>['signature-removed']);
+
+      // Renamed as well: the segment file name still matches.
+      final renamed = await file.rename(
+        '${directory.path}${sep}ride_fresh.telemetry.json',
+      );
+      ride = await loadOnly();
+      expect(ride.telemetryPath, renamed.path);
+      expect(ride.integrity.issues, <String>['signature-removed']);
+
+      // Playback's full check keeps the binding.
+      final checked = await ride.verifySegmentIntegrity();
+      expect(checked.integrity.issues, <String>['signature-removed']);
     });
 
     test('playback re-read keeps the signer context', () async {

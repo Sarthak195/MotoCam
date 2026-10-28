@@ -465,12 +465,15 @@ RideIntegrityReport applyQuarantineToIntegrity(
 /// knows: [RideIntegrityReport.signedBy], and, for a ride this install
 /// wrote signed ([RideSignerContext.signedRideIds]) that is now unsigned or
 /// signed by a key known to differ, the status `modified` with the issue
-/// `signature-removed` (see [resolveRideSigner]). With no [context] the
-/// content report is returned.
+/// `signature-removed` (see [resolveRideSigner], which also matches the
+/// ride by [telemetryFileName] and [segmentFileNames]). With no [context]
+/// the content report is returned.
 RideIntegrityReport applySignerContext(
   RideIntegrityReport report, {
   required String? rideSessionId,
   required RideSignerContext? context,
+  String? telemetryFileName,
+  Iterable<String> segmentFileNames = const <String>[],
 }) {
   final content = report.contentReport;
   if (context == null) {
@@ -480,6 +483,8 @@ RideIntegrityReport applySignerContext(
     facts: content.signature,
     rideSessionId: rideSessionId,
     context: context,
+    telemetryFileName: telemetryFileName,
+    segmentFileNames: segmentFileNames,
   );
   final issues = signer.signatureRemoved
       ? List<String>.unmodifiable(<String>[
