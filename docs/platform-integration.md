@@ -84,7 +84,7 @@ Dart: `DeviceStatusService.getBatteryAndThermalStatus`. Kotlin: an unretained ch
 
 ### com.example.motocam/pip
 
-Dart: `PipService` (static `enterPipMode`; instance `initialize`, `pipModeStream`, `isInPipMode`, `dispose`). Kotlin: field `pipMethodChannel`, constant named `CHANNEL`.
+Dart: `PipService` (static `enterPipMode`; instance `initialize`, `pipModeStream`, `isInPipMode`). Kotlin: field `pipMethodChannel`, constant named `CHANNEL`.
 
 | Method | Dir | Arguments | Return | Errors | Dart caller | Kotlin handler behaviour | iOS |
 |---|---|---|---|---|---|---|---|

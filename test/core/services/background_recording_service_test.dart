@@ -173,10 +173,4 @@ void main() {
       expect(calls, contains('stopForegroundRecording'));
     });
   });
-
-  test('dispose can be called twice', () {
-    // Runs last: it closes the singleton's stream.
-    service.dispose();
-    expect(service.dispose, returnsNormally);
-  });
 }

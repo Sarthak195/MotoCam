@@ -22,7 +22,9 @@ const Color recordingStopButtonColor = Color(0xFFD32F2F);
 /// [recordingStopButtonColor].
 const Color recordingButtonLabelColor = Color(0xFFFFFFFF);
 
-/// WCAG 2.x contrast ratio between two opaque colours (1.0 to 21.0).
+/// WCAG 2.x contrast ratio between two opaque colours (1.0 to 21.0). Only
+/// tests use it, to check the button label colours.
+@visibleForTesting
 double contrastRatio(Color a, Color b) {
   final la = a.computeLuminance();
   final lb = b.computeLuminance();

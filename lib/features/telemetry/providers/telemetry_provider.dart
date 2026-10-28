@@ -137,6 +137,8 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
   TelemetryData get currentData => _currentData;
 
   /// Samples captured so far in the active ride (empty when no ride runs).
+  /// Only tests read it.
+  @visibleForTesting
   List<TelemetryData> get activeRideSamples =>
       List.unmodifiable(_activeRideSamples);
 
@@ -155,25 +157,19 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
   /// Kept after a stop like [rideDistanceKm].
   double get averageSpeedKmh => _averageSpeedKmh;
 
-  /// The configured incident trigger, in g (see [setIncidentDetectionConfig]).
-  double get incidentTriggerGForce => _incidentTriggerGForce;
-
-  /// The configured minimum gap between two detected incidents.
-  Duration get incidentDebounce => _incidentDebounce;
-
   /// When the most recent incident was detected, or `null` if none.
   DateTime? get lastIncidentDetectedAt => _lastIncidentDetectedAt;
 
-  /// Peak linear acceleration (g) of the most recent incident.
+  /// Peak linear acceleration (g) of the most recent incident. Only tests
+  /// read it.
+  @visibleForTesting
   double get lastIncidentGForce => _lastIncidentGForce;
 
   /// Number of incidents detected since the last [startRideSession] (or
   /// since launch). Detection also runs between rides, but only incidents
-  /// during a ride are saved.
+  /// during a ride are saved. Only tests read it.
+  @visibleForTesting
   int get incidentCount => _incidentCount;
-
-  /// The configured minimum interval between throttled UI notifications.
-  Duration get uiNotifyMinInterval => _uiNotifyMinInterval;
 
   /// Whether the GPS/accelerometer subscriptions are currently running.
   bool get isTracking => _isTrackingStarted;
@@ -187,11 +183,9 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
   /// accelerometer could be opened; incidents are then never detected.
   bool get isIncidentDetectionAvailable => _isIncidentDetectionAvailable;
 
-  /// Whether incident detection uses the raw accelerometer with a software
-  /// gravity filter because the device has no linear-acceleration sensor.
-  bool get isUsingAccelerometerFallback => _isUsingGravityFallback;
-
   /// Whether any fix in the active ride came from a mock location provider.
+  /// Only tests read it.
+  @visibleForTesting
   bool get mockLocationDetected => _mockLocationDetected;
 
   /// Whether a ride save ([stopRideSessionAndPersist] or
@@ -203,7 +197,8 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
   String? get lastPersistError => _lastPersistError;
 
   /// Whether one or more failed ride saves are waiting for
-  /// [retryPendingPersist].
+  /// [retryPendingPersist]. Only tests read it.
+  @visibleForTesting
   bool get hasPendingPersist => _pendingPersists.isNotEmpty;
 
   /// Sets how often throttled telemetry updates notify listeners
@@ -1744,12 +1739,6 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
     DateTime? timestamp,
   }) {
     _onRawAcceleration(x, y, z, at: timestamp);
-  }
-
-  /// Simulates the app lifecycle changing to [state].
-  @visibleForTesting
-  void handleLifecycleForTesting(AppLifecycleState state) {
-    didChangeAppLifecycleState(state);
   }
 }
 

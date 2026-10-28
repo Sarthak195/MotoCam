@@ -55,7 +55,7 @@ Resolved plugin versions (pubspec.lock): geolocator 14.1.2, geolocator_android 5
 
 `TelemetryProvider._startAccelerometerTracking` listens to `userAccelerometerEventStream(samplingPeriod: SensorInterval.gameInterval)`: linear acceleration with gravity removed, in m/s², requested every 20 ms (about 50 Hz). On Android the plugin backs this stream with `Sensor.TYPE_LINEAR_ACCELERATION`, and Android treats the sampling period only as a hint. Each event's own timestamp is used for incident timing. No gyroscope, magnetometer or orientation data is read. Resolved version: sensors_plus 7.1.1.
 
-**Raw-accelerometer fallback.** If the linear-acceleration stream fails with a `PlatformException` whose code is `NO_SENSOR` (Android: no such sensor) or `UNAVAILABLE` (iOS: device motion unavailable), `_startGravityFilteredAccelerometer` switches to `accelerometerEventStream` at the same 20 ms period, and `isUsingAccelerometerFallback` becomes `true`. The fallback removes gravity in software:
+**Raw-accelerometer fallback.** If the linear-acceleration stream fails with a `PlatformException` whose code is `NO_SENSOR` (Android: no such sensor) or `UNAVAILABLE` (iOS: device motion unavailable), `_startGravityFilteredAccelerometer` switches to `accelerometerEventStream` at the same 20 ms period (an internal flag; the UI does not show which source is used). The fallback removes gravity in software:
 
 1. The first sample only seeds the gravity estimate.
 2. For each later sample, `alpha = τ / (τ + dt)` with τ = 800 ms and `dt` the time since the previous event, clamped to 5–250 ms.
@@ -243,7 +243,7 @@ Limitations: Retry is offered only when the current stop's save fails. An earlie
 - `activeRideSamples` returns a new unmodifiable copy on every call; only tests use it.
 - Every checkpoint (at least every 30 s during a ride) and the final save convert all samples with `toJson` and JSON-encode the payload for writing on the UI isolate. Canonicalization and hashing run on background isolates, which receive a copy of the payload.
 - The segment-hash cache keeps one entry per hashed segment of the current ride. Entries are removed after the final save, and the cache is cleared at the next start unless a save is still running.
-- **Notification throttle**: `_notifyUiIfNeeded` (GPS fixes, accelerometer events) drops a notification if the previous one was less than `uiNotifyMinInterval` ago; there is no trailing notification. Default 100 ms. Sample capture, incidents, start, stop, cancel, the start and end of a save, location-service changes, sensor fallback changes, `clearHistory` and `setSpeedUiRefreshInterval` always notify. `setSpeedUiRefreshInterval` clamps to 100–1000 ms; the settings UI offers 100, 200, 300 and 500 ms ("Speed UI refresh", stored as `speed_refresh_ms`).
+- **Notification throttle**: `_notifyUiIfNeeded` (GPS fixes, accelerometer events) drops a notification if the previous one was less than the refresh interval ago; there is no trailing notification. Default 100 ms. Sample capture, incidents, start, stop, cancel, the start and end of a save, location-service changes, sensor fallback changes, `clearHistory` and `setSpeedUiRefreshInterval` always notify. `setSpeedUiRefreshInterval` clamps to 100–1000 ms; the settings UI offers 100, 200, 300 and 500 ms ("Speed UI refresh", stored as `speed_refresh_ms`).
 
 ## Device status (Android-only)
 

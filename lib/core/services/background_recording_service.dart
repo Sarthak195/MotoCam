@@ -55,7 +55,7 @@ class BackgroundRecordingService {
     _channel.setMethodCallHandler((call) async {
       switch (call.method) {
         case 'onStopRequested':
-          if (_eventsController.hasListener && !_eventsController.isClosed) {
+          if (_eventsController.hasListener) {
             _eventsController.add(BackgroundRecordingEvent.stopRequested);
           } else {
             // Nobody can run the stop flow, so do not leave the foreground
@@ -199,13 +199,5 @@ class BackgroundRecordingService {
       return;
     }
     await _channel.invokeMethod<void>('stopForegroundRecording');
-  }
-
-  /// Closes the event stream. The instance lives for the whole app, so this
-  /// is normally never called; calling it again is a no-op.
-  void dispose() {
-    if (!_eventsController.isClosed) {
-      unawaited(_eventsController.close());
-    }
   }
 }

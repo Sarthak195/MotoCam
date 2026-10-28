@@ -38,7 +38,7 @@ Methods:
 
 | Method | What it does | Caller |
 |---|---|---|
-| `initializeCamera({resolutionPreset, recordingFps, videoBitrateBps, audioEnabled, preferredCameraName, segmentDurationSeconds, segmentDurationMinutes, maxRollingSegments})` | Applies the given values and (re)creates the controller. Calls are serialized. See [Camera initialization](#camera-initialization). | `RecordingScreen._initializeCamera`, `applyRecordingSettings` |
+| `initializeCamera({resolutionPreset, recordingFps, videoBitrateBps, audioEnabled, preferredCameraName, segmentDurationSeconds, maxRollingSegments})` | Applies the given values and (re)creates the controller. Calls are serialized. See [Camera initialization](#camera-initialization). | `RecordingScreen._initializeCamera`, `applyRecordingSettings` |
 | `applyRecordingSettings({...})` | Returns `false` while a recording is starting, active or stopping. Returns `true` without doing anything if nothing changed. Otherwise calls `initializeCamera()` with the values (segment 5..600 s, loop 1..120) and returns `isInitialized`. | `RecordingScreen._openSettingsSheet`, `_applySavedCameraSettings` |
 | `startRecording()` | Starts a session. See [Start flow](#start-flow). | `RecordingScreen._runStartRecordingFlow` |
 | `stopRecording()` | Ends a session and returns the final video path. See [Stop flow](#stop-flow). | `RecordingScreen._stopRecordingFlow` |
@@ -50,17 +50,15 @@ Methods:
 | `getAvailableCameras({refresh})`, `cameraLabel(camera)` | Cached camera list and a `Front/Back/External (name)` label. | `RecordingScreen._openSettingsSheet` (list), settings sheet (label) |
 | `getSupportedFpsOptionsForPreset({preset})` | The cached FPS list for a preset on the active camera, or `[24, 30, 60]`. | `RecordingScreen._openSettingsSheet`, settings sheet |
 | `resolvePresetForRequestedResolution(int)`, static `presetForResolution(int)`, static `resolutionForPreset(preset)` | Resolution and preset mapping (table below). | `RecordingScreen`, settings sheet |
-| `resolveAppliedResolutionForRequested(int)` | Returns `resolutionForPreset(resolvePresetForRequestedResolution(resolution))`. | None in `lib/` |
 
 Getters, grouped:
 
 | Group | Getters |
 |---|---|
-| State | `controller`, `state`, `isInitialized`, `isInitializing`, `isRecording` (`state == recording`), `isStartingRecording`, `isStoppingRecording`, `lastRecordingError`, `lastGalleryExportMessage`, `recordingsDirectory`, `currentVideoPath`, `elapsedTime`, `recordingStartedAt`, `timerStream` (broadcast `Stream<Duration>`, one event per second while recording, no replay) |
-| Applied settings | `resolutionPreset`, `recordingFps`, `videoBitrateBps`, `videoBitrateMbps`, `supportsVideoBitrateControl`, `appliedVideoBitrateMbps`, `audioEnabled`, `preferredCameraName`, `activeCameraName`, `discoveredCameras`, `segmentDurationSeconds`, `segmentDurationMinutes`, `maxRollingSegments` |
+| State | `controller`, `isInitialized`, `isInitializing`, `isRecording`, `isStartingRecording`, `isStoppingRecording`, `lastRecordingError`, `lastGalleryExportMessage`, `recordingsDirectory`, `elapsedTime`, `recordingStartedAt`, `timerStream` (broadcast `Stream<Duration>`, one event per second while recording, no replay) |
+| Applied settings | `resolutionPreset`, `recordingFps`, `videoBitrateMbps`, `supportsVideoBitrateControl`, `appliedVideoBitrateMbps`, `audioEnabled`, `activeCameraName`, `segmentDurationSeconds`, `maxRollingSegments` |
 | Session | `lastSessionSegmentPaths` (oldest first), `lastSessionSegmentTimeline` (list of `{path, startMs, endMs}`), `lockedSegmentPaths` (sorted by path, not by time), `lockedSegmentCount` |
-| Instrumentation | `lastRollStopMs`, `lastRollRestartMs`, `lastRollRegisterMs`, `lastRollTotalMs`, `lastRollAt`, `recentRollTotalMs`, `averageRollTotalMs`, `recordingRecoveryCount`, `lastRecordingRecoveryAt`, `lastRecordingRecoveryReason` |
-| Capability caches | `knownSupportedFpsOptions`, `knownSupportedResolutionOptions`, `knownUnsupportedResolutionPresets` |
+| Capability caches | `knownUnsupportedResolutionPresets` |
 
 There are also three public fields. `enableDebugLogging` gates the verbose `[MotoCam] ...` log lines; warnings and errors are logged in every build mode. `autoExportLockedClipsToGallery` (default `false`) enables the gallery export at stop. `platform` is the static `com.example.motocam/media` channel. The provider stores nothing in SharedPreferences. Its inputs come from `AppSettingsProvider` through `RecordingScreen` (see [settings.md](settings.md)).
 
@@ -77,7 +75,7 @@ There are also three public fields. `enableDebugLogging` gates the verbose `[Mot
 
 Calls are serialized: a call made while another initialization runs waits for it, then runs with its own values. While a recording is starting, active or stopping, the call does nothing. In order, it:
 
-1. Applies any non-null arguments. `segmentDurationSeconds` is clamped to 5..600 s. `segmentDurationMinutes` (1..10) is used only when seconds is null, and `RecordingScreen` never passes it. `maxRollingSegments` is clamped to 1..120.
+1. Applies any non-null arguments. `segmentDurationSeconds` is clamped to 5..600 s. `maxRollingSegments` is clamped to 1..120.
 2. If a controller exists, sets `controller` to null, notifies listeners so the preview stops using it, disposes it and waits 120 ms.
 3. Requests `Permission.camera`, then `Permission.microphone` only when audio is enabled. Notification permission is left to the permission audit. If camera or microphone is not granted or limited, it aborts.
 4. Runs `_setupRecordingsDirectory` (see [Storage layout](#storage-layout-and-file-naming)). It aborts if no directory results.
@@ -189,7 +187,7 @@ sequenceDiagram
 Notes:
 
 - The preflight (`_buildStartPreflightChecks`) has blocking checks for camera permission, microphone permission (only when audio is on), location permission, location services, camera ready and media write access. Its non-blocking warnings are notification permission and the battery-optimization exemption (both Android only), incident detection unavailable (no motion sensor), battery level below 15 %, and battery temperature of 43 °C or more. The media write check writes and deletes `.__motocam_write_probe.tmp` in the recordings directory. `startPreflightNeedsSheet` decides whether [start_preflight_sheet.dart](../lib/features/recording/widgets/start_preflight_sheet.dart) is shown: a failed blocking check or any warning opens it, and a blocking failure disables its Start button. The battery-optimization warning is the exception: once the one-time exemption offer has been shown, its row is built with `opensSheet: false`, so it no longer opens the sheet by itself and is listed only when another check opens it. If every check is `ok`, no sheet is shown. The rider-facing list is in [features.md](features.md#preflight-checks).
-- `startRecording` sets `isStartingRecording` and notifies. It clears the session lists, locks, pending lock sequences, segment sequence counters, `currentVideoPath`, `lastRecordingError` and the recovery counters. Roll metrics and the gallery export queue are not reset.
+- `startRecording` sets `isStartingRecording` and notifies. It clears the session lists, locks, pending lock sequences, segment sequence counters, the current video path, `lastRecordingError`. The gallery export queue is not reset.
 - It then runs the free-space check (see [Free-space checks](#free-space-checks)). If there is not enough room, it sets `lastRecordingError` to "Storage is almost full. Free up space on the phone to keep recording.", sets `state = idle` and returns `false`. The screen shows "Recording did not start: <reason>" and the notice "Start refused".
 - `_startVideoRecordingWithFallback` calls `startVideoRecording()` on the current controller. If the controller already records (or the plugin says a recording is already started), it returns `false` without any fallback. On any other error it disposes the failed controller, then tries each lower preset in turn: it initializes a new controller, swaps it in, notifies listeners and starts recording on it. Presets that fail are marked unsupported.
 - `_recordingStartTime`, exposed as `recordingStartedAt`, is set when the first segment has started. It is the zero point of the segment timeline. `TelemetryProvider.startRideSession(startedAt:)` uses the same instant, so samples and segments share one clock. See [telemetry.md](telemetry.md).
@@ -208,26 +206,16 @@ Notes:
 3. **Restart.** Skipped if a stop has begun. If the free-space check failed, the restart is skipped and the fault message is the low-storage message. Otherwise `_restartRecordingAfterSegmentStop` calls `startVideoRecording()` up to twice, 500 ms apart. On success it increments the segment sequence, stamps the new segment's `startMs`, re-arms the timer and records `restartMs`.
 4. **Register.** Awaits `_registerCompletedSegment` for the stopped file, with its sequence, `startMs` and `endMs`, and records `registerMs`. Registration never throws. It:
    - moves the file from the plugin's temporary location into the recordings directory (see [Storage layout](#storage-layout-and-file-naming)). If the result is missing or 0 bytes, nothing is registered and any pending lock for that sequence is dropped.
-   - sets `currentVideoPath` and appends the path to the session list.
+   - sets the current video path and appends the path to the session list.
    - appends a timeline entry with the stamped `startMs` and `endMs`.
    - locks the segment if a pending lock exists for its sequence.
    - applies the per-session loop limit and deletes evicted files (see [Retention](#retention)).
-5. Calls `_recordRollMetrics`, which stores the timings and keeps the last 10 totals. It does not notify listeners.
+5. Logs the stop, restart, register and total timings (only with `enableDebugLogging`). It does not notify listeners.
 6. If recording did not restart and no stop has begun, enters a fault: "Recording stopped unexpectedly: the camera could not restart after a segment ended (storage full or camera unavailable).", or the low-storage message.
 
 If the stop itself throws, the stopped file is unknown and nothing is registered. `_handleSegmentStopFailure` then re-arms the timer to retry at the next boundary, or enters a fault ("Recording stopped unexpectedly: the camera failed to end a segment.") when the controller no longer records or the stop failed twice in a row.
 
-Instrumentation fields:
-
-| Getter | Meaning |
-|---|---|
-| `lastRollStopMs` | Duration of `stopVideoRecording()` |
-| `lastRollRestartMs` | Duration of the restart step, including a retry (0 if skipped) |
-| `lastRollRegisterMs` | Duration of `_registerCompletedSegment` (file move and loop eviction) |
-| `lastRollTotalMs`, `lastRollAt` | Whole cycle, and when it finished |
-| `recentRollTotalMs`, `averageRollTotalMs` | Last ≤ 10 totals, and their rounded mean (0 when empty) |
-
-Recovery cycles are measured the same way. These values live in memory only, and nothing in the app reads them. The debug log line for a cycle prints stop, register and total times. The restart time is logged on a separate line.
+Recovery cycles log the same timings. Nothing is stored or read by the app.
 
 On camera_android_camerax 0.7.2, `stopVideoRecording` closes the recording, waits for the Finalize event and unbinds the VideoCapture use case. `startVideoRecording` binds it again, creates a new temporary file and waits for the Start event. No video is captured between the two calls. The timeline shows this gap: a segment's `endMs` is earlier than the next segment's `startMs`.
 
@@ -249,14 +237,14 @@ On camera_android_camerax 0.7.2, `stopVideoRecording` closes the recording, wait
 2. Sets `_isStoppingRecording`, notifies and cancels the segment timer.
 3. Awaits an in-flight roll or recovery, for up to 60 s (an error is logged if it is still running), then cancels a timer that roll re-armed.
 4. Cancels the 1 s elapsed ticker.
-5. Awaits `stopVideoRecording()` and stamps the final segment's `endMs`. If it throws a `CameraException` with code `'No video is recording'`, it uses the last session segment (or `currentVideoPath`) as the candidate instead. That code comes from the camera package's Dart-side `CameraController` check (`value.isRecordingVideo`), which also covers a session whose segment restart failed. Any other code is rethrown, including the code `'videoRecordingFailed'` that CameraX itself uses when no recording is active.
+5. Awaits `stopVideoRecording()` and stamps the final segment's `endMs`. If it throws a `CameraException` with code `'No video is recording'`, it uses the last session segment (or the current video path) as the candidate instead. That code comes from the camera package's Dart-side `CameraController` check (`value.isRecordingVideo`), which also covers a session whose segment restart failed. Any other code is rethrown, including the code `'videoRecordingFailed'` that CameraX itself uses when no recording is active.
 6. Sets `state = stopped`.
 7. Registers the candidate if it is not already in the session list, with the final segment's sequence, `startMs` and `endMs`. Then clears `_recordingStartTime`.
-8. `_resolveReadyFinalVideoPath` picks the first file that exists and is non-empty from `currentVideoPath`, the stop candidate, then session segments newest first. It makes two passes 300 ms apart. If none is ready it returns the first candidate.
+8. `_resolveReadyFinalVideoPath` picks the first file that exists and is non-empty from the current video path, the stop candidate, then session segments newest first. It makes two passes 300 ms apart. If none is ready it returns the first candidate.
 9. **Android only, opt-in:** if `autoExportLockedClipsToGallery` is set, queues locked segments, in session order, for gallery export. The export runs 2 s later (see [Storage layout](#storage-layout-and-file-naming)).
 10. Schedules the orphan-sidecar prune 2 s later (see [Retention](#retention)) and returns the path. In `finally`, clears `_isStoppingRecording` and notifies.
 
-If an exception escapes, `stopRecording` sets `state = stopped` and returns the last session path (or `currentVideoPath`). No export or prune is scheduled on that path.
+If an exception escapes, `stopRecording` sets `state = stopped` and returns the last session path (or the current video path). No export or prune is scheduled on that path.
 
 ## Storage layout and file naming
 
@@ -367,7 +355,7 @@ Segment registration and roll metrics do not notify listeners; the screen picks 
 ## Current constraints
 
 - **Screen-off capture is unconfirmed on a device.** The camera lifecycle hold is designed to keep CameraX capturing while `MainActivity` is stopped, but no phone has confirmed it yet; keep-screen-on (on by default) is the fallback. The camera preview's Flutter surface may be released and re-requested while the activity is stopped. Removing the task from Recents still ends the recording.
-- **Gap at every rollover.** Each roll stops one recording and starts the next, so the segments are not continuous. About a second is lost at each boundary (`lastRollStopMs + lastRollRestartMs`). The timeline records the gap.
+- **Gap at every rollover.** Each roll stops one recording and starts the next, so the segments are not continuous. About a second is lost at each boundary (the stop and restart steps of a roll). The timeline records the gap.
 - **iOS** has no foreground service, PiP, free-space or media channel handlers, and nothing disables the idle timer while recording, so Auto-Lock interrupts the capture. Recording relies only on the camera plugin while the app is in the foreground.
 - **Bitrate setting.** It has no effect on Android with camera_android_camerax 0.7.2. The ride JSON records `appliedBitrateMbps: null` there.
 - **Retention is per session.** Earlier rides are never aged out or counted against a storage budget. The free-space checks stop a ride before storage runs out, but space is reclaimed only by deleting rides in Ride History.

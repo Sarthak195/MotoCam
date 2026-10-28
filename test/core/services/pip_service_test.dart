@@ -49,17 +49,4 @@ void main() {
   test('enterPipMode returns false when the platform has no handler', () async {
     expect(await PipService.enterPipMode(), isFalse);
   });
-
-  test(
-    'dispose can be called twice and later mode changes are ignored',
-    () async {
-      // Runs last: it closes the singleton's stream.
-      final service = PipService.instance;
-      service.dispose();
-      expect(service.dispose, returnsNormally);
-
-      await sendFromNative(true);
-      expect(service.isInPipMode, isTrue);
-    },
-  );
 }

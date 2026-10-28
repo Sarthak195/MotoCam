@@ -140,15 +140,6 @@ class CameraProvider extends ChangeNotifier {
 
   /// Ride-timeline start of the segment currently being recorded.
   int _currentSegmentStartMs = 0;
-  int _recordingRecoveryCount = 0;
-  DateTime? _lastRecordingRecoveryAt;
-  String? _lastRecordingRecoveryReason;
-  int _lastRollStopMs = 0;
-  int _lastRollRestartMs = 0;
-  int _lastRollRegisterMs = 0;
-  int _lastRollTotalMs = 0;
-  DateTime? _lastRollAt;
-  final List<int> _recentRollTotalMs = <int>[];
 
   static const List<int> _fpsCandidates = [24, 30, 60];
   static const List<int> _safeResolutionOptions = [480, 720, 1080, 2160];
@@ -170,12 +161,6 @@ class CameraProvider extends ChangeNotifier {
 
   /// The active camera controller, or `null` while uninitialized.
   CameraController? get controller => _controller;
-
-  /// Current recording state.
-  RecordingState get state => _state;
-
-  /// Path of the most recently registered segment of this session.
-  String? get currentVideoPath => _currentVideoPath;
 
   /// Whether a camera controller is initialized and ready.
   bool get isInitialized => _isInitialized;
@@ -232,9 +217,6 @@ class CameraProvider extends ChangeNotifier {
   /// Target recording frame rate.
   int get recordingFps => _recordingFps;
 
-  /// Requested video bitrate in bits per second.
-  int get videoBitrateBps => _videoBitrateBps;
-
   /// Requested video bitrate in Mbps (rounded).
   int get videoBitrateMbps => (_videoBitrateBps / 1000000).round();
 
@@ -253,21 +235,11 @@ class CameraProvider extends ChangeNotifier {
   /// Whether audio is recorded with the video.
   bool get audioEnabled => _audioEnabled;
 
-  /// Name of the camera the user prefers.
-  String get preferredCameraName => _preferredCameraName;
-
   /// Name of the camera currently in use.
   String get activeCameraName => _activeCameraName;
 
-  /// Cameras discovered by the last [getAvailableCameras] call.
-  List<CameraDescription> get discoveredCameras =>
-      List.unmodifiable(_availableCameras);
-
   /// Segment length in seconds.
   int get segmentDurationSeconds => _segmentDuration.inSeconds;
-
-  /// Segment length in whole minutes.
-  int get segmentDurationMinutes => _segmentDuration.inMinutes;
 
   /// Number of unlocked segments the rolling loop keeps per session.
   int get maxRollingSegments => _maxRollingSegments;
@@ -287,66 +259,6 @@ class CameraProvider extends ChangeNotifier {
 
   /// Number of locked segments in the current or last session.
   int get lockedSegmentCount => _lockedSegmentPaths.length;
-
-  /// Number of successful [recoverRecordingPipeline] calls this session.
-  int get recordingRecoveryCount => _recordingRecoveryCount;
-
-  /// Time of the last successful pipeline recovery.
-  DateTime? get lastRecordingRecoveryAt => _lastRecordingRecoveryAt;
-
-  /// Reason given for the last successful pipeline recovery.
-  String? get lastRecordingRecoveryReason => _lastRecordingRecoveryReason;
-
-  /// Milliseconds the stop step of the last segment roll took. Pipeline
-  /// recoveries count as rolls for these metrics.
-  int get lastRollStopMs => _lastRollStopMs;
-
-  /// Milliseconds the restart step of the last segment roll took (0 when no
-  /// restart was attempted).
-  int get lastRollRestartMs => _lastRollRestartMs;
-
-  /// Milliseconds the registration step (persist and loop trim) of the last
-  /// segment roll took.
-  int get lastRollRegisterMs => _lastRollRegisterMs;
-
-  /// Total milliseconds the last segment roll took.
-  int get lastRollTotalMs => _lastRollTotalMs;
-
-  /// Wall-clock time the last segment roll finished, or `null` before the
-  /// first roll.
-  DateTime? get lastRollAt => _lastRollAt;
-
-  /// Total durations in milliseconds of the last (up to) 10 segment rolls,
-  /// oldest first.
-  List<int> get recentRollTotalMs => List.unmodifiable(_recentRollTotalMs);
-
-  /// Average of [recentRollTotalMs] in milliseconds, or 0 when no roll
-  /// happened yet.
-  int get averageRollTotalMs {
-    if (_recentRollTotalMs.isEmpty) {
-      return 0;
-    }
-    final total = _recentRollTotalMs.reduce((a, b) => a + b);
-    return (total / _recentRollTotalMs.length).round();
-  }
-
-  /// FPS options not yet known to fail at the current preset.
-  List<int> get knownSupportedFpsOptions =>
-      List.unmodifiable(_supportedFpsOptionsForPreset(_resolutionPreset));
-
-  /// Resolution options (in lines) not yet known to fail on the active
-  /// camera.
-  List<int> get knownSupportedResolutionOptions {
-    final unsupported = knownUnsupportedResolutionPresets;
-    return List.unmodifiable(
-      _safeResolutionOptions
-          .where(
-            (resolution) =>
-                !unsupported.contains(presetForResolution(resolution)),
-          )
-          .toList(),
-    );
-  }
 
   /// Presets that failed to initialize or record on the active camera.
   Set<ResolutionPreset> get knownUnsupportedResolutionPresets {
@@ -374,25 +286,6 @@ class CameraProvider extends ChangeNotifier {
       debugPrint('[MotoCam] $message');
     } else {
       debugPrintSynchronously('[MotoCam] $message');
-    }
-  }
-
-  // Records diagnostics only; does not notify, so a roll does not rebuild
-  // the UI.
-  void _recordRollMetrics({
-    required int stopMs,
-    required int restartMs,
-    required int registerMs,
-    required int totalMs,
-  }) {
-    _lastRollStopMs = stopMs;
-    _lastRollRestartMs = restartMs;
-    _lastRollRegisterMs = registerMs;
-    _lastRollTotalMs = totalMs;
-    _lastRollAt = DateTime.now();
-    _recentRollTotalMs.add(totalMs);
-    if (_recentRollTotalMs.length > 10) {
-      _recentRollTotalMs.removeAt(0);
     }
   }
 
@@ -464,14 +357,6 @@ class CameraProvider extends ChangeNotifier {
     return requestedPreset;
   }
 
-  /// Resolution in lines that [resolvePresetForRequestedResolution] would
-  /// apply for [requestedResolution].
-  int resolveAppliedResolutionForRequested(int requestedResolution) {
-    return resolutionForPreset(
-      resolvePresetForRequestedResolution(requestedResolution),
-    );
-  }
-
   /// Human-readable label such as `Back (0)` for [camera].
   String cameraLabel(CameraDescription camera) {
     final lens = switch (camera.lensDirection) {
@@ -541,7 +426,6 @@ class CameraProvider extends ChangeNotifier {
     bool? audioEnabled,
     String? preferredCameraName,
     int? segmentDurationSeconds,
-    int? segmentDurationMinutes,
     int? maxRollingSegments,
   }) async {
     while (_initInFlight != null) {
@@ -562,7 +446,6 @@ class CameraProvider extends ChangeNotifier {
         audioEnabled: audioEnabled,
         preferredCameraName: preferredCameraName,
         segmentDurationSeconds: segmentDurationSeconds,
-        segmentDurationMinutes: segmentDurationMinutes,
         maxRollingSegments: maxRollingSegments,
       );
     } finally {
@@ -578,7 +461,6 @@ class CameraProvider extends ChangeNotifier {
     bool? audioEnabled,
     String? preferredCameraName,
     int? segmentDurationSeconds,
-    int? segmentDurationMinutes,
     int? maxRollingSegments,
   }) async {
     try {
@@ -603,10 +485,6 @@ class CameraProvider extends ChangeNotifier {
       if (segmentDurationSeconds != null) {
         _segmentDuration = Duration(
           seconds: segmentDurationSeconds.clamp(5, 600),
-        );
-      } else if (segmentDurationMinutes != null) {
-        _segmentDuration = Duration(
-          minutes: segmentDurationMinutes.clamp(1, 10),
         );
       }
       if (maxRollingSegments != null) {
@@ -1309,9 +1187,6 @@ class CameraProvider extends ChangeNotifier {
       _currentVideoPath = null;
       _lastRecordingError = null;
       _consecutiveRollStopFailures = 0;
-      _recordingRecoveryCount = 0;
-      _lastRecordingRecoveryAt = null;
-      _lastRecordingRecoveryReason = null;
       _recordingStartTime = null;
       _elapsedTime = Duration.zero;
 
@@ -1598,15 +1473,10 @@ class CameraProvider extends ChangeNotifier {
     final totalElapsedMs = DateTime.now()
         .difference(cycleStartedAt)
         .inMilliseconds;
-    _recordRollMetrics(
-      stopMs: stopElapsedMs,
-      restartMs: restartElapsedMs,
-      registerMs: registerElapsedMs,
-      totalMs: totalElapsedMs,
-    );
     _log(
       'Segment roll timings: stop=${stopElapsedMs}ms, '
-      'register=${registerElapsedMs}ms, total=${totalElapsedMs}ms',
+      'restart=${restartElapsedMs}ms, register=${registerElapsedMs}ms, '
+      'total=${totalElapsedMs}ms',
     );
 
     if (!restarted && !_isStoppingRecording && isRecording) {
@@ -1671,9 +1541,6 @@ class CameraProvider extends ChangeNotifier {
         _log('Recording pipeline recovery failed: restart failed');
         return false;
       }
-      _recordingRecoveryCount++;
-      _lastRecordingRecoveryAt = DateTime.now();
-      _lastRecordingRecoveryReason = reason;
       _log('Recording pipeline recovery succeeded');
       notifyListeners();
       return true;

@@ -68,7 +68,8 @@ class RideIntegrityReport {
   /// Failed checks; empty unless [status] is [RideIntegrityStatus.modified].
   final List<String> issues;
 
-  /// Whether [status] is [RideIntegrityStatus.verified].
+  /// Whether [status] is [RideIntegrityStatus.verified]. Only tests read it.
+  @visibleForTesting
   bool get isVerified => status == RideIntegrityStatus.verified;
 }
 
@@ -196,18 +197,6 @@ class RideRecord {
   /// Number of [segmentPaths] whose files still exist.
   int get availableSegmentCount =>
       segmentPaths.where((path) => !missingSegmentPaths.contains(path)).length;
-
-  /// Short human-readable description of [integrity].
-  String get integrityLabel {
-    switch (integrity.status) {
-      case RideIntegrityStatus.verified:
-        return 'Unmodified since recording';
-      case RideIntegrityStatus.modified:
-        return 'Check failed';
-      case RideIntegrityStatus.unknown:
-        return 'Not available (no integrity record)';
-    }
-  }
 
   /// Ride duration taken from the last sample's elapsed time.
   Duration get duration {

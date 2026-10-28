@@ -41,9 +41,7 @@ class PipService {
       if (call.method == 'onPipModeChanged') {
         final inPip = call.arguments == true;
         _isInPipMode = inPip;
-        if (!_pipModeController.isClosed) {
-          _pipModeController.add(inPip);
-        }
+        _pipModeController.add(inPip);
       }
       return null;
     });
@@ -63,14 +61,6 @@ class PipService {
       return result;
     } catch (_) {
       return false;
-    }
-  }
-
-  /// Closes the mode stream. The instance lives for the whole app, so this
-  /// is normally never called; calling it again is a no-op.
-  void dispose() {
-    if (!_pipModeController.isClosed) {
-      unawaited(_pipModeController.close());
     }
   }
 }
