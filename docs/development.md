@@ -1,0 +1,289 @@
+# Development guide
+
+This guide covers setting up a machine, running and debugging MotoCam, and the checks the project uses today. It is for developers joining or maintaining the project. It describes the repository as it currently is, including the places where the tooling is incomplete.
+
+## Contents
+
+- [Prerequisites](#prerequisites)
+- [Setup](#setup)
+- [Running the app](#running-the-app)
+- [Project conventions](#project-conventions)
+- [Static analysis](#static-analysis)
+- [Formatting](#formatting)
+- [Testing](#testing)
+- [Continuous integration](#continuous-integration)
+- [Debugging tips](#debugging-tips)
+- [Troubleshooting](#troubleshooting)
+- [Contribution workflow](#contribution-workflow)
+- [Related documents](#related-documents)
+
+## Prerequisites
+
+The versions below are the toolchain the maintainer uses to build, analyze and test `main`.
+
+| Tool | Version | Notes |
+|---|---|---|
+| Flutter | 3.41.2 (stable) | Ships Dart 3.11.0. [pubspec.yaml](../pubspec.yaml) sets `sdk: ^3.11.0` and `flutter: ">=3.41.0"`, the same floor as the `sdks:` block of `pubspec.lock`. CI pins 3.41.2. |
+| Java (JDK) | 17 to 24 | [build.gradle.kts](../android/app/build.gradle.kts) compiles Java and Kotlin for target 17, and CI uses Temurin 17. Gradle 8.14.4 runs only on JVMs up to 24; its compatibility page says 25 and later are not yet supported. |
+| Android SDK | Platform 36 | `compileSdk = 36`, `targetSdk = 36`. `minSdk` is `flutter.minSdkVersion`, which is 24 (Android 7.0) in Flutter 3.41.2. |
+| Android NDK | 28.1.13356709 and 28.2.13676358 | The app pins 28.1.13356709 with `ndkVersion` in build.gradle.kts, which differs from Flutter 3.41.2's default (28.2.13676358). The `jni` plugin, a dependency of path_provider_android 2.3, builds its C code with `flutter.ndkVersion`, so it uses 28.2.13676358. Install both. |
+| CMake | 3.22.1 | Gradle installs it automatically on the first build. |
+| Gradle / AGP / Kotlin | 8.14.4 / 8.11.1 / 2.2.20 | Gradle comes from the wrapper ([gradle-wrapper.properties](../android/gradle/wrapper/gradle-wrapper.properties)); the Android Gradle plugin and the Kotlin Gradle plugin are set in [settings.gradle](../android/settings.gradle). No separate install is needed. |
+| Xcode (iOS only) | 14 or newer | macOS only. Flutter 3.41.2 requires Xcode 14 and recommends 15; the project's deployment target is iOS 13.0. [ios/Podfile](../ios/Podfile) sets the `permission_handler` macros. The iOS app has no native method-channel handlers, so the Android-native features are missing; read [platform-integration.md](platform-integration.md) before working on iOS. |
+| PowerShell (`pwsh`) | Any | Optional locally. Needed to run the two scripts in [scripts/](../scripts/). CI runs only the precheck script. |
+
+The Gradle daemon is configured with an 8 GB heap (`org.gradle.jvmargs=-Xmx8G ...` in [gradle.properties](../android/gradle.properties)). Machines with less memory may need to lower it locally.
+
+## Setup
+
+```sh
+git clone https://github.com/Sarthak195/MotoCam.git
+cd MotoCam
+flutter pub get --enforce-lockfile  # what CI runs; fails if pubspec.lock does not match pubspec.yaml
+flutter doctor --android-licenses   # accept every SDK licence
+flutter doctor                      # confirm Android toolchain and a device
+```
+
+- `flutter pub get` resolves the graph pinned in `pubspec.lock`: the 13 direct dependencies listed in [pubspec.yaml](../pubspec.yaml) (12 packages plus the Flutter SDK), 2 dev dependencies and 102 transitive packages. Dependabot proposes updates weekly (see [Continuous integration](#continuous-integration)).
+- The Flutter tool writes the ignored file `android/local.properties`: `flutter pub get` sets `flutter.sdk` (and `sdk.dir` when it finds an Android SDK), and each Android build or run adds `flutter.versionName` and `flutter.versionCode` from pubspec. Gradle reads the version values from it; see [release.md](release.md).
+- Install SDK platform 36 and NDKs 28.1.13356709 and 28.2.13676358 with Android Studio's SDK Manager, or with `sdkmanager "platforms;android-36" "ndk;28.1.13356709" "ndk;28.2.13676358"`.
+- Debug and profile builds, debug app bundles and `flutter run` need no signing set-up. Any Gradle invocation that packages or signs a release artifact does, including a plain `assemble` or `build` (see [Troubleshooting](#troubleshooting)). Release signing is described in [release.md](release.md).
+- [.gitattributes](../.gitattributes) sets `* text=auto eol=lf`: Git stores text files with LF line endings and checks them out with LF on every platform, including Windows, whatever `core.autocrlf` says. Only `.bat` and `.cmd` files use CRLF. Configure your editor to keep LF.
+
+## Running the app
+
+```sh
+flutter devices          # list connected devices and emulators
+flutter run              # debug build on the selected device
+flutter run -d <id>      # pick a device explicitly
+```
+
+- The first `flutter build apk --debug` on the maintainer machine took about six minutes (348 s in the Gradle step), and Gradle installed CMake 3.22.1 automatically during it. On a clean machine the first build also downloads the Gradle distribution and the plugins' dependencies.
+- **Built APKs.** [android/build.gradle](../android/build.gradle) sets `layout.buildDirectory` so that Gradle output goes to `<repo>/build/` (git-ignored) instead of `android/build/`. `flutter build apk --debug` writes `build/app/outputs/flutter-apk/app-debug.apk`. The debug APK is large, mostly because of the debug native libraries for three ABIs (arm64-v8a, armeabi-v7a and x86_64). Install a built APK with `flutter install --debug` (plain `flutter install` installs the release APK) or `adb install -r build/app/outputs/flutter-apk/app-debug.apk`. Release outputs are listed in [release.md](release.md#building-release-artifacts).
+- **Android Studio:** open the repository root (not `android/`) with the Flutter and Dart plugins installed, then use the normal Run configuration for `lib/main.dart`. Open `android/` as a separate project only when you want Kotlin code assistance for [MainActivity.kt](../android/app/src/main/kotlin/com/example/motocam/MainActivity.kt) and [BackgroundRecordingService.kt](../android/app/src/main/kotlin/com/example/motocam/BackgroundRecordingService.kt).
+- **Use a real device for most work.** Recording will not start without camera and location permission (and microphone permission when audio is on), or while system location services are off. Incident detection reads the linear-acceleration sensor (`userAccelerometerEventStream`) and falls back to the raw accelerometer (`accelerometerEventStream`) on devices without one; recording does not require either. An Android emulator works only if you configure a virtual or webcam-backed camera and feed it locations (Extended controls > Location, or `adb emu geo fix <longitude> <latitude>`). Accelerometer-driven incident detection is hard to exercise on an emulator.
+- **Android-only features:** the foreground service, Picture-in-Picture, battery/thermal status, free-space checks, media scanning and gallery export are implemented only in Kotlin. On iOS the Dart wrappers are gated off or fail quietly. See [platform-integration.md](platform-integration.md).
+- `flutter run --release` triggers the release signing gate (see [Troubleshooting](#troubleshooting)). Use `--profile` for performance work without signing material.
+
+## Project conventions
+
+### Folder structure
+
+```
+lib/
+  main.dart                    entry point, root MultiProvider, MaterialApp
+  core/
+    providers/                 app-wide settings (AppSettingsProvider)
+    services/                  wrappers around plugins and method channels
+    utils/                     stateless helpers (path_utils, integrity_utils, format_utils)
+  features/
+    camera/                    providers/camera_provider.dart, providers/recording_retention.dart
+    history/                   models/ (ride_record.dart, ride_history_loader.dart), *_screen.dart,
+                               widgets/ (route_map_view, playback_timeline, playback_seekbar_track_shape)
+    map/                       map_source_config.dart, route_points.dart, widgets/
+    recording/                 recording_screen.dart, recording_screen_logic.dart, widgets/
+    telemetry/                 models/telemetry_data.dart, providers/
+test/                          mostly mirrors lib/ paths (test/core/..., test/features/...)
+android/app/src/main/kotlin/com/example/motocam/
+                               MainActivity.kt, BackgroundRecordingService.kt
+```
+
+Pure logic sits in its own files so tests can reach it without widgets or plugins: segment retention in `recording_retention.dart`, the playback timeline in `playback_timeline.dart`, recording-screen helpers in `recording_screen_logic.dart`, and GPS-fix filtering in `route_points.dart`. [architecture.md](architecture.md) has the full module map and explains how the pieces interact.
+
+### Providers versus services
+
+- **Providers** are `ChangeNotifier`s that hold app state and are registered once in the `MultiProvider` in [main.dart](../lib/main.dart): `AppSettingsProvider`, `CameraProvider` and `TelemetryProvider`. Widgets read them with `package:provider`.
+- **Services** in `lib/core/services` are plain classes with no `ChangeNotifier`. They wrap a plugin or a method channel. Instantiation is not uniform:
+  - `BackgroundRecordingService.instance` and `PipService.instance` are singletons with private constructors.
+  - `AppPermissionService` and `DeviceStatusService` have `const` constructors. The recording screen state in [recording_screen.dart](../lib/features/recording/recording_screen.dart) holds one of each as a field.
+  - `TelemetryProvider` calls `Geolocator` directly, and so does the recording screen for its location-services check; there is no separate location service.
+- **Utilities** in `lib/core/utils` are top-level functions. `path_utils` and `integrity_utils` are imported with a library prefix (`import '.../path_utils.dart' as path_utils;`, `as integrity_utils`); `format_utils` (`formatElapsed`) is imported without one.
+- **Method channels** are named `com.example.motocam/<area>` and declared as `static const` fields on the class that uses them. The full list is in [platform-integration.md](platform-integration.md).
+
+### Naming
+
+- Files use `snake_case.dart`; screens end in `_screen.dart`, providers in `_provider.dart`, services in `_service.dart`.
+- Private state classes follow the Flutter pattern `_XxxState`. Private helper painters and models stay in the screen file (for example `_SpeedGraphPainter` in [ride_playback_screen.dart](../lib/features/history/ride_playback_screen.dart)).
+- SharedPreferences keys are `static const` snake_case strings named `_xxxKey`. Thirteen are on `AppSettingsProvider`. The others are the two playback keys `_showRouteMapPrefKey` and `_onlineMapConsentPrefKey` in [ride_playback_screen.dart](../lib/features/history/ride_playback_screen.dart) and the public `BackgroundRecordingService.batteryOptimizationOfferedKey`. See [settings.md](settings.md).
+- Test-only entry points are marked `@visibleForTesting`: `TelemetryProvider.updateLocationForTesting`, `updateAccelerometerForTesting`, `updateRawAccelerometerForTesting` and `handleLifecycleForTesting` feed inputs through the production handlers, and `TelemetryProvider.clearHistory` resets the ride statistics. The static helpers `TelemetryProvider.shouldAccumulateDistance` and `TelemetryProvider.sanitizeJsonValue`, and `CameraProvider.nearestSupportedFps` and `CameraProvider.galleryExportSummary`, are exposed for tests.
+
+### Comments and dartdoc
+
+- Every file under `lib/` has `///` dartdoc, including the screens and widgets. Coverage of individual members varies; the providers, `RideRecord`, `TelemetryData` and the utilities are the most fully documented.
+- Eight files start with a `// lib/<path>.dart` header comment (for example [main.dart](../lib/main.dart) and [camera_provider.dart](../lib/features/camera/providers/camera_provider.dart)); the others do not. Neither form is required.
+- New public classes and methods should follow the existing dartdoc style.
+
+## Static analysis
+
+```sh
+flutter analyze
+```
+
+- [analysis_options.yaml](../analysis_options.yaml) includes `package:flutter_lints/flutter.yaml` (flutter_lints 6.0.0) and enables seven more rules under `linter.rules`: `cancel_subscriptions`, `close_sinks`, `unawaited_futures`, `discarded_futures`, `avoid_dynamic_calls`, `prefer_final_locals` and `always_declare_return_types`. `use_build_context_synchronously` is already part of flutter_lints.
+- `avoid_slow_async_io` is deliberately not enabled. It asks for `existsSync`/`statSync`, which would move file IO back onto the UI isolate.
+- With `unawaited_futures` and `discarded_futures` on, an intended fire-and-forget call is wrapped in `unawaited(...)` from `dart:async`.
+- There is no `analyzer:` section, so there are no strict modes, excludes or severity overrides.
+- `flutter analyze` reports "No issues found!", and CI runs it on every pull request and every push to `main`.
+- Suppress a lint locally with `// ignore: <rule>` rather than editing the shared rule set.
+
+## Formatting
+
+```sh
+dart format lib test                                        # rewrite files
+dart format --output=none --set-exit-if-changed lib test    # check only (what CI runs)
+```
+
+- The tree is `dart format`-clean, and CI fails when the check reports a file that needs changes.
+- The pubspec Dart SDK lower bound (`^3.11.0`) sets the package language version to 3.11, so `dart format` uses the "tall" style introduced in Dart 3.7. In that style the formatter adds and removes trailing commas itself.
+- Run `dart format lib test` before committing.
+
+## Testing
+
+```sh
+flutter test                                                         # all tests
+flutter test test/features/telemetry/providers/telemetry_provider_test.dart
+flutter test --plain-name "incident"                                 # by name substring
+flutter test --coverage                                              # writes coverage/lcov.info
+```
+
+There are 222 tests in 19 files, and all pass. The table groups them by area.
+
+| Area | Files | Tests | What it covers |
+|---|---|---|---|
+| Settings | [test/core/providers/](../test/core/providers/) | 19 | `AppSettingsProvider` loading defaults and stored values, legacy-key migration, clamping, preset ids, updates and the gallery-export opt-in. |
+| Services | [test/core/services/](../test/core/services/) | 33 | `AppPermissionService` (required versus recommended permissions, no background location, legacy storage only with gallery export, iOS skips), `BackgroundRecordingService` (the one-time battery-exemption offer, START errors, notification Stop), `DeviceStatusService` and `PipService`, with their method channels mocked. |
+| Utilities | [test/core/utils/](../test/core/utils/) | 18 | Canonical JSON hashing, the integrity envelope, atomic telemetry writes and per-path locking, temp-file pruning, path normalization and containment, `formatElapsed`. |
+| Camera | [test/features/camera/providers/](../test/features/camera/providers/) | 30 | `CameraProvider` resolution mapping, idle state, FPS fallback and the gallery-export summary; `recording_retention.dart` segment eviction (locked segments never evicted), pending-segment tracking and orphan-sidecar detection. |
+| History models | [test/features/history/models/](../test/features/history/models/) | 25 | `RideRecord.fromTelemetryFile` integrity results, quarantine of untrusted paths, relocation of stale absolute paths, lock-state changes, incidents and sample interpolation; `ride_history_loader.dart` loading on a background isolate and finding orphan videos. |
+| Playback | [test/features/history/playback/](../test/features/history/playback/) | 26 | The playback timeline (effective timeline, missing and uncovered ranges, segment lookup, markers, speed-graph gestures, integrity descriptions) and the seekbar track shape. These files test code in `lib/features/history/widgets/`. |
+| Map | [test/features/map/](../test/features/map/) | 6 | GPS-fix filtering and downsampling in `route_points.dart`, and the `StaticMapViewer` "No GPS fix" state. |
+| Recording | [test/features/recording/](../test/features/recording/) | 23 | `recording_screen_logic.dart`: the background-stall tracker, the ride-checkpoint tracker, lock notices, elapsed-time formatting, button contrast and the initial FPS choice; `startPreflightNeedsSheet` from `start_preflight_sheet.dart`. |
+| Telemetry | [test/features/telemetry/](../test/features/telemetry/) | 41 | `TelemetryData` JSON (UTC timestamps, lenient parsing, fix flags) and `TelemetryProvider` (ride start, fix tracking, distance gating, mock-location flags, incident detection on both accelerometer paths, sealed saves, checkpoints and failed-save retry). |
+| App | [test/widget_test.dart](../test/widget_test.dart) | 1 | Builds `MotoCamApp` and checks the dark Material 3 theme, the recording screen and that stored settings are loaded. |
+
+- Tests that touch method channels mock them with `setMockMethodCallHandler` on the test binding's `defaultBinaryMessenger`. Tests that write files use temporary directories.
+- The screens are not tested beyond the single app-level widget test, and there are no tests for the Kotlin code. The iOS `RunnerTests` target contains only an empty `testExample`, and nothing runs it.
+- CI runs `flutter test --coverage`, but the report is not uploaded and there is no coverage threshold. `/coverage/` is ignored by the root [.gitignore](../.gitignore).
+
+## Continuous integration
+
+[.github/workflows/ci.yml](../.github/workflows/ci.yml) defines one workflow, `CI`, with two jobs, `validate` and `ios`.
+
+| Setting | Value |
+|---|---|
+| Triggers | `push` to `main`, and every `pull_request`. A pull request therefore runs once, not once for the push and once for the PR. |
+| Permissions | `contents: read` for the workflow token. |
+| Concurrency | Group `ci-<workflow>-<ref>` with `cancel-in-progress: true`, so a new push to the same branch or PR cancels the run still in progress. |
+| Flutter version | `env.FLUTTER_VERSION: 3.41.2`, passed to `subosito/flutter-action@v2` as `flutter-version` (channel `stable`, `cache: true`) in both jobs. |
+| Timeouts | 45 minutes per job. |
+
+The `validate` job runs on `ubuntu-latest`:
+
+| Step | What it runs |
+|---|---|
+| Checkout | `actions/checkout@v5` |
+| Set up Java | `actions/setup-java@v5`, Temurin 17 |
+| Set up Flutter | `subosito/flutter-action@v2` with Flutter 3.41.2 |
+| Install dependencies | `flutter pub get --enforce-lockfile` |
+| Run analyzer | `flutter analyze` |
+| Run release security precheck | `./scripts/release-security-precheck.ps1 -SkipTests -SkipAnalyze` under `pwsh`. With both skip flags it runs only the file checks on the Gradle script, the manifest, the backup rules, tracked credential files, Android assets, `Info.plist` and the Podfile; see [release.md](release.md#release-security-precheck). |
+| Run tests | `flutter test --coverage` |
+| Build Android debug APK | `flutter build apk --debug`. This compiles the Kotlin code and the Gradle scripts and needs no signing secrets. |
+| Check formatting | `dart format --output=none --set-exit-if-changed lib test`. It runs last, so a formatting failure does not hide analyzer, test or build results. |
+
+The `ios` job runs on `macos-latest`: checkout, Flutter 3.41.2, `flutter pub get --enforce-lockfile`, then `flutter build ios --simulator --no-codesign`.
+
+CI does **not** build a release or signed APK or app bundle, run Gradle or Android lint, run the `RunnerTests` target, enforce a coverage threshold or run anything on a device.
+
+[.github/dependabot.yml](../.github/dependabot.yml) opens weekly update pull requests for the `pub` packages (at most five open at a time) and for the GitHub Actions used by the workflow. CI validates each one like any other pull request.
+
+## Debugging tips
+
+### Logs
+
+- Dart logging uses `debugPrint`, which appears in logcat under the tag `flutter`. In release builds [main.dart](../lib/main.dart) replaces `debugPrint` with a no-op, so only messages printed with `debugPrintSynchronously` reach the log there.
+- `CameraProvider._log` prefixes its messages with `[MotoCam]` and prints only when `enableDebugLogging` is true. main.dart sets it to `kDebugMode`, so these verbose logs appear in debug builds only. `CameraProvider._logError` also uses the `[MotoCam]` prefix but prints in every build mode.
+- `FlutterError.onError` keeps Flutter's default reporting in debug and profile builds; in release builds it logs the error and stack itself and skips errors marked as silent. `PlatformDispatcher.instance.onError` logs uncaught asynchronous errors in every build mode and keeps the app running.
+- The Kotlin code logs only start failures, with `android.util.Log.e`, under the tags `MotoCamRecordingService` and `MotoCam`.
+
+```sh
+flutter logs                                  # Dart output from the running app
+adb logcat -s flutter                         # same, via adb
+adb logcat -s flutter | grep "\[MotoCam\]"    # camera pipeline only
+adb logcat | grep -i motocam                  # include system and native messages about the package
+```
+
+### Exercising features quickly
+
+- In the settings sheet, pick **Segment length** "5 sec per segment" and **Loop buffer size** "6 segments" to see segment rollover, per-session loop deletion (from the seventh finalized unlocked segment, after roughly 35 s of recording) and multi-segment playback in a short session. Locked segments do not count against the loop and are never deleted automatically.
+- The **LOCK** button makes the same `CameraProvider.markIncident` call as an automatically detected incident (reason `manual-emergency` instead of `auto-crash`). Use it to exercise locking, the Locked Clips section, unlocking and, on Android with **Copy locked clips to gallery** turned on in settings (off by default), gallery export, without producing a real incident. The detection logic itself is easiest to drive from a test through `TelemetryProvider.updateAccelerometerForTesting`, as [telemetry_provider_test.dart](../test/features/telemetry/providers/telemetry_provider_test.dart) does.
+
+### Pulling recordings and telemetry off a device (Android)
+
+On Android, `CameraProvider._setupRecordingsDirectory` uses a `MotoCam Recordings` folder in the app-specific external directory (`getExternalStorageDirectory()`) and writes a `.nomedia` marker into it. Finished segments are moved into it (renamed, or copied when a rename is not possible) and keep the camera plugin's file name (`REC<digits>.mp4` on Android). `TelemetryProvider` writes each ride's `ride_<rideSessionId>.telemetry.json` into the ride's storage directory, normally the same flat folder. [data-formats.md](data-formats.md) documents the naming rules, the older fallback locations that are still scanned, and the export folder.
+
+```sh
+adb shell ls "/sdcard/Android/data/com.example.motocam/files/MotoCam Recordings/"
+adb pull "/sdcard/Android/data/com.example.motocam/files/MotoCam Recordings/" ./device-recordings
+
+# If the shell cannot read Android/data on your device, use run-as (debug builds only):
+adb exec-out run-as com.example.motocam cat "/sdcard/Android/data/com.example.motocam/files/MotoCam Recordings/ride_<id>.telemetry.json" > ride.json
+```
+
+The manifest sets `android:allowBackup="false"`, so `adb backup` does not capture app data. Its backup and data-extraction rule files also exclude the `root` and `external` domains, which hold the settings and the recordings, from backup and device transfer.
+
+### Inspecting SharedPreferences (Android, debug builds)
+
+`shared_preferences` stores values in `shared_prefs/FlutterSharedPreferences.xml` inside the app's private data directory, with every key prefixed `flutter.` (for example `flutter.recording_fps`).
+
+```sh
+adb shell run-as com.example.motocam cat shared_prefs/FlutterSharedPreferences.xml
+adb shell pm clear com.example.motocam        # reset all app data, including settings
+```
+
+[settings.md](settings.md) lists every key, its type and its default.
+
+## Troubleshooting
+
+| Symptom | Cause and fix |
+|---|---|
+| `flutter doctor` reports unaccepted Android licences, or Gradle stops with a licence error | Run `flutter doctor --android-licenses` and accept all. |
+| The build warns that `jni requires Android NDK 28.2.13676358` and suggests changing `ndkVersion` | Expected: the app pins NDK 28.1.13356709, while the `jni` plugin builds with Flutter's default 28.2.13676358. The build still succeeds. Raising `ndkVersion` to 28.2.13676358 would remove the warning; verify any such change with a debug build. |
+| Gradle cannot find NDK 28.1.13356709 or 28.2.13676358, or SDK platform 36 | Install them in the SDK Manager, or with `sdkmanager "ndk;28.1.13356709" "ndk;28.2.13676358" "platforms;android-36"`. Do not change `ndkVersion` in build.gradle.kts to work around it. |
+| `flutter.sdk not set in local.properties` | [settings.gradle](../android/settings.gradle) asserts on this key. Run `flutter pub get` from the repository root (not from `android/`) so the Flutter tool writes `android/local.properties`, then build again. |
+| `Release signing config missing: <values>. Provide them in android/key.properties or through the environment variables MOTOCAM_KEYSTORE_FILE, MOTOCAM_KEYSTORE_PASSWORD, MOTOCAM_KEY_ALIAS and MOTOCAM_KEY_PASSWORD.` | build.gradle.kts throws this when the task graph contains a task of `:app` that packages or signs a release artifact (`packageRelease`, `validateSigningRelease`, `signReleaseBundle`, `packageReleaseUniversalApk`, or the same with a flavor name) and one of the four signing values is missing. The message names the missing values. This includes `flutter run --release`, `flutter build apk --release`, `flutter build appbundle --release`, and plain `./gradlew assemble` or `build`. Debug and profile builds, `flutter build appbundle --debug`, `lintRelease` and `testReleaseUnitTest` are not gated. Use a debug or profile build, or set up signing as described in [release.md](release.md#signing-setup-android). |
+| `Release keystore not found at <path>. A relative storeFile/MOTOCAM_KEYSTORE_FILE path is resolved against android/app/.` | The four values are set, but the keystore file does not exist. A relative path is resolved against `android/app/`, so the template's default `../release.keystore` means `android/release.keystore`, where [generate-keystore.ps1](../scripts/generate-keystore.ps1) writes it. Use a path relative to `android/app/` or an absolute path. |
+| Camera preview stays black, or recording refuses to start | Check permissions in system Settings > Apps > MotoCam. Camera initialization in `CameraProvider` stops if camera permission is denied, or microphone permission while audio is enabled; the screen then shows a camera-unavailable panel with Retry and Open Settings. Before recording, `AppPermissionService.ensureRequiredPermissions` requires camera, location (while in use) and, when audio is enabled, microphone. On Android it also asks for notifications, and on Android 9 and lower for storage when gallery export is turned on; these are recommended, not required. The app never requests background location. It does not request the battery-optimization exemption automatically; the recording screen offers it once, behind a dialog the rider can decline. Recording also refuses to start while system location services are off. A permanently denied permission can only be re-enabled from system settings. For testing, `adb shell pm revoke com.example.motocam android.permission.CAMERA` (or another permission) revokes one grant, and `adb shell pm clear com.example.motocam` resets all app data and permissions. |
+| Recording stops when the screen locks or times out, or when you leave the app (Android) | Known limitation. The camera plugin binds CameraX to `MainActivity`, so recording stops whenever the activity stops: screen lock, screen timeout, or leaving the app without entering Picture-in-Picture. The foreground service, notification permission and battery-optimization exemption do not prevent this. Keep the screen on and the app in front (or in PiP) while recording. See [recording-pipeline.md](recording-pipeline.md). |
+| Recording stops when the screen locks (iOS) | Known limitation. The app does not disable the idle timer while recording, so iOS Auto-Lock interrupts the capture session. |
+| Permission prompts never appear on iOS | `permission_handler` compiles out every permission whose macro is not set, and then reports it as permanently denied. [ios/Podfile](../ios/Podfile) sets `PERMISSION_CAMERA=1`, `PERMISSION_MICROPHONE=1` and `PERMISSION_LOCATION_WHENINUSE=1` in its `post_install` hook. Run `pod install` (or a Flutter iOS build) again after changing it. See [platform-integration.md](platform-integration.md). |
+| CI fails while it passes locally | CI uses Flutter 3.41.2 and Temurin 17, runs `flutter pub get --enforce-lockfile` (which fails when `pubspec.lock` does not match `pubspec.yaml`), builds a debug APK and checks formatting. Compare `flutter --version` and `java -version` in the CI log with your local versions, commit an updated `pubspec.lock` with any pubspec change, and run `dart format lib test`. |
+
+## Contribution workflow
+
+This section describes how work has actually been done in the repository's history; there is no written contribution policy.
+
+- **Branches.** The remote has `main` and two personal branches, `Sarthak` and `samaksh`. All twelve GitHub pull requests (#1 to #12) were merged with merge commits. Up to v0.1.5, most work reached `main` through PRs from `Sarthak`. PRs #2, #8 and #11 went the other way, from `main` into a personal branch, to bring it up to date. Since then, almost everything has been committed directly to `main` without a PR, including the tagged commits for v0.1.6 to v0.1.12 and the commits cd39097, 8efaf72 and a33a583. The only later PR that added new commits is #10 (app icons and dependencies from `samaksh`). In total, 20 of the 37 non-merge commits on `main` up to a33a583 were committed to it directly. Both personal branches are behind `main`; `samaksh` also carries one app-icon commit that is not on `main`.
+- **Commit messages.** The style is mixed. Many commits use conventional-commit prefixes, for example `feat(playback): ...`, `fix(recording): ...`, `docs(release): ...`, `chore(release): ...`, `refactor: ...` and `release: v0.1.9 ...`. Others use a version prefix (`v0.1.12: ...`), and several commits, such as 8efaf72, have pasted `git status` output as their message. For new work, use a short conventional-commit subject that says what changed.
+- **Before opening a PR**, run what CI's `validate` job runs:
+
+  ```sh
+  flutter analyze
+  flutter test
+  flutter build apk --debug
+  dart format --output=none --set-exit-if-changed lib test
+  pwsh ./scripts/release-security-precheck.ps1 -SkipTests -SkipAnalyze   # if you touched Gradle, the manifest, Info.plist or the Podfile
+  ```
+
+- **Versions and tags.** `pubspec.yaml` is at `1.0.1+13`, while tags follow a separate `v0.1.x` scheme (the first three are uppercase `V0.1.0` to `V0.1.2`). Tagging and release notes are covered in [release.md](release.md).
+- **License.** The repository has no LICENSE file and no license has been chosen yet. Keep this in mind before reusing code from or contributing code to the project.
+- **Documentation.** If a change alters behaviour described in `docs/`, update the relevant document in the same PR. [docs/README.md](README.md) explains how the documentation set is organized.
+
+## Related documents
+
+- [architecture.md](architecture.md): module map, state management and core flows
+- [platform-integration.md](platform-integration.md): method channels, Android manifest and the iOS project
+- [release.md](release.md): signing, release builds, the precheck script and release notes
+- [settings.md](settings.md): every SharedPreferences key
+- [data-formats.md](data-formats.md): storage locations and file formats
+- [recording-pipeline.md](recording-pipeline.md), [telemetry.md](telemetry.md), [playback-and-history.md](playback-and-history.md): subsystem deep dives

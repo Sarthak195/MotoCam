@@ -1,0 +1,388 @@
+# Native platform integration
+
+How MotoCam's Dart code talks to native Android code through four method channels, what the Android manifest, resources and runtime permission flow look like, and the current state of the iOS project. All native behaviour described here is Android-only unless a section says otherwise; iOS has no native channel handlers.
+
+## Contents
+
+- [Native code overview](#native-code-overview)
+- [Method-channel reference](#method-channel-reference)
+  - [background_recording](#comexamplemotocambackground_recording)
+  - [device_status](#comexamplemotocamdevice_status)
+  - [pip](#comexamplemotocampip)
+  - [media](#comexamplemotocammedia)
+- [Android details](#android-details)
+  - [Foreground service](#foreground-service)
+  - [Picture-in-Picture](#picture-in-picture)
+  - [Battery-optimization exemption](#battery-optimization-exemption)
+  - [Media scanning and gallery export](#media-scanning-and-gallery-export)
+  - [Battery and thermal status](#battery-and-thermal-status)
+- [Android manifest permission matrix](#android-manifest-permission-matrix)
+- [Runtime permission flow](#runtime-permission-flow)
+- [iOS: current state](#ios-current-state)
+- [How to add a new method channel](#how-to-add-a-new-method-channel)
+- [Related documents](#related-documents)
+
+## Native code overview
+
+| File | Platform | Role |
+|---|---|---|
+| [MainActivity.kt](../android/app/src/main/kotlin/com/example/motocam/MainActivity.kt) | Android | `MainActivity : FlutterActivity`. `configureFlutterEngine` registers the handlers for all four channels. Also owns the PiP hooks (`onUserLeaveHint`, `onPause`, `onPictureInPictureModeChanged`), the notification-stop `BroadcastReceiver` (registered in `onCreate`, unregistered in `onDestroy`), `readBatteryStatus`, `thermalStatusLabel`, `isPipSupported` and `stopBackgroundRecordingService`. `onDestroy` also stops the foreground service if this activity started it. There are no `onResume` or `onNewIntent` overrides. |
+| [BackgroundRecordingService.kt](../android/app/src/main/kotlin/com/example/motocam/BackgroundRecordingService.kt) | Android | `BackgroundRecordingService : Service`. The foreground service that shows the recording notification and holds a partial wake lock while recording. Not bound (`onBind` returns `null`); driven entirely by intent actions. Overrides `onCreate` (creates the notification channel), `onStartCommand`, `onTaskRemoved` and `onDestroy`. Its `companion object` holds the action constants and `grantedForegroundServiceTypes(context)`. |
+| [AppDelegate.swift](../ios/Runner/AppDelegate.swift) | iOS | `AppDelegate : FlutterAppDelegate, FlutterImplicitEngineDelegate`. `didInitializeImplicitFlutterEngine` only calls `GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)`. No method channels. |
+| [SceneDelegate.swift](../ios/Runner/SceneDelegate.swift) | iOS | An empty `SceneDelegate : FlutterSceneDelegate`, named by the `UIApplicationSceneManifest` in `Info.plist` (see [iOS](#ios-current-state)). |
+
+Both Swift files match the Flutter 3.41 app template unchanged.
+
+The Dart side of each channel lives in a small service class:
+
+| Dart file | Class | Channel |
+|---|---|---|
+| [background_recording_service.dart](../lib/core/services/background_recording_service.dart) | `BackgroundRecordingService` (singleton, `instance`) | `background_recording` |
+| [device_status_service.dart](../lib/core/services/device_status_service.dart) | `DeviceStatusService` | `device_status` |
+| [pip_service.dart](../lib/core/services/pip_service.dart) | `PipService` (singleton, `instance`) | `pip` |
+| [camera_provider.dart](../lib/features/camera/providers/camera_provider.dart) | `CameraProvider.platform` (public static constant) | `media` |
+| [app_permission_service.dart](../lib/core/services/app_permission_service.dart) | `AppPermissionService` | none (uses `permission_handler`, `BackgroundRecordingService` and a `DeviceStatusService`, an optional const-constructor parameter that defaults to `const DeviceStatusService()`) |
+
+The four service classes above (every row except `CameraProvider`) are created or first used by [recording_screen.dart](../lib/features/recording/recording_screen.dart) (`RecordingScreen` is the app's home screen), whose `initState` calls `PipService.initialize`, `BackgroundRecordingService.initialize`, starts device-status polling and runs the permission bootstrap. The `media` channel belongs to `CameraProvider`, which `main.dart` creates in its `MultiProvider`.
+
+Platform gating on the Dart side:
+
+- `BackgroundRecordingService`, `DeviceStatusService` and the Android block of `AppPermissionService` check `defaultTargetPlatform == TargetPlatform.android`. Under `flutter test`, `defaultTargetPlatform` is Android, so these calls reach the channels in tests; the widget test mocks them.
+- `PipService` is not gated; it relies on catching the exception and returning `false`.
+- In `CameraProvider`, the gallery export is gated with `dart:io` `Platform.isAndroid`. `availableStorageBytes` is not gated: on iOS the call fails, returns `null`, and an unknown free space never blocks recording.
+
+## Method-channel reference
+
+All channel names are identical on both sides, and every Dart method name and argument key has a matching Kotlin case. Kotlin also handles two methods that Dart never calls (`pip.isPipSupported` and `media.scanMediaFile`). Unless a row says otherwise, a Kotlin handler that throws is converted by the Flutter embedding into a `PlatformException` with code `error`. Methods marked "N→D" are invoked by native code and handled in Dart.
+
+### com.example.motocam/background_recording
+
+Dart: `BackgroundRecordingService` (every method that calls the channel returns early off Android). Kotlin: `MainActivity.configureFlutterEngine`, field `backgroundRecordingMethodChannel` (retained so native code can call back).
+
+| Method | Dir | Arguments | Return | Errors | Dart caller | Kotlin handler behaviour | iOS |
+|---|---|---|---|---|---|---|---|
+| `startForegroundRecording` | D→N | `elapsedMs` (int; Kotlin reads `Number`, default 0) | `bool`: `true` when the service was asked to start, `false` when it was refused. Dart returns `started ?? true` | Kotlin catches the start exception and returns `false`. Dart does not catch; the caller does | `_runStartRecordingFlow`, once with `Duration.zero` after `camera.startRecording()` succeeds, inside try/catch. `false` or an exception shows "Background protection unavailable: recording may stop if the app is in the background or the screen turns off." | Sets `isRecordingActive = true`. On API 34+ returns `false` without starting anything when `grantedForegroundServiceTypes` is 0. Otherwise sends `ACTION_START` with the elapsed extra via `startForegroundService` (API 26+) or `startService` (API 24-25), records `foregroundStartWallMs = now - elapsedMs` and sets `isForegroundServiceStarted` | Returns `true` without calling the channel |
+| `updateForegroundRecording` | D→N | `elapsedMs` (int) | `bool` / `void` | Kotlin: `startService` exception → `false`. Dart catches `PlatformException` and logs it; the call is not awaited | On every `camera.timerStream` tick (1 s) while recording | Replies `true` and does nothing unless `isRecordingActive` and `isForegroundServiceStarted` are set and the implied start time (`now - elapsedMs`) differs from `foregroundStartWallMs` by more than 2000 ms. Then sends `ACTION_UPDATE` with the elapsed extra and stores the new start time | Returns immediately |
+| `stopForegroundRecording` | D→N | none | `true` / `void` | Dart: not caught in the service; `RecordingScreen._stopForegroundServiceSafely` catches and logs | `_stopForegroundServiceSafely`, from the `finally` block of `_stopRecordingFlow` (after `camera.stopRecording()` and the ride save), from `_stopRecordingFlow` when nothing is recording, and from `RecordingScreen.dispose` (not awaited). Also called by the Dart `onStopRequested` handler when nothing listens to `events` | Clears `isRecordingActive` and `isForegroundServiceStarted`, then `stopBackgroundRecordingService()`: `startService(ACTION_STOP)`, falling back to `stopService` if that throws | Returns immediately |
+| `isIgnoringBatteryOptimizations` | D→N | none | `bool` | Dart: exception or `null` → `true` | `AppPermissionService.ensureRequiredPermissions` (report only), the start preflight checklist, `shouldOfferBatteryOptimizationExemption` | `PowerManager.isIgnoringBatteryOptimizations(packageName)`; `true` below API 23 (unreachable with minSdk 24) | Returns `true` |
+| `requestIgnoreBatteryOptimizations` | D→N | none | `bool`: `true` when the system dialog was launched, not when the exemption was granted | Kotlin: exception → `false`. Dart: exception or `null` → `false` | Only `RecordingScreen._maybeOfferBatteryOptimizationExemption`, after the rider accepts the offer-once dialog | Starts `Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` with `package:<packageName>` and `FLAG_ACTIVITY_NEW_TASK`, then replies immediately | Returns `true` |
+| `onStopRequested` | N→D | `null` | Dart handler returns `null` | Unknown methods also return `null` | Handler registered by `BackgroundRecordingService.initialize` (Android only). If `events` has a listener it emits `BackgroundRecordingEvent.stopRequested`; otherwise it calls `stopForegroundRecording` itself | Invoked by `MainActivity.backgroundStopReceiver` when the notification Stop broadcast arrives | No handler registered |
+
+`isIgnoringBatteryOptimizations` and `requestIgnoreBatteryOptimizations` also call `initialize()` before invoking the channel. Two methods never touch the channel: `hasOfferedBatteryOptimizationExemption` and `markBatteryOptimizationExemptionOffered` read and write the SharedPreferences key `battery_optimization_exemption_offered` (`batteryOptimizationOfferedKey`). `shouldOfferBatteryOptimizationExemption` combines `hasOfferedBatteryOptimizationExemption` with `isIgnoringBatteryOptimizations` and returns `true` only on Android, when the offer was never made and the app is not exempt. `dispose()` closes the `events` stream and has no callers in `lib/`.
+
+### com.example.motocam/device_status
+
+Dart: `DeviceStatusService.getBatteryAndThermalStatus`. Kotlin: an unretained channel in `configureFlutterEngine`.
+
+| Method | Dir | Arguments | Return | Errors | Dart caller | Kotlin handler behaviour | iOS |
+|---|---|---|---|---|---|---|---|
+| `getBatteryStatus` | D→N | none | Map: `batteryLevelPercent` (Int or null), `batteryTemperatureC` (Double or null), `thermalStatus` (String), `sdkInt` (Int, `Build.VERSION.SDK_INT`) | Dart: `null` or any exception → `DeviceStatusSnapshot.empty`. Unknown method → `notImplemented` | `RecordingScreen._refreshDeviceStatus` (immediately and every 15 s); `AppPermissionService.ensureRequiredPermissions` when gallery export is on, to decide whether legacy storage is needed | `readBatteryStatus()`, see [Battery and thermal status](#battery-and-thermal-status) | Returns `DeviceStatusSnapshot.empty` without calling the channel |
+
+`DeviceStatusSnapshot.fromMap` accepts any `num` for the numeric keys and ignores values of the wrong type. `sdkInt` becomes `androidSdkInt`.
+
+### com.example.motocam/pip
+
+Dart: `PipService` (static `enterPipMode`; instance `initialize`, `pipModeStream`, `isInPipMode`, `dispose`). Kotlin: field `pipMethodChannel`, constant named `CHANNEL`.
+
+| Method | Dir | Arguments | Return | Errors | Dart caller | Kotlin handler behaviour | iOS |
+|---|---|---|---|---|---|---|---|
+| `isPipSupported` | D→N | none | `bool`: `SDK_INT >= 26` and `PackageManager.FEATURE_PICTURE_IN_PICTURE` is present | — | None; Dart has no wrapper for it | Returns `isPipSupported()` | — |
+| `enterPipMode` | D→N | none | `bool`: the result of `enterPictureInPictureMode`; `false` when PiP is not supported or the call throws | Dart: any exception → `false` | `RecordingScreen._handleBackPressWhileRecording` (system back and the MINIMISE button while recording) | If `isPipSupported()`, builds `PictureInPictureParams` with aspect ratio 9:16 and calls `enterPictureInPictureMode` inside try/catch | `MissingPluginException` → `false` |
+| `onPipModeChanged` | N→D | `bool` | Dart handler returns `null` | — | Handler registered by `PipService.initialize` on every platform; sets `isInPipMode` (`arguments == true`) and adds to `pipModeStream` | Invoked from `onPictureInPictureModeChanged` | Handler registered but never called |
+
+### com.example.motocam/media
+
+Dart: `CameraProvider.platform`, used by `availableStorageBytes` and `_drainGalleryExportQueue`. Kotlin: an unretained channel in `configureFlutterEngine`.
+
+| Method | Dir | Arguments | Return | Errors | Dart caller | Kotlin handler behaviour | iOS |
+|---|---|---|---|---|---|---|---|
+| `getAvailableStorageBytes` | D→N | `path` (String, the recordings directory) | Long: free bytes on that volume | `STORAGE_QUERY_FAILED` (exception message). Dart catches everything and returns `null` | `CameraProvider.availableStorageBytes`, from the free-space check before START and at each segment roll | `StatFs(path).availableBytes`; uses `filesDir` when `path` is null or blank | `MissingPluginException` → `null`, so the check never blocks |
+| `scanMediaFile` | D→N | `path` (String) | `true`, sent from the scanner's completion callback | `INVALID_ARGS` "Path cannot be null" | None; Dart does not scan recordings | `MediaScannerConnection.scanFile(this, [path], null)` | — |
+| `exportVideoToGallery` | D→N | `sourcePath`, `displayName`, `relativePath` (Strings) | String: MediaStore item URI (API 29+) or absolute file path (API 24-28). Dart discards it | `INVALID_ARGS` (missing or blank `sourcePath`/`displayName`), `PERMISSION_DENIED` (API 24-28 without `WRITE_EXTERNAL_STORAGE`), `SOURCE_NOT_FOUND`, `EXPORT_FAILED` (exception message) | `_drainGalleryExportQueue`, one awaited call per queued locked segment, only when gallery export is on | Checks the permission on the calling thread, then copies on a new `Thread` and replies via `runOnUiThread`. See [Media scanning and gallery export](#media-scanning-and-gallery-export) | Never called |
+
+Dart always sends `relativePath` `Movies/MotoCam/Recordings`. Kotlin uses `Movies/MotoCam/Videos` only when the argument is absent. Both native branches honour the argument.
+
+## Android details
+
+Build targets that affect the native code ([build.gradle.kts](../android/app/build.gradle.kts)): `applicationId` and `namespace` `com.example.motocam`, `compileSdk` and `targetSdk` 36, `minSdk = flutter.minSdkVersion` (24 in Flutter 3.41.2), NDK 28.1.13356709, Java and JVM target 17. The plugins in [settings.gradle](../android/settings.gradle) are AGP 8.11.1 and Kotlin 2.2.20. Because minSdk is 24, the `SDK_INT < M` (API 23) branches in `MainActivity` never run, while the `< O` (API 26), `< Q` (API 29) and `< R` (API 30) branches are live on older devices. Build and signing are covered in [development.md](development.md) and [release.md](release.md).
+
+### Foreground service
+
+`BackgroundRecordingService` is declared in the manifest with `android:exported="false"` and `android:foregroundServiceType="camera|microphone|location"`. It has no `android:stopWithTask` attribute; `onTaskRemoved` tears the service down instead.
+
+**Service types.** `grantedForegroundServiceTypes(context)` builds the type mask from the permissions granted at that moment: camera for `CAMERA`, location for `ACCESS_FINE_LOCATION` or `ACCESS_COARSE_LOCATION`, microphone for `RECORD_AUDIO`. It returns 0 below API 30. On API 30+ `ACTION_START` calls the three-argument `startForeground(4001, notification, mask)`; below API 30 it calls the two-argument form, so the manifest types apply. On API 34+, where a missing type permission throws a `SecurityException`, `MainActivity` refuses to start the service when the mask is 0 and `startForegroundRecording` returns `false`.
+
+**Intent actions** (constants in the service's `companion object`):
+
+| Action | Sent by | Service behaviour |
+|---|---|---|
+| `com.example.motocam.action.START_RECORDING_FOREGROUND` (`ACTION_START`) | `startForegroundRecording` handler | Cancels a pending stop timeout, clears `isStopRequested`, reads `elapsedMs`, acquires the wake lock and calls `startForeground` with the granted types. If `startForeground` throws, it logs and tears down |
+| `...UPDATE_RECORDING_FOREGROUND` (`ACTION_UPDATE`) | `updateForegroundRecording` handler, only when the clock drifted | If the service is not in the foreground, `stopSelf(startId)`. If a stop was requested, ignored. Otherwise `NotificationManager.notify(4001, …)` with the new start time |
+| `...STOP_RECORDING_FOREGROUND` (`ACTION_STOP`) | `stopForegroundRecording` handler, and `MainActivity.onDestroy` | `tearDown()`: cancels the stop timeout, releases the wake lock, `stopForeground(STOP_FOREGROUND_REMOVE)`, `stopSelf()` |
+| `...STOP_FROM_NOTIFICATION` (`ACTION_STOP_FROM_NOTIFICATION`) | Notification Stop action | If the service is not in the foreground, `tearDown()`. Otherwise sets `isStopRequested`, sends the `STOP_REQUESTED` broadcast, replaces the notification with the "stopping" notification and schedules `tearDown()` after 10 minutes. The service and wake lock stay up |
+| `...STOP_REQUESTED` (`ACTION_STOP_REQUESTED`) | Broadcast from the service | Received by `MainActivity.backgroundStopReceiver` |
+
+A null intent or an unknown action calls `stopSelf(startId)` when the service is not in the foreground. `onStartCommand` returns `START_NOT_STICKY` for every intent, so the system never restarts the service. `onTaskRemoved` (the task is swiped away in Recents) calls `tearDown()`. The service never measures time itself; the notification's chronometer does.
+
+**Recording notification.** Channel `motocam_recording_channel` ("MotoCam Recording", description "Shows active recording controls and elapsed time", `IMPORTANCE_LOW`, no badge) is created in `onCreate` on API 26+ if it does not exist; its importance is fixed by Android after creation. The notification is ongoing, alert-once, low priority, category `service`, small icon `R.drawable.ic_stat_recording`, title "MotoCam recording in progress", text "Recording - screen can be off". The elapsed time is a system chronometer: `setWhen(now - elapsedMs)` with `setUsesChronometer(true)`, so the notification is not re-posted every second. Tapping the body opens the app's launch intent (request code 0) with its flags set to `FLAG_ACTIVITY_SINGLE_TOP | FLAG_ACTIVITY_CLEAR_TOP`. The **Stop** action is a `PendingIntent.getService` for `ACTION_STOP_FROM_NOTIFICATION` (request code 1). Both pending intents use `FLAG_UPDATE_CURRENT | FLAG_IMMUTABLE` and are built once per service instance.
+
+**Stopping notification.** After Stop is tapped, the notification reads "MotoCam is stopping the recording" / "Saving the ride - open MotoCam to check". It has the same icon, priority, category and tap intent, no Stop action and no chronometer. A late `ACTION_UPDATE` cannot replace it.
+
+**Notification icon.** [ic_stat_recording.xml](../android/app/src/main/res/drawable/ic_stat_recording.xml) is a 24 dp vector camera glyph, white on transparent, because Android draws notification small icons from the alpha channel only.
+
+**Wake lock.** `PARTIAL_WAKE_LOCK` tagged `MotoCam:RecordingWakeLock`, not reference counted, acquired on START with a 12-hour timeout (not re-armed on UPDATE), released by `tearDown()` and in `onDestroy`.
+
+**Stop relay and the INTERNAL_BROADCAST permission.** The manifest declares `com.example.motocam.permission.INTERNAL_BROADCAST` with `protectionLevel="signature"` and the app also `uses-permission`s it, so only apps signed with the same key can send or receive the stop broadcast. The service sends `Intent(ACTION_STOP_REQUESTED).setPackage(packageName)` with that permission as the required receiver permission. `MainActivity.onCreate` registers the receiver with the same permission as the required broadcaster permission (on API 33+ also with `RECEIVER_NOT_EXPORTED`), and `onDestroy` unregisters it, ignoring `IllegalArgumentException`. The receiver therefore exists for the whole activity lifetime, including while the activity is stopped. Kotlin builds the permission name as `"$packageName.permission.INTERNAL_BROADCAST"`, while the manifest hard-codes `com.example.motocam`, so the two match only while the applicationId stays `com.example.motocam`. The release precheck asserts that the `<permission>` element exists with `protectionLevel="signature"`.
+
+```mermaid
+sequenceDiagram
+    participant N as Notification Stop action
+    participant S as BackgroundRecordingService
+    participant A as MainActivity receiver
+    participant D as Dart (RecordingScreen)
+    N->>S: ACTION_STOP_FROM_NOTIFICATION
+    S->>A: broadcast STOP_REQUESTED (INTERNAL_BROADCAST)
+    S->>S: "stopping" notification, 10-min fallback timer
+    Note over A: registered from onCreate to onDestroy
+    A->>D: onStopRequested (background_recording channel)
+    D->>D: events: stopRequested -> _stopRecordingFlow(showSuccessMessage: false)
+    D->>D: camera.stopRecording(), save ride JSON
+    D->>S: stopForegroundRecording -> ACTION_STOP -> tearDown
+```
+
+How the pieces fit together:
+
+- The foreground service and wake lock stay up until Dart has stopped the camera and saved the ride, for both the notification Stop and the in-app STOP. `_stopRecordingFlow` calls `stopForegroundRecording` in its `finally` block.
+- If no Dart listener exists when `onStopRequested` arrives, the Dart handler calls `stopForegroundRecording` itself. If Dart never answers, the service tears itself down after 10 minutes.
+- If the stop request arrives when nothing is recording, `_stopRecordingFlow` only stops the service.
+- `MainActivity.onDestroy` clears `isRecordingActive` and, if it started the service for the current recording, sends `ACTION_STOP`, so the service, wake lock and notification do not outlive the activity.
+
+**Current limitation: recording stops when the activity stops.** The service and wake lock keep the process and Dart timers alive, but they do not keep the camera running. The camera plugin binds CameraX to `MainActivity`'s lifecycle, so capture stops whenever the activity stops: when the screen locks or times out, or when the rider leaves the app without entering PiP. Nothing in the app keeps the screen on. The notification text "screen can be off" does not hold for the camera. Footage of the segment in progress when the task is removed is not finalised.
+
+The Dart-side recording lifecycle is described in [recording-pipeline.md](recording-pipeline.md#lifecycle-background-and-the-foreground-service).
+
+### Picture-in-Picture
+
+The activity is declared with `android:supportsPictureInPicture="true"`, `android:resizeableActivity="true"`, `launchMode="singleTop"` and `android:taskAffinity=""`. PiP requires API 26.
+
+- **Automatic.** `onUserLeaveHint` and `onPause` both call `maybeEnterRecordingPip`, which enters PiP (9:16) only if `isRecordingActive` is true, the API is 26+, and the activity is not already in PiP. It does not check the PiP system feature, and exceptions are swallowed. Because of the `onPause` hook, PiP is also attempted whenever another activity comes in front of MotoCam while recording, not only when the user leaves the app. The code never calls `setPictureInPictureParams` or `setAutoEnterEnabled`.
+- **Explicit.** System back while recording (`PopScope(canPop: !camera.isRecording)`) and the MINIMISE button (the HISTORY button relabelled while recording) call `PipService.enterPipMode()`. If it returns `false` (API 24-25, no PiP feature, PiP turned off for the app, iOS, or any channel error) the screen shows "Recording active. Stop first to exit."
+- **Mode changes.** `onPictureInPictureModeChanged` sends `onPipModeChanged(bool)`. `RecordingScreen` switches to its compact PiP view immediately on entry and back to the full view 200 ms after exit.
+
+`isRecordingActive` lives on the activity instance, is not persisted, and is set by the `startForegroundRecording` handler (also when the service is refused) and cleared by `stopForegroundRecording` and `onDestroy`. The PiP layout and the stall recovery after returning from PiP are covered in [features.md](features.md#picture-in-picture-and-screen-off-recording) and [recording-pipeline.md](recording-pipeline.md#lifecycle-background-and-the-foreground-service).
+
+### Battery-optimization exemption
+
+The manifest declares `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`. The app never requests the exemption on its own. It is checked or offered in three places:
+
+1. **Permission audit** (`ensureRequiredPermissions`, Android only): checks `isIgnoringBatteryOptimizations` and, if the app is not exempt, adds "Ignore battery optimizations" to the recommended list. `RecordingScreen` drops that item from its SnackBar once the offer has been made.
+2. **Offer-once dialog** (`_maybeOfferBatteryOptimizationExemption`): after an in-app STOP that saved the ride JSON, if `shouldOfferBatteryOptimizationExemption()` is true, the screen marks the offer as made and shows "Keep recording with the screen off?" with **Not now** and **Open setting**. Only **Open setting** calls `requestIgnoreBatteryOptimizations`. The flag is persisted whatever the rider answers, so the dialog appears at most once per install. A notification Stop or a fault stop does not show it.
+3. **Start preflight checklist**: a non-blocking "Battery Optimization Exemption" row (`Enabled` / `Recommended for stable screen-off recording`). Until the one-time offer has been shown, this warning opens the sheet like any other; after it, the row is listed only when another row opens the sheet.
+
+### Media scanning and gallery export
+
+Recordings are written to app-specific external storage; locked segments are copied to shared storage only when the rider turns gallery export on. The storage layout is in [recording-pipeline.md](recording-pipeline.md#storage-layout-and-file-naming) and the rider-facing behaviour in [features.md](features.md#export-to-gallery).
+
+- **Free space.** Before START and at each segment roll, `CameraProvider` asks `getAvailableStorageBytes` for the recordings directory. It needs room for one estimated segment (segment duration at the higher of the requested bitrate and 20 Mbps) plus a 100 MiB margin; at a roll, the bytes the loop will free count towards the margin. When there is not enough room, recording does not start or stops with "Storage is almost full. Free up space on the phone to keep recording." An unknown free space (`null`) never blocks.
+- **No media scan of private segments.** Loop segments are not handed to the media scanner. The recordings directory holds a `.nomedia` marker.
+- **Gallery export.** Off by default. The setting `AppSettingsProvider.exportLockedClipsToGallery` is copied to `CameraProvider.autoExportLockedClipsToGallery` at every START. At stop, the session's locked segments go to `_enqueueDeferredGalleryExport` (Android only); the queue is drained about 2 s later, one awaited `exportVideoToGallery` call at a time, with `relativePath` `Movies/MotoCam/Recordings`.
+- **API 29+ native branch.** Inserts a `MediaStore.Video.Media` row (`DISPLAY_NAME`, `MIME_TYPE video/mp4`, `RELATIVE_PATH` from the argument, `IS_PENDING 1`), streams the file into it, then sets `IS_PENDING 0`. If the copy or the update fails, the pending row is deleted and `EXPORT_FAILED` is returned.
+- **API 24-28 native branch.** Returns `PERMISSION_DENIED` unless `WRITE_EXTERNAL_STORAGE` is granted. Otherwise copies to `Environment.getExternalStorageDirectory()/<relativePath>/<displayName>` (overwriting a file of the same name) and scans it without waiting for the scan.
+- **Dart error handling.** On `PERMISSION_DENIED`, the drain requests `Permission.storage` once per drain and retries that clip once. Other errors count as failures; the private copy stays in the recordings directory. There is no `dart:io` copy fallback. The drain ends with a summary such as "2 locked clips copied to the gallery" or "1 locked clip not copied (storage permission denied)." The queue lives only in memory, and MotoCam keeps no record of the exported copies, so it cannot remove them later.
+
+### Battery and thermal status
+
+`MainActivity.readBatteryStatus` runs on the main thread and reads the sticky `ACTION_BATTERY_CHANGED` intent:
+
+| Key | Computation | `null` when |
+|---|---|---|
+| `batteryLevelPercent` | `(level * 100.0 / scale).toInt()` | `level < 0` or `scale <= 0`, or no sticky intent |
+| `batteryTemperatureC` | `EXTRA_TEMPERATURE / 10.0` (signed tenths of °C; 0 °C and below are kept) | the extra is missing, or no sticky intent |
+| `thermalStatus` | `PowerManager.currentThermalStatus` mapped to `none`, `light`, `moderate`, `severe`, `critical`, `emergency`, `shutdown`, else `unknown` (API 29+) | never; `"unsupported"` below API 29 |
+| `sdkInt` | `Build.VERSION.SDK_INT` | never |
+
+The UI shows battery level and temperature, and the preflight adds Battery Level and Device Temperature rows when they are known. `thermalStatus` is parsed but not read by any UI code. `AppPermissionService` uses `sdkInt` to request legacy storage only below API 29. See [telemetry.md](telemetry.md#device-status-android-only).
+
+## Android manifest permission matrix
+
+Source: [AndroidManifest.xml](../android/app/src/main/AndroidManifest.xml). The debug and profile manifests add only `INTERNET`.
+
+| Permission | Why | Requested at runtime | API-level notes |
+|---|---|---|---|
+| `INTERNET` | Map tiles from `tile.openstreetmap.org` ([map_source_config.dart](../lib/features/map/map_source_config.dart)) | No (normal permission) | — |
+| `ACCESS_NETWORK_STATE` | No app Dart or Kotlin code references it | No (normal permission) | — |
+| `CAMERA` | Video capture; camera service type | `AppPermissionService` (`Permission.camera`, required) and `CameraProvider.initializeCamera` | — |
+| `RECORD_AUDIO` | Audio track; microphone service type | Same two places, only when audio is enabled (required then) | — |
+| `ACCESS_FINE_LOCATION`, `ACCESS_COARSE_LOCATION` | GPS telemetry; location service type | `AppPermissionService` (`Permission.locationWhenInUse`, required); `TelemetryProvider` also calls `Geolocator.requestPermission` if denied | On API 31+ the user can grant approximate location only |
+| `FOREGROUND_SERVICE` | `BackgroundRecordingService` | No (normal permission) | API 28+ |
+| `FOREGROUND_SERVICE_CAMERA`, `_MICROPHONE`, `_LOCATION` | The three types in the service's `foregroundServiceType` | No (normal permissions) | API 34+ requires the type permissions; on API 30+ the service starts with only the types whose runtime permission is granted |
+| `POST_NOTIFICATIONS` | Visible foreground-service notification | `AppPermissionService` (`Permission.notification`, recommended) | Runtime permission on API 33+ |
+| `WAKE_LOCK` | Partial wake lock in the service | No (normal permission) | — |
+| `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` | Lets the app launch the direct exemption dialog | Only from the offer-once dialog, see [above](#battery-optimization-exemption) | — |
+| `com.example.motocam.permission.INTERNAL_BROADCAST` | Protects the notification-stop broadcast | No (signature permission, granted at install) | Declared in the same manifest |
+| `WRITE_EXTERNAL_STORAGE` (`maxSdkVersion="28"`) | Gallery export on API 24-28 | `AppPermissionService` (`Permission.storage`, recommended) when gallery export is on and `sdkInt < 29`; `_drainGalleryExportQueue` after a `PERMISSION_DENIED` | Ignored on API 29+ |
+
+`ACCESS_BACKGROUND_LOCATION` is not declared and no Dart code requests it: while-in-use location is enough because the location-typed foreground service, started while the app is visible, keeps GPS running. The release precheck fails if `ACCESS_BACKGROUND_LOCATION` or `MANAGE_EXTERNAL_STORAGE` is declared in the source manifest or in a fresh merged release manifest.
+
+Other manifest settings relevant to native integration:
+
+- `uses-feature` `android.hardware.camera` and `android.hardware.location.gps`, both `required="false"`.
+- `MainActivity`: `exported="true"`, `launchMode="singleTop"`, `taskAffinity=""`, theme `@style/LaunchTheme` with `NormalTheme` as the Flutter normal theme, and the PiP attributes listed [above](#picture-in-picture).
+- `MainActivity` sets the property `android.window.PROPERTY_COMPAT_ALLOW_RESTRICTED_RESIZABILITY` to `true`. The app is portrait-only (`SystemChrome.setPreferredOrientations` in `main.dart`), and Android 16 ignores that lock on large screens (smallest width 600 dp and up) for apps targeting API 36 unless this opt-out is set.
+- `android:allowBackup="false"`, with [backup_rules.xml](../android/app/src/main/res/xml/backup_rules.xml) and [data_extraction_rules.xml](../android/app/src/main/res/xml/data_extraction_rules.xml) excluding both the `root` and the `external` domain (for cloud backup and device transfer). The `external` domain is `getExternalFilesDir()`, where every recording and ride telemetry file lives.
+
+**Themes.** `LaunchTheme` and `NormalTheme` inherit `@android:style/Theme.Black.NoTitleBar` in both [values/styles.xml](../android/app/src/main/res/values/styles.xml) and `values-night/styles.xml`, so the window is dark in light and dark system mode. `LaunchTheme` uses `@drawable/launch_background` as the window background. With minSdk 24 the `drawable-v21` variant applies (`?android:colorBackground`, black under `Theme.Black`); the plain `drawable/launch_background.xml` (`@android:color/black`) is the pre-API-21 fallback.
+
+## Runtime permission flow
+
+`AppPermissionService.ensureRequiredPermissions({required bool audioEnabled, bool galleryExportEnabled = false})` runs sequentially. For each permission the local `ensure` helper reads `status`; if it is not granted it calls `request()` whatever the status, including permanently denied (the OS answers at once when the permission really is blocked, while a permission reset to "Ask every time" gets a real prompt). If the result is still not granted, it records the label as required or recommended, and for a required permission whose result is permanently denied it also adds the label to `permanentlyDeniedRequired`. `AppPermissionService.isPermissionGranted` treats granted and limited as granted.
+
+| Order | Permission (`permission_handler`) | Label | Class | Platforms |
+|---|---|---|---|---|
+| 1 | `camera` | Camera | required | all |
+| 2 | `microphone` (only if `audioEnabled`) | Microphone | required | all |
+| 3 | `locationWhenInUse` | Location | required | all |
+| 4 | `notification` | Notifications (foreground recording status) | recommended | Android |
+| 5 | `storage` (only if `galleryExportEnabled` and `getBatteryStatus` reports `sdkInt < 29`) | Storage (gallery copy of locked clips) | recommended | Android |
+| 6 | battery-optimization exemption (native check only, never requested) | Ignore battery optimizations | recommended | Android |
+
+`PermissionAuditResult.hasPermanentlyDenied` is true only when a required permission is permanently denied. The audit runs at launch (`_bootstrapRuntimePrerequisites`), at every START press (`_runStartRecordingFlow`), and after each recovery action. The launch bootstrap is guarded against running twice at once; the `ensure` helper has no try/catch.
+
+```mermaid
+flowchart TD
+    A[ensureRequiredPermissions] --> B{"missingRequired empty?"}
+    B -- no --> C["Dialog 'Permissions Required':<br/>Later / Request Again / Open Settings"]
+    C -- Request Again --> R[re-run audit]
+    C -- Open Settings --> O["openAppSettings, wait for resume<br/>(max 2 min), then re-run audit"]
+    C -->|"Later / dismissed"| S
+    R --> S{"any issue left?"}
+    O --> S
+    B -- yes --> S
+    S -- yes --> T[SnackBar 4 s listing missing items]
+    S -- no --> U[continue]
+    T --> U
+    U --> V{"blocking issues?"}
+    V -- yes --> W["launch: camera not initialized<br/>START: flow returns"]
+    V -- no --> X["launch: _initializeCamera<br/>START: location-services check, preflight"]
+```
+
+Details:
+
+- The dialog text is "Recording cannot start until these permissions are granted:" followed by the missing required labels. When `hasPermanentlyDenied` is true it adds "Permanently denied: <labels>. Use Open Settings to enable them."
+- **Settings deep link.** "Open Settings" calls `permission_handler`'s `openAppSettings()`, which opens the app's system settings page. `_openSystemSettingsAndWaitForReturn` then waits until the app is resumed (or two minutes pass) before the re-audit runs.
+- The dialog is shown once per audit; after Request Again or Open Settings the result is not re-checked for a second dialog. These two re-audits do not pass `galleryExportEnabled`, so they skip the storage step.
+- The SnackBar reads "Required permissions missing: …" when a required permission is missing, otherwise "Recommended for reliable background recording: …". The battery item is left out once the offer-once dialog has been shown.
+- Location services (the system switch, not the permission) are checked separately at START by `_ensureLocationServiceEnabled`, which offers "Open Location Settings" (`Geolocator.openLocationSettings`) and also waits for the app to resume before re-checking.
+- When the app returns to the foreground while idle and the camera is not initialized, `RecordingScreen` re-initializes it if the camera (and, with audio on, microphone) permission is granted by then.
+- `CameraProvider.initializeCamera` requests camera and, if audio is on, microphone, and aborts if either is not granted. It does not request notifications.
+- The start preflight checklist re-reads the statuses of camera, microphone and location as blocking rows, adds blocking Location Services, Camera Ready and Media Write Access rows, and on Android adds non-blocking notification and battery-exemption rows. See [features.md](features.md#preflight-checks).
+
+## iOS: current state
+
+The iOS project builds the Flutter app with cross-platform plugins only. None of the native integrations above is implemented for it: the `pip`, `device_status`, `media` and `background_recording` channels have no iOS handlers.
+
+**Info.plist** ([Info.plist](../ios/Runner/Info.plist)) follows the Flutter 3.41.2 app template and adds MotoCam's keys:
+
+| Key | Value |
+|---|---|
+| `CFBundleIdentifier`, `CFBundleExecutable`, `CFBundleName`, `CFBundlePackageType`, `CFBundleShortVersionString`, `CFBundleVersion` and the other template bundle keys | Template values (`$(PRODUCT_BUNDLE_IDENTIFIER)`, `$(EXECUTABLE_NAME)`, `motocam`, `APPL`, `$(FLUTTER_BUILD_NAME)`, `$(FLUTTER_BUILD_NUMBER)`) |
+| `CFBundleDisplayName` | MotoCam |
+| `UILaunchStoryboardName` / `UIMainStoryboardFile` | `LaunchScreen` / `Main` |
+| `UIApplicationSceneManifest` | One scene configuration `flutter` (`UIWindowScene`, delegate `$(PRODUCT_MODULE_NAME).SceneDelegate`, storyboard `Main`); multiple scenes not supported |
+| `UISupportedInterfaceOrientations` | Portrait, landscape left and right (iPad also upside down) |
+| `NSCameraUsageDescription` | MotoCam needs camera access to record your rides |
+| `NSMicrophoneUsageDescription` | MotoCam needs microphone access to record audio with video |
+| `NSLocationWhenInUseUsageDescription` | MotoCam needs your location to track your route |
+| `NSMotionUsageDescription` | MotoCam needs accelerometer access to detect impacts and crashes |
+| `UIBackgroundModes` | `location` only |
+
+There is no Always-location usage string and no `audio` background mode. The release precheck requires `CFBundleIdentifier`, `CFBundleExecutable`, `CFBundlePackageType`, `CFBundleShortVersionString`, `CFBundleVersion`, both storyboard keys, `UIApplicationSceneManifest` and the camera, microphone and when-in-use location usage strings, and fails if `UIBackgroundModes` contains `audio`.
+
+**Podfile** ([Podfile](../ios/Podfile)): the Flutter template with `platform :ios, '13.0'` set (matching `IPHONEOS_DEPLOYMENT_TARGET = 13.0` in the Xcode project). Its `post_install` sets `GCC_PREPROCESSOR_DEFINITIONS` on every pod target build configuration that does not already define it (`||=`) to `$(inherited)`, `PERMISSION_CAMERA=1`, `PERMISSION_MICROPHONE=1` and `PERMISSION_LOCATION_WHENINUSE=1`. `permission_handler_apple` compiles a permission out unless its macro is set, and then reports it as permanently denied without prompting; these three are the permissions MotoCam requests on iOS. The release precheck asserts the three macros are present.
+
+**xcconfig.** [Debug.xcconfig](../ios/Flutter/Debug.xcconfig) and [Release.xcconfig](../ios/Flutter/Release.xcconfig) optionally include the CocoaPods `Pods-Runner.debug.xcconfig` / `Pods-Runner.release.xcconfig` (`#include?`) and then `Generated.xcconfig`.
+
+**Xcode project.** The Runner target uses `INFOPLIST_FILE = Runner/Info.plist` and bundle identifier `com.example.motocam`. There is no `PrivacyInfo.xcprivacy` privacy manifest.
+
+**Features that cannot work on iOS today**
+
+| Feature | Why |
+|---|---|
+| Foreground service, notification, notification Stop, wake lock | Android-only concept; every `BackgroundRecordingService` method that calls the channel returns early off Android. Nothing keeps camera capture running while the app is in the background. |
+| Keeping the screen awake | Nothing disables the idle timer while recording, so Auto-Lock interrupts the capture session and recording stops until the rider unlocks the phone. |
+| Battery-optimization exemption | Android-only; the Dart methods return `true` on iOS and the offer is never shown. |
+| Picture-in-Picture | No `pip` handler; `enterPipMode` catches `MissingPluginException` and returns `false`, so back or MINIMISE while recording always shows "Recording active. Stop first to exit." |
+| Battery level, temperature, thermal status | `DeviceStatusService` returns `DeviceStatusSnapshot.empty`; tiles show `--` and the preflight rows are omitted. |
+| Free-space check | No `media` handler; `availableStorageBytes` returns `null`, so low storage never blocks START or stops a ride. |
+| Gallery export | Android-only call sites; no iOS Photos export exists. |
+| Notification, storage and battery audit items | The audit's Android block is skipped. |
+
+Recording itself, GPS and accelerometer telemetry are written in Dart with cross-platform plugins. iOS stores recordings under `getApplicationDocumentsDirectory()/MotoCam Recordings` and uses `AppleSettings` for location (`bestForNavigation`, activity type `automotiveNavigation`, `pauseLocationUpdatesAutomatically: false`).
+
+## How to add a new method channel
+
+The project keeps one channel per concern, all registered in `MainActivity.configureFlutterEngine`, and wraps every channel except `media` (which `CameraProvider` calls directly) in a small Dart service. Follow the service pattern.
+
+**1. Name the channel.** Use `com.example.motocam/<concern>`. Method names are lowerCamelCase verbs; argument maps use String keys.
+
+**2. Dart service** (for example `lib/core/services/<concern>_service.dart`):
+
+```dart
+class FooService {
+  static const MethodChannel _channel = MethodChannel('com.example.motocam/foo');
+
+  Future<bool> doThing(String path) async {
+    // Document the non-Android result.
+    if (defaultTargetPlatform != TargetPlatform.android) return false;
+    try {
+      return await _channel.invokeMethod<bool>('doThing', {'path': path}) ?? false;
+    } catch (_) {
+      return false; // PlatformException / MissingPluginException
+    }
+  }
+}
+```
+
+- Gate on `defaultTargetPlatform == TargetPlatform.android`, as the existing services do, so the call also runs (against a mock) under `flutter test`; decide and document the non-Android return value.
+- Use a typed `invokeMethod<T>` and treat `null` explicitly.
+- Wrap calls in try/catch unless the caller is meant to see the error. Wrap a fire-and-forget call in `unawaited(...)` (the `discarded_futures` lint requires it) and catch its errors. An uncaught async error reaches the `PlatformDispatcher.instance.onError` handler in `main.dart`, which logs it in every build mode and keeps the app running; it does not recover the failed call.
+
+**3. Kotlin handler** in `MainActivity.configureFlutterEngine`:
+
+```kotlin
+MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "com.example.motocam/foo")
+    .setMethodCallHandler { call, result ->
+        when (call.method) {
+            "doThing" -> {
+                val path = call.argument<String>("path")
+                if (path == null) {
+                    result.error("INVALID_ARGS", "path is required", null)
+                } else {
+                    result.success(true)
+                }
+            }
+            else -> result.notImplemented()
+        }
+    }
+```
+
+- Read numbers as `call.argument<Number>(…)?.toLong()`, as the existing handlers do, because Dart ints arrive as `Integer` or `Long`.
+- Reply exactly once on every path. For slow work, do it off the main thread and reply through `runOnUiThread`, as `exportVideoToGallery` does.
+- Guard API-specific calls with `Build.VERSION.SDK_INT`; remember minSdk is 24. Check runtime permissions with `checkSelfPermission` before work that needs them and return a distinct code, as `exportVideoToGallery` does with `PERMISSION_DENIED`.
+- Reuse the existing error-code style (`INVALID_ARGS`, `PERMISSION_DENIED`, `<THING>_FAILED`).
+
+**4. Native-to-Dart calls (optional).** Keep the `MethodChannel` in a field (like `pipMethodChannel`), call `invokeMethod` from the main thread, and register the Dart handler with `setMethodCallHandler` in an `initialize()` method that is called early (the existing ones are called from `RecordingScreen.initState`). Dart handlers should return `null` for unknown methods or throw `MissingPluginException`. If the activity must hear a broadcast while it is stopped, register the receiver in `onCreate` and unregister it in `onDestroy`, as `backgroundStopReceiver` does.
+
+**5. Permissions and manifest.** Add any `uses-permission`, service or receiver entries to `AndroidManifest.xml`. If a runtime permission is involved, add it to `AppPermissionService` as required or recommended, and to the matrix in this document. Do not add `MANAGE_EXTERNAL_STORAGE` or `ACCESS_BACKGROUND_LOCATION`; the release precheck rejects both. For internal broadcasts, reuse the `INTERNAL_BROADCAST` signature permission.
+
+**6. iOS.** Either gate the Dart call so it never runs on iOS, or add a handler in `AppDelegate.didInitializeImplicitFlutterEngine`, where the bridge's `applicationRegistrar.messenger()` (or `pluginRegistry.registrar(forPlugin:)`) provides a `FlutterBinaryMessenger` for a `FlutterMethodChannel`. Add any required usage strings to `Info.plist`, and if the feature uses another `permission_handler` permission, add its macro to the Podfile's `post_install`.
+
+**7. Tests and docs.** The service tests in [test/core/services/](../test/core/services/) mock the `background_recording`, `device_status` and `pip` channels (and the `permission_handler` channel) with `TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler`. [widget_test.dart](../test/widget_test.dart) mocks the permissions, `background_recording`, `device_status` and `pip` channels before pumping `MotoCamApp`. No test mocks the `media` channel. Add a service test for the new channel, add the channel to the widget-test mocks if `RecordingScreen` reaches it, and add it to the [method-channel reference](#method-channel-reference) above.
+
+## Related documents
+
+- [architecture.md](architecture.md): where the services sit in the app.
+- [recording-pipeline.md](recording-pipeline.md): recording start/stop, lifecycle, storage layout.
+- [telemetry.md](telemetry.md): GPS, accelerometer and device status.
+- [features.md](features.md): rider-facing behaviour, permissions and platform availability.
+- [development.md](development.md) and [release.md](release.md): build, signing, CI and the release precheck.
