@@ -7,13 +7,17 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:path_provider/path_provider.dart';
 import '../../../core/ride_file/ride_telemetry_codec.dart' as ride_codec;
 import '../../../core/services/app_permission_service.dart';
+import '../../../core/services/gallery_copies.dart';
 import '../../../core/utils/integrity_utils.dart' as integrity_utils;
 import '../../../core/utils/path_utils.dart' as path_utils;
 import 'camera_init_status.dart';
+import 'gallery_export.dart';
 import 'recording_retention.dart';
 import 'recordings_migration.dart';
 import 'storage_budget.dart';
 import '../../history/models/ride_index.dart';
+import '../../history/models/ride_record.dart';
+import '../../history/services/gallery_links.dart';
 import '../../history/services/legacy_ride_import.dart';
 import '../../history/services/ride_deletion.dart';
 import '../../../core/services/legacy_recordings_access.dart';
@@ -114,7 +118,10 @@ class CameraProvider extends ChangeNotifier {
   /// (`Movies/MotoCam/Recordings`, Android only) when a ride stops.
   ///
   /// Defaults to `false`: exported copies are public to every gallery app
-  /// and are never removed by MotoCam, so export is opt-in.
+  /// and survive an uninstall, so export is opt-in. The queue and the
+  /// copies' content URIs are kept in the [GalleryLinkStore], so a queue
+  /// left by a killed process is retried at the next launch and Ride
+  /// History can offer to remove the copies.
   bool autoExportLockedClipsToGallery = false;
 
   /// Storage budget for all recordings in bytes; 0 (the default) is off.
@@ -147,14 +154,14 @@ class CameraProvider extends ChangeNotifier {
   final List<SegmentTimelineEntry> _sessionSegmentTimeline =
       <SegmentTimelineEntry>[];
   final Set<String> _lockedSegmentPaths = <String>{};
-  final List<String> _pendingGalleryExports = <String>[];
   Timer? _segmentTimer;
   Timer? _deferredMaintenanceTimer;
   Future<void>? _initInFlight;
   Future<void>? _rollInFlight;
   bool _isStartingRecording = false;
   bool _isStoppingRecording = false;
-  bool _isExportingToGallery = false;
+  Future<GalleryExporter?>? _galleryExporterFuture;
+  bool _hasResumedGalleryExports = false;
   bool _isDeferredMaintenanceRunning = false;
   bool _hasPrunedTelemetryTempFiles = false;
   final RecordingsMigrationController _recordingsMigration =
@@ -1068,6 +1075,7 @@ class CameraProvider extends ChangeNotifier {
         unawaited(integrity_utils.pruneStaleTelemetryTempFiles(recordingsDir));
       }
       _maybeStartRecordingsMigration();
+      _maybeResumeGalleryExports();
       return true;
     } catch (e) {
       _logError('Error setting up recordings directory: $e');
@@ -2073,7 +2081,13 @@ class CameraProvider extends ChangeNotifier {
         if (record == null) {
           continue;
         }
-        final result = await deleteRideFiles(record, indexStore: store);
+        // Gallery copies are never touched; only the ride's links and
+        // queued exports are dropped.
+        final result = await deleteRideFiles(
+          record,
+          indexStore: store,
+          galleryLinks: await GalleryLinkStore.shared(),
+        );
         _sessionBudgetFailedFiles += result.failed;
         if (result.deletedPaths.isNotEmpty) {
           deletedRides++;
@@ -2234,124 +2248,276 @@ class CameraProvider extends ChangeNotifier {
     return exportCandidates;
   }
 
+  /// The gallery export queue on the app's [GalleryLinkStore], or `null`
+  /// when the store is unavailable (then nothing is exported).
+  Future<GalleryExporter?> _galleryExporter() {
+    return _galleryExporterFuture ??= () async {
+      final store = await GalleryLinkStore.shared();
+      if (store == null) {
+        _logError('Gallery link store unavailable; gallery export is off.');
+        return null;
+      }
+      return GalleryExporter(
+        store: store,
+        exportVideo: _exportVideoToGallery,
+        locate: _locateGalleryExportSource,
+        requestStoragePermission: _requestLegacyStoragePermission,
+        relativePath: _galleryRelativePath,
+      );
+    }();
+  }
+
+  Future<String?> _exportVideoToGallery({
+    required String sourcePath,
+    required String displayName,
+  }) {
+    return platform.invokeMethod<String>('exportVideoToGallery', {
+      'sourcePath': sourcePath,
+      'displayName': displayName,
+      'relativePath': _galleryRelativePath,
+      // A copy that a killed process already finished is linked, not made
+      // again.
+      'reuseExisting': true,
+    });
+  }
+
+  // The recordings directory first, then the legacy roots: a ride moved by
+  // the migration or the import is found by file name.
+  Future<String?> _locateGalleryExportSource(PendingGalleryExport entry) async {
+    if (_recordingsDirectory == null) {
+      await _setupRecordingsDirectory();
+    }
+    final current = _recordingsDirectory;
+    return locateGalleryExportSource(
+      entry: entry,
+      roots: <String>[?current, ...await _legacyRecordingsDirectories()],
+    );
+  }
+
+  // Android 9 and lower: exportVideoToGallery needs WRITE_EXTERNAL_STORAGE
+  // (Permission.storage). Asked only by the drain after a stop with gallery
+  // export on and by Save to gallery, never by the launch retry.
+  Future<bool> _requestLegacyStoragePermission() async {
+    try {
+      return AppPermissionService.isPermissionGranted(
+        await Permission.storage.request(),
+      );
+    } catch (e) {
+      // For example no foreground activity to show the prompt.
+      _logError('Storage permission request failed: $e');
+      return false;
+    }
+  }
+
+  // The gallery export pauses while a recording starts or runs; the rest
+  // stays queued and the next stop drains it.
+  bool _shouldPauseGalleryExport() =>
+      _isDisposed || isRecording || _isStartingRecording;
+
+  /// Queues [segmentPaths] (the stopped session's locked segments) for
+  /// export, persisted at once in the gallery link store, and drains the
+  /// queue about 2 s later.
   void _enqueueDeferredGalleryExport(Iterable<String> segmentPaths) {
     if (!Platform.isAndroid) {
       return;
     }
-
-    for (final rawPath in segmentPaths) {
-      final sourcePath = rawPath.trim();
-      if (sourcePath.isNotEmpty &&
-          !_pendingGalleryExports.contains(sourcePath)) {
-        _pendingGalleryExports.add(sourcePath);
+    // Still the stopped ride's id: telemetry clears it only when the ride
+    // is saved, after stopRecording returns.
+    final rideSessionId = currentRideSessionIdSource?.call();
+    final items = <GalleryExportItem>[
+      for (final path in segmentPaths)
+        if (path.trim().isNotEmpty)
+          GalleryExportItem(
+            rideSessionId: rideSessionId,
+            sourcePath: path.trim(),
+          ),
+    ];
+    if (items.isEmpty) {
+      return;
+    }
+    unawaited(() async {
+      final exporter = await _galleryExporter();
+      if (exporter == null) {
+        return;
       }
-    }
-
-    if (_pendingGalleryExports.isEmpty) {
-      return;
-    }
-
-    if (_isExportingToGallery) {
-      return;
-    }
-
-    _isExportingToGallery = true;
-    Future<void>.delayed(const Duration(seconds: 2), () async {
       try {
-        await _drainGalleryExportQueue();
-      } finally {
-        _isExportingToGallery = false;
+        await exporter.enqueue(items);
+      } catch (e) {
+        _logError('Queueing gallery export failed: $e');
+        return;
       }
+      _scheduleGalleryExportDrain(askPermission: true, noun: 'locked clip');
+    }());
+  }
+
+  /// Retries, once per process, a gallery export queue that an earlier
+  /// process left behind, when nothing is recording. Never asks for a
+  /// permission. While a recording runs, the next stop drains it.
+  void _maybeResumeGalleryExports() {
+    if (!Platform.isAndroid || _hasResumedGalleryExports || _isDisposed) {
+      return;
+    }
+    _hasResumedGalleryExports = true;
+    unawaited(() async {
+      final exporter = await _galleryExporter();
+      if (exporter == null) {
+        return;
+      }
+      final pending = (await exporter.store.read()).pending;
+      if (pending.isEmpty ||
+          _shouldPauseGalleryExport() ||
+          _isStoppingRecording) {
+        return;
+      }
+      _log('Retrying ${pending.length} queued gallery export(s).');
+      _scheduleGalleryExportDrain(askPermission: false, noun: 'clip');
+    }());
+  }
+
+  void _scheduleGalleryExportDrain({
+    required bool askPermission,
+    required String noun,
+  }) {
+    Future<void>.delayed(const Duration(seconds: 2), () async {
+      if (_isDisposed) {
+        return;
+      }
+      await _drainGalleryExportQueue(askPermission: askPermission, noun: noun);
     });
   }
 
-  Future<void> _drainGalleryExportQueue() async {
-    var exported = 0;
-    var failed = 0;
-    var permissionDenied = false;
-    // Requested at most once per drain.
-    bool? storageGranted;
-
-    Future<void> export(String sourcePath, String fileName) {
-      return platform.invokeMethod<String>('exportVideoToGallery', {
-        'sourcePath': sourcePath,
-        'displayName': fileName,
-        'relativePath': _galleryRelativePath,
-      });
+  Future<void> _drainGalleryExportQueue({
+    required bool askPermission,
+    required String noun,
+  }) async {
+    final exporter = await _galleryExporter();
+    if (exporter == null) {
+      return;
     }
-
-    while (_pendingGalleryExports.isNotEmpty) {
-      final sourcePath = _pendingGalleryExports.removeAt(0);
-      final sourceFile = File(sourcePath);
-      if (!await sourceFile.exists()) {
-        _log('Skipping export for missing segment: $sourcePath');
-        continue;
-      }
-
-      final fileName = path_utils.fileNameFromPath(sourcePath);
-      try {
-        await export(sourcePath, fileName);
-        exported++;
-        _log('Deferred gallery export completed: $fileName');
-      } on PlatformException catch (e) {
-        if (e.code != 'PERMISSION_DENIED') {
-          failed++;
-          _logError('Deferred gallery export failed for $fileName: $e');
-          continue;
-        }
-        // Android 9 and lower: the native side needs WRITE_EXTERNAL_STORAGE
-        // (Permission.storage). Ask once per drain, then retry this clip
-        // once. The dart:io copy fallback is not used: it needs the same
-        // permission.
-        if (storageGranted == null) {
-          try {
-            storageGranted = AppPermissionService.isPermissionGranted(
-              await Permission.storage.request(),
-            );
-          } catch (requestError) {
-            // For example no foreground activity to show the prompt.
-            _logError('Storage permission request failed: $requestError');
-            storageGranted = false;
-          }
-        }
-        if (!storageGranted) {
-          permissionDenied = true;
-          failed++;
-          continue;
-        }
-        try {
-          await export(sourcePath, fileName);
-          exported++;
-        } catch (retryError) {
-          failed++;
-          _logError('Gallery export retry failed for $fileName: $retryError');
-        }
-      } catch (e) {
-        // The private copy stays in the recordings directory.
-        failed++;
-        _logError('Deferred gallery export failed for $fileName: $e');
-      }
+    // No ride file moves into private storage while it is copied.
+    final releaseMigration = holdRecordingsMigration();
+    GalleryExportRun run;
+    try {
+      run = await exporter.drain(
+        askPermission: askPermission,
+        shouldPause: _shouldPauseGalleryExport,
+      );
+    } catch (e) {
+      _logError('Gallery export failed: $e');
+      return;
+    } finally {
+      releaseMigration();
     }
-
-    if (_isDisposed || (exported == 0 && failed == 0)) {
+    if (_isDisposed || !run.hasOutcome) {
       return;
     }
     _lastGalleryExportMessage = galleryExportSummary(
-      exported: exported,
-      failed: failed,
-      permissionDenied: permissionDenied,
+      exported: run.exported,
+      failed: run.failed,
+      permissionDenied: run.permissionDenied,
+      noun: noun,
     );
     notifyListeners();
   }
 
-  /// Rider-facing summary of a gallery export run.
+  /// Why Save to gallery cannot run now (a recording, the move into
+  /// private storage, an import or the storage budget is changing files),
+  /// or `null` when it can.
+  String? get gallerySaveBlockedReason {
+    if (isRecording || _isStartingRecording || _isStoppingRecording) {
+      return 'Stop recording before saving to the gallery.';
+    }
+    if (_recordingsMigration.isRunning) {
+      return 'Rides are being moved to private storage. Try again when the '
+          'move finishes.';
+    }
+    if (_legacyRideImport.isRunning) {
+      return 'Rides are being imported from the old folder. Try again when '
+          'the import finishes.';
+    }
+    if (_isStorageBudgetRunning) {
+      return 'Old rides are being deleted for the storage budget. Try again '
+          'in a moment.';
+    }
+    return null;
+  }
+
+  /// Save to gallery (Android): copies every existing video file of [ride]
+  /// (never its telemetry JSON) to `Movies/MotoCam/Recordings` through the
+  /// persisted export queue, whatever its lock state and the auto-export
+  /// setting, and records the links. A segment whose copy is already
+  /// linked and still exists is not copied again. On Android 9 and lower
+  /// the storage permission is requested when the first copy is refused
+  /// for lack of it. [onProgress] receives (segments done, segments to do).
+  ///
+  /// Returns `null` when [gallerySaveBlockedReason] refuses it, off Android
+  /// or when the gallery link store is unavailable.
+  Future<GalleryExportRun?> saveRideToGallery(
+    RideRecord ride, {
+    void Function(int done, int total)? onProgress,
+  }) async {
+    if (!Platform.isAndroid || gallerySaveBlockedReason != null) {
+      return null;
+    }
+    final exporter = await _galleryExporter();
+    if (exporter == null || gallerySaveBlockedReason != null) {
+      return null;
+    }
+    final releaseMigration = holdRecordingsMigration();
+    try {
+      final files = galleryKeysOfRide(ride);
+      // A copy the rider deleted in a gallery app may be made again.
+      await exporter.forgetMissingLinks(files.keys, GalleryCopies.existingUris);
+      final items = <GalleryExportItem>[];
+      for (final path in files.values) {
+        var exists = false;
+        try {
+          exists = await File(path).exists();
+        } catch (_) {
+          exists = false;
+        }
+        if (exists) {
+          items.add(
+            GalleryExportItem(
+              rideSessionId: ride.rideSessionId,
+              sourcePath: path,
+            ),
+          );
+        }
+      }
+      final queued = await exporter.enqueue(items);
+      final run = await exporter.drain(
+        onlyKeys: queued.keys,
+        askPermission: true,
+        shouldPause: _shouldPauseGalleryExport,
+        onProgress: onProgress,
+      );
+      return GalleryExportRun(
+        exported: run.exported,
+        alreadySaved: queued.alreadySaved + run.alreadySaved,
+        missing: run.missing,
+        failed: run.failed,
+        permissionDenied: run.permissionDenied,
+        paused: run.paused,
+      );
+    } catch (e) {
+      _logError('Save to gallery failed: $e');
+      return null;
+    } finally {
+      releaseMigration();
+    }
+  }
+
+  /// Rider-facing summary of a gallery export run of [noun]s (the locked
+  /// clips of a stopped ride, or `clip` for the launch retry).
   @visibleForTesting
   static String galleryExportSummary({
     required int exported,
     required int failed,
     required bool permissionDenied,
+    String noun = 'locked clip',
   }) {
-    String clips(int n) => '$n locked clip${n == 1 ? '' : 's'}';
+    String clips(int n) => '$n $noun${n == 1 ? '' : 's'}';
     final parts = <String>[
       if (exported > 0) '${clips(exported)} copied to the gallery',
       if (failed > 0)

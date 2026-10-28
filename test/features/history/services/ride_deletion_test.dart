@@ -6,6 +6,7 @@ import 'package:motocam/core/ride_file/ride_telemetry_codec.dart';
 import 'package:motocam/core/services/ride_signing_service.dart';
 import 'package:motocam/features/history/models/ride_index.dart';
 import 'package:motocam/features/history/models/ride_record.dart';
+import 'package:motocam/features/history/services/gallery_links.dart';
 import 'package:motocam/features/history/services/ride_deletion.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -83,6 +84,7 @@ void main() {
     final result = await deleteRideFiles(
       ride,
       indexStore: store,
+      galleryLinks: null,
       registry: registry,
     );
 
@@ -126,7 +128,7 @@ void main() {
     );
     expect(filesOfRide(forged), isNot(contains(elsewhere.path)));
 
-    await deleteRideFiles(ride, indexStore: null);
+    await deleteRideFiles(ride, indexStore: null, galleryLinks: null);
     expect(inside.existsSync(), isFalse);
     expect(elsewhere.existsSync(), isTrue);
   });
@@ -144,6 +146,7 @@ void main() {
       final result = await deleteRideFiles(
         copy,
         indexStore: store,
+        galleryLinks: null,
         registry: registry,
       );
       expect(result.rideFileRemoved, isTrue);
@@ -167,12 +170,67 @@ void main() {
         );
       });
 
-      final result = await deleteRideFiles(ride, indexStore: store);
+      final result = await deleteRideFiles(
+        ride,
+        indexStore: store,
+        galleryLinks: null,
+      );
       expect(result.deletedPaths, <String>[video.path]);
       expect(result.rideFileRemoved, isTrue);
       expect((await store.read()).rides.keys, <String>[
         rideIndexKey(other.telemetryPath!),
       ]);
+    },
+  );
+
+  test(
+    'drops the deleted ride\'s gallery links and pending exports only',
+    () async {
+      final a = write(root, 'ga.mp4');
+      final b = write(root, 'gb.mp4');
+      final ride = await writeRide('ride-g', <String>[a.path, b.path]);
+      final links = GalleryLinkStore(
+        File('${temp.path}${_sep}links${_sep}gallery_links.json'),
+      );
+      GalleryLink link(String? id, String name) => GalleryLink(
+        rideSessionId: id,
+        fileName: name,
+        contentUri: 'content://media/external/video/media/$name',
+        displayName: name,
+        relativePath: 'Movies/MotoCam/Recordings',
+        exportedAt: DateTime(2026),
+      );
+      await links.update((data) {
+        data.links[galleryLinkKey(
+          rideSessionId: 'ride-g',
+          fileName: 'ga.mp4',
+        )] = link(
+          'ride-g',
+          'ga.mp4',
+        );
+        data.links[galleryLinkKey(rideSessionId: 'other', fileName: 'ga.mp4')] =
+            link('other', 'ga.mp4');
+        final pending = PendingGalleryExport(
+          rideSessionId: 'ride-g',
+          fileName: 'gb.mp4',
+          sourcePath: b.path,
+          queuedAt: DateTime(2026),
+        );
+        data.pending[pending.key] = pending;
+      });
+
+      final result = await deleteRideFiles(
+        ride,
+        indexStore: null,
+        galleryLinks: links,
+      );
+      expect(result.rideFileRemoved, isTrue);
+      final data = await links.read();
+      expect(data.links.keys, <String>['other|ga.mp4']);
+      expect(data.pending, isEmpty);
+      // The file was written, so a new process sees the same.
+      final reread = GalleryLinkData.parse(await links.file.readAsString());
+      expect(reread.links.keys, <String>['other|ga.mp4']);
     },
   );
 }

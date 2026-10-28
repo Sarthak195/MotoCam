@@ -645,8 +645,10 @@ class _RecordingSettingsSheetState extends State<RecordingSettingsSheet> {
                     ),
                     subtitle: const Text(
                       'When a ride stops, locked clips are copied to '
-                      'Movies/MotoCam/Recordings. Gallery copies are visible '
-                      'to other apps and are not deleted by MotoCam.',
+                      'Movies/MotoCam/Recordings. Other apps can read gallery '
+                      'copies and they stay after MotoCam is uninstalled; Ride '
+                      'History offers to remove them when you unlock or '
+                      'delete the ride.',
                       style: TextStyle(color: Colors.white70),
                     ),
                     onChanged: (value) {

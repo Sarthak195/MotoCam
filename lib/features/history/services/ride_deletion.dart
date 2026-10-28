@@ -2,8 +2,9 @@
 /// registry consistent with what is left on disk.
 ///
 /// Ride History's delete action and the storage budget both delete through
-/// [deleteRideFiles], so a deleted ride never leaves a stale index entry or
-/// a registered signed-ride id behind.
+/// [deleteRideFiles], so a deleted ride never leaves a stale index entry, a
+/// registered signed-ride id or a gallery link or pending gallery export
+/// behind.
 library;
 
 import 'dart:io';
@@ -12,6 +13,7 @@ import '../../../core/services/ride_signing_service.dart';
 import '../../../core/utils/path_utils.dart' as path_utils;
 import '../models/ride_index.dart';
 import '../models/ride_record.dart';
+import 'gallery_links.dart';
 
 /// What [deleteRideFiles] did.
 class RideDeletionResult {
@@ -94,14 +96,20 @@ List<String> filesOfRide(RideRecord ride) {
 ///   carries another ride's id leaves that ride registered;
 /// * drops its entry from [indexStore] (the next history load decodes the
 ///   file again if it is still there) and the segment hashes no remaining
-///   entry lists.
+///   entry lists;
+/// * drops the gallery links and pending gallery exports of its video
+///   files that are gone from [galleryLinks]. The gallery copies themselves
+///   are never touched: Ride History offers to remove them before it
+///   deletes, and the storage budget leaves them alone.
 ///
 /// [indexStore] is the UI isolate's store (`RideIndexStore.shared()`), or
-/// `null` when the index is unavailable. Never throws for a file that
-/// cannot be deleted; it is reported in [RideDeletionResult.failedPaths].
+/// `null` when the index is unavailable; [galleryLinks] likewise
+/// (`GalleryLinkStore.shared()`). Never throws for a file that cannot be
+/// deleted; it is reported in [RideDeletionResult.failedPaths].
 Future<RideDeletionResult> deleteRideFiles(
   RideRecord ride, {
   required RideIndexStore? indexStore,
+  required GalleryLinkStore? galleryLinks,
   SignedRideRegistry? registry,
 }) async {
   final deleted = <String>[];
@@ -144,6 +152,15 @@ Future<RideDeletionResult> deleteRideFiles(
       });
     } catch (_) {
       // Only a cache: the next history load rebuilds it.
+    }
+  }
+
+  if (galleryLinks != null) {
+    try {
+      await galleryLinks.forgetDeletedFilesOf(ride);
+    } catch (_) {
+      // A stale pending entry is dropped by the next export run (its file
+      // is gone); a stale link only offers a copy that is already gone.
     }
   }
 

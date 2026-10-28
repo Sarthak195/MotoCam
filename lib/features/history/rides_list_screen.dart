@@ -7,18 +7,25 @@ import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 
+import 'package:permission_handler/permission_handler.dart';
+
 import '../../core/providers/app_settings_provider.dart';
+import '../../core/services/app_permission_service.dart';
+import '../../core/services/device_status_service.dart';
 import '../../core/services/legacy_recordings_access.dart';
 import '../../core/services/ride_signing_service.dart';
 import '../../core/utils/format_utils.dart';
 import '../../core/utils/path_utils.dart' as path_utils;
 import '../camera/providers/camera_provider.dart';
+import '../camera/providers/gallery_export.dart';
 import '../camera/providers/recordings_migration.dart';
 import 'models/ride_history_loader.dart';
 import 'models/ride_index.dart';
 import 'models/ride_record.dart';
 import 'models/segment_verifier.dart';
 import 'ride_playback_screen.dart';
+import 'services/gallery_copy_removal.dart';
+import 'services/gallery_links.dart';
 import 'services/legacy_ride_import.dart';
 import 'services/ride_deletion.dart';
 import 'widgets/playback_timeline.dart';
@@ -68,6 +75,16 @@ class _RidesListScreenState extends State<RidesListScreen> {
   /// The import from the old public folder (Android), for its banner.
   LegacyRideImportController? _legacyImport;
 
+  /// The gallery-link store this screen listens to, once resolved, and
+  /// its content (the gallery copies each ride has).
+  GalleryLinkStore? _galleryLinks;
+  GalleryLinkData? _galleryData;
+
+  /// Rides being saved to the gallery or having their gallery copies
+  /// removed, by lock key; for a save, the share of segments done (`null`
+  /// until the first is done).
+  final Map<String, double?> _galleryProgress = <String, double?>{};
+
   Widget _buildStatusBadge({required String label, required Color color}) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
@@ -106,8 +123,20 @@ class _RidesListScreenState extends State<RidesListScreen> {
   void dispose() {
     _indexStore?.removeListener(_onIndexChanged);
     _migration?.removeListener(_onMigrationChanged);
+    _galleryLinks?.removeListener(_onGalleryLinksChanged);
     super.dispose();
   }
+
+  /// Shows a changed gallery-link store (a copy made or removed).
+  void _onGalleryLinksChanged() {
+    if (mounted) {
+      setState(() {});
+    }
+  }
+
+  /// The gallery copies MotoCam recorded for [ride].
+  List<GalleryLink> _galleryLinksOf(RideRecord ride) =>
+      _galleryData?.linksOfRide(ride) ?? const <GalleryLink>[];
 
   /// Reloads the list when a migration run ends (moved rides have new
   /// paths).
@@ -197,6 +226,16 @@ class _RidesListScreenState extends State<RidesListScreen> {
       );
     }
     _videoChecks = load.videoChecks;
+    if (Platform.isAndroid) {
+      final links = await GalleryLinkStore.shared();
+      if (links != null) {
+        if (_galleryLinks == null && mounted) {
+          _galleryLinks = links;
+          links.addListener(_onGalleryLinksChanged);
+        }
+        _galleryData = await links.read();
+      }
+    }
     return load.rides;
   }
 
@@ -382,6 +421,195 @@ class _RidesListScreenState extends State<RidesListScreen> {
         duration: const Duration(seconds: 3),
       ),
     );
+    final links = _galleryLinksOf(ride);
+    if (unlocked && links.isNotEmpty) {
+      await _offerToRemoveGalleryCopies(
+        links,
+        reason: 'The clip is unlocked. ',
+        canRetry: true,
+      );
+    }
+  }
+
+  /// Asks (default: keep) whether to remove [links]' gallery copies, then
+  /// removes them and reports what was not removed. [reason] starts the
+  /// dialog text; [canRetry] is false when the ride is about to be deleted
+  /// (its menu cannot offer the removal again). Returns whether the rider
+  /// chose to remove them.
+  Future<bool> _offerToRemoveGalleryCopies(
+    List<GalleryLink> links, {
+    required String reason,
+    required bool canRetry,
+  }) async {
+    final count = links.length;
+    final copies = '$count gallery cop${count == 1 ? 'y' : 'ies'}';
+    final remove = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text('Remove $copies?'),
+        content: Text(
+          '${reason}MotoCam saved $copies of this ride in '
+          'Movies/MotoCam/Recordings. Other apps can read them, and they stay '
+          'on the phone after MotoCam is uninstalled.\n\nRemove them from the '
+          'gallery? The phone may ask you to allow it.',
+        ),
+        actions: [
+          TextButton(
+            autofocus: true,
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('Keep copies'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('Remove copies'),
+          ),
+        ],
+      ),
+    );
+    if (remove != true || !mounted) {
+      return false;
+    }
+    await _removeGalleryCopies(links, canRetry: canRetry);
+    return true;
+  }
+
+  Future<void> _removeGalleryCopies(
+    List<GalleryLink> links, {
+    required bool canRetry,
+  }) async {
+    final messenger = ScaffoldMessenger.of(context);
+    final result = await removeGalleryCopies(
+      links,
+      store: _galleryLinks ?? await GalleryLinkStore.shared(),
+      requestStoragePermission: () async =>
+          AppPermissionService.isPermissionGranted(
+            await Permission.storage.request(),
+          ),
+    );
+    if (!mounted) {
+      return;
+    }
+    messenger.showSnackBar(
+      SnackBar(
+        content: Text(galleryRemovalSummary(result, canRetry: canRetry)),
+        duration: Duration(seconds: result.notRemoved.isEmpty ? 3 : 8),
+      ),
+    );
+  }
+
+  /// Save to gallery: explains what a gallery copy means, then copies every
+  /// existing video file of [ride] to Movies/MotoCam/Recordings through
+  /// [CameraProvider.saveRideToGallery], with progress and a summary.
+  Future<void> _confirmAndSaveToGallery(RideRecord ride) async {
+    final key = _lockKeyFor(ride);
+    if (_galleryProgress.containsKey(key) || _refuseWhileFilesChange()) {
+      return;
+    }
+    final camera = context.read<CameraProvider>();
+    final messenger = ScaffoldMessenger.of(context);
+    final blocked = camera.gallerySaveBlockedReason;
+    if (blocked != null) {
+      messenger.showSnackBar(
+        SnackBar(content: Text(blocked), duration: const Duration(seconds: 3)),
+      );
+      return;
+    }
+    final files = galleryKeysOfRide(ride).length;
+    final linked = _galleryLinksOf(ride).length;
+    final status = await const DeviceStatusService()
+        .getBatteryAndThermalStatus();
+    if (!mounted) {
+      return;
+    }
+    final askStorage = AppPermissionService.needsLegacyStoragePermission(
+      status.androidSdkInt,
+    );
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Save to gallery?'),
+        content: Text(
+          'MotoCam copies this ride\'s $files video file${files == 1 ? '' : 's'} '
+          'to the phone\'s gallery (Movies/MotoCam/Recordings). Other apps '
+          'can read gallery copies, they include the audio if it was '
+          'recorded, and they stay on the phone after MotoCam is '
+          'uninstalled. The GPS route is not copied.'
+          '${linked > 0 ? '\n\n$linked of them ${linked == 1 ? 'is' : 'are'} already in the gallery and ${linked == 1 ? 'is' : 'are'} not copied again.' : ''}'
+          '${askStorage ? '\n\nThis phone needs storage access to write to the gallery; MotoCam asks for it next.' : ''}'
+          '\n\nYou can remove the copies later from this ride\'s menu.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted || _refuseWhileFilesChange()) {
+      return;
+    }
+    setState(() {
+      _galleryProgress[key] = null;
+    });
+    GalleryExportRun? run;
+    try {
+      run = await camera.saveRideToGallery(
+        ride,
+        onProgress: (done, total) {
+          if (mounted && total > 0) {
+            setState(() {
+              _galleryProgress[key] = (done / total).clamp(0.0, 1.0);
+            });
+          }
+        },
+      );
+    } finally {
+      if (mounted) {
+        setState(() {
+          _galleryProgress.remove(key);
+        });
+      }
+    }
+    if (!mounted) {
+      return;
+    }
+    messenger.showSnackBar(
+      SnackBar(
+        content: Text(
+          run == null
+              ? camera.gallerySaveBlockedReason ??
+                    'Could not save to the gallery on this phone.'
+              : gallerySaveSummary(run),
+        ),
+        duration: const Duration(seconds: 6),
+      ),
+    );
+  }
+
+  /// The ride menu's "Remove gallery copies".
+  Future<void> _confirmAndRemoveGalleryCopies(RideRecord ride) async {
+    final key = _lockKeyFor(ride);
+    final links = _galleryLinksOf(ride);
+    if (links.isEmpty || _galleryProgress.containsKey(key)) {
+      return;
+    }
+    setState(() {
+      _galleryProgress[key] = null;
+    });
+    try {
+      await _offerToRemoveGalleryCopies(links, reason: '', canRetry: true);
+    } finally {
+      if (mounted) {
+        setState(() {
+          _galleryProgress.remove(key);
+        });
+      }
+    }
   }
 
   Future<void> _confirmAndDelete(RideRecord ride) async {
@@ -406,6 +634,7 @@ class _RidesListScreenState extends State<RidesListScreen> {
       return;
     }
 
+    final links = _galleryLinksOf(ride);
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (dialogContext) => AlertDialog(
@@ -413,8 +642,8 @@ class _RidesListScreenState extends State<RidesListScreen> {
         content: Text(
           '${lockIsStuck ? 'This ride has locked clips and failed the integrity check, so it cannot be unlocked. ' : ''}'
           'This permanently deletes the ride\'s ${ride.segmentPaths.length} '
-          'video segment(s) and its telemetry from this device. Copies '
-          'already exported to the gallery are not affected.',
+          'video segment(s) and its telemetry from this device. '
+          '${links.isEmpty ? 'Gallery copies are not affected.' : 'MotoCam asks next whether to also remove its gallery copies.'}',
         ),
         actions: [
           TextButton(
@@ -431,6 +660,17 @@ class _RidesListScreenState extends State<RidesListScreen> {
     if (confirmed != true || !mounted || _refuseWhileFilesChange()) {
       return;
     }
+    // Before the ride's files go: deleting them drops the links.
+    if (links.isNotEmpty) {
+      await _offerToRemoveGalleryCopies(
+        links,
+        reason: 'The ride will be deleted next. ',
+        canRetry: false,
+      );
+      if (!mounted || _refuseWhileFilesChange()) {
+        return;
+      }
+    }
 
     setState(() {
       _deletesInFlight.add(key);
@@ -444,6 +684,7 @@ class _RidesListScreenState extends State<RidesListScreen> {
       result = await deleteRideFiles(
         ride,
         indexStore: await RideIndexStore.shared(),
+        galleryLinks: _galleryLinks ?? await GalleryLinkStore.shared(),
       );
     } finally {
       releaseMigration();
@@ -846,6 +1087,9 @@ class _RidesListScreenState extends State<RidesListScreen> {
     final videoCoverage = _videoCoverageText(ride);
     final isDeleting = _deletesInFlight.contains(_lockKeyFor(ride));
     final videoLine = describeVideoCheck(_videoCheckOf(ride));
+    final galleryCopies = _galleryLinksOf(ride).length;
+    final galleryBusy = _galleryProgress.containsKey(_lockKeyFor(ride));
+    final showGalleryMenu = Platform.isAndroid;
 
     return Card(
       child: ListTile(
@@ -901,6 +1145,11 @@ class _RidesListScreenState extends State<RidesListScreen> {
                 'Quarantined paths: ${ride.quarantinedSegmentPaths.length}',
                 style: const TextStyle(color: Colors.deepOrangeAccent),
               ),
+            if (galleryCopies > 0)
+              Text(
+                'Gallery copies: $galleryCopies (readable by other apps)',
+                style: const TextStyle(color: Colors.blueGrey),
+              ),
             Text(
               hasTelemetry
                   ? 'Telemetry: Available'
@@ -909,7 +1158,7 @@ class _RidesListScreenState extends State<RidesListScreen> {
           ],
         ),
         trailing: SizedBox(
-          width: ride.isLocked ? 116 : 64,
+          width: (ride.isLocked ? 116 : 64) + (showGalleryMenu ? 28 : 0),
           child: Row(
             mainAxisSize: MainAxisSize.min,
             mainAxisAlignment: MainAxisAlignment.end,
@@ -967,6 +1216,44 @@ class _RidesListScreenState extends State<RidesListScreen> {
                   iconSize: 20,
                   onPressed: () => _confirmAndDelete(ride),
                   icon: const Icon(Icons.delete_outline),
+                ),
+              if (showGalleryMenu && galleryBusy)
+                Padding(
+                  padding: const EdgeInsets.all(4),
+                  child: SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      value: _galleryProgress[_lockKeyFor(ride)],
+                    ),
+                  ),
+                )
+              else if (showGalleryMenu)
+                PopupMenuButton<String>(
+                  tooltip: 'Gallery',
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(minWidth: 28),
+                  iconSize: 20,
+                  icon: const Icon(Icons.more_vert),
+                  onSelected: (value) {
+                    if (value == 'save') {
+                      unawaited(_confirmAndSaveToGallery(ride));
+                    } else if (value == 'remove') {
+                      unawaited(_confirmAndRemoveGalleryCopies(ride));
+                    }
+                  },
+                  itemBuilder: (_) => [
+                    const PopupMenuItem<String>(
+                      value: 'save',
+                      child: Text('Save to gallery'),
+                    ),
+                    if (galleryCopies > 0)
+                      const PopupMenuItem<String>(
+                        value: 'remove',
+                        child: Text('Remove gallery copies'),
+                      ),
+                  ],
                 ),
               const Icon(Icons.play_circle_outline),
             ],
