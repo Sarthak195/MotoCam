@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:motocam/core/ride_file/ride_telemetry_codec.dart';
 import 'package:motocam/core/utils/integrity_utils.dart';
 
 void main() {

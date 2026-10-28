@@ -19,7 +19,7 @@ import 'dart:io';
 import 'package:crypto/crypto.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:motocam/core/utils/integrity_utils.dart';
+import 'package:motocam/core/ride_file/ride_telemetry_codec.dart';
 import 'package:motocam/features/history/models/ride_record.dart';
 
 const String _fixtureDirectory = 'test/fixtures/ride_files';

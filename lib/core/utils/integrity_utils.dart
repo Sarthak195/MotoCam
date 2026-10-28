@@ -1,13 +1,11 @@
-/// Shared integrity and hashing utilities for telemetry and ride-record
+/// Shared hashing and file-write utilities for telemetry and ride-record
 /// persistence.
 ///
 /// These helpers produce deterministic SHA-256 hashes of JSON payloads and
-/// video segment files, build and re-seal the ride integrity envelope, and
-/// provide an atomic-replace write primitive for telemetry JSON files.
-///
-/// The envelope is an unkeyed SHA-256 checksum: it shows that a ride is
-/// unmodified since it was recorded (or accidentally corrupted), but anyone
-/// who can rewrite the files can also recompute it. It is not tamper-proof.
+/// video segment files, serialise read-modify-write cycles per path, and
+/// provide an atomic-replace write primitive for telemetry JSON files. The
+/// ride integrity envelope built from these hashes lives in the ride-file
+/// codec (`lib/core/ride_file/ride_integrity.dart`).
 library;
 
 import 'dart:async';
@@ -15,23 +13,6 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:crypto/crypto.dart';
-
-/// Value of the envelope's `algo` field.
-const String integrityAlgorithmSha256 = 'sha256';
-
-/// Envelope format whose `payloadHash` covers the ride JSON *and* every
-/// envelope field except `payloadHash` itself (so `segmentHashes`,
-/// `segmentCount` and `generatedAt` are bound into the hash).
-///
-/// Envelopes without an `envelopeVersion` field are legacy (version 1):
-/// their `payloadHash` covers only the ride JSON minus `integrity`.
-const int boundIntegrityEnvelopeVersion = 2;
-
-/// First ride-JSON `schemaVersion` for which the integrity envelope is
-/// mandatory on completed rides (`sessionComplete` not `false`). Readers
-/// treat a missing envelope on such files as modified instead of as a
-/// legacy ride.
-const int mandatoryIntegritySchemaVersion = 3;
 
 /// Returns the SHA-256 hex digest of [payload] after recursively sorting all
 /// map keys to ensure a canonical representation.
@@ -91,83 +72,6 @@ Future<String?> hashFileSha256(String path) async {
   } on FileSystemException {
     return null;
   }
-}
-
-/// Returns the envelope format version of [envelope]: the integer value of
-/// `envelopeVersion`, or 1 (legacy) when the field is absent or not numeric.
-int integrityEnvelopeVersionOf(Map<dynamic, dynamic> envelope) {
-  final raw = envelope['envelopeVersion'];
-  if (raw is num) {
-    return raw.toInt();
-  }
-  return 1;
-}
-
-/// Computes the `payloadHash` for a ride JSON map ([rideJson] may or may not
-/// contain its `integrity` envelope).
-///
-/// * Bound envelopes (`envelopeVersion` >= [boundIntegrityEnvelopeVersion]):
-///   hashes the whole ride JSON with the envelope's `payloadHash` removed.
-/// * Legacy envelopes, or no envelope: hashes the ride JSON minus
-///   `integrity`, which is how files written before version 2 were sealed.
-String computeRidePayloadHash(Map<String, dynamic> rideJson) {
-  final hashed = Map<String, dynamic>.from(rideJson);
-  final rawIntegrity = hashed['integrity'];
-  if (rawIntegrity is Map &&
-      integrityEnvelopeVersionOf(rawIntegrity) >=
-          boundIntegrityEnvelopeVersion) {
-    hashed['integrity'] = Map<dynamic, dynamic>.from(rawIntegrity)
-      ..remove('payloadHash');
-  } else {
-    hashed.remove('integrity');
-  }
-  return hashJsonCanonical(hashed);
-}
-
-/// Builds a bound (version 2) integrity envelope for [payload].
-///
-/// [payload] is the ride JSON without its `integrity` key. [segmentHashes]
-/// maps each declared segment path to its SHA-256 digest, and
-/// [segmentCount] is the number of declared segments. The returned map is
-/// meant to be stored as the ride JSON's `integrity` value.
-Map<String, dynamic> buildIntegrityEnvelope({
-  required Map<String, dynamic> payload,
-  required Map<String, String> segmentHashes,
-  required int segmentCount,
-  DateTime? generatedAt,
-}) {
-  final envelope = <String, dynamic>{
-    'algo': integrityAlgorithmSha256,
-    'envelopeVersion': boundIntegrityEnvelopeVersion,
-    'segmentCount': segmentCount,
-    'hashedSegmentCount': segmentHashes.length,
-    'segmentHashes': Map<String, String>.from(segmentHashes),
-    'generatedAt': (generatedAt ?? DateTime.now()).toIso8601String(),
-  };
-  final unsealed = Map<String, dynamic>.from(payload)..['integrity'] = envelope;
-  envelope['payloadHash'] = computeRidePayloadHash(unsealed);
-  return envelope;
-}
-
-/// Recomputes the `payloadHash` of the envelope already stored in
-/// [rideJson] after other fields changed, keeping its `segmentHashes` and
-/// other fields as they are and upgrading it to the bound format.
-///
-/// Callers must verify the ride (including its segment hashes) before
-/// re-sealing, otherwise this would seal unverified data. Throws a
-/// [StateError] when [rideJson] has no envelope map.
-void resealIntegrityEnvelope(Map<String, dynamic> rideJson) {
-  final rawIntegrity = rideJson['integrity'];
-  if (rawIntegrity is! Map) {
-    throw StateError('Ride JSON has no integrity envelope to re-seal.');
-  }
-
-  final envelope =
-      rawIntegrity.map((key, value) => MapEntry(key.toString(), value))
-        ..remove('payloadHash')
-        ..['envelopeVersion'] = boundIntegrityEnvelopeVersion;
-  rideJson['integrity'] = envelope;
-  envelope['payloadHash'] = computeRidePayloadHash(rideJson);
 }
 
 final Map<String, Future<void>> _pathLocks = <String, Future<void>>{};

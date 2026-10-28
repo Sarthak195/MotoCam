@@ -1,77 +1,24 @@
-import 'dart:convert';
 import 'dart:io';
 
-import 'package:flutter/foundation.dart';
-
+import '../../../core/ride_file/ride_telemetry_codec.dart' as ride_codec;
+import '../../../core/ride_file/ride_telemetry_codec.dart'
+    show
+        RideIncident,
+        RideIntegrityReport,
+        RideIntegrityStatus,
+        RideSegmentTimelineEntry;
 import '../../../core/utils/integrity_utils.dart' as integrity_utils;
 import '../../../core/utils/path_utils.dart' as path_utils;
 import '../../telemetry/models/telemetry_data.dart';
 
-/// Outcome of checking a ride's integrity envelope.
-///
-/// The envelope is an unkeyed SHA-256 checksum, so [verified] means the
-/// checked data is unmodified since recording, not that it is tamper-proof.
-enum RideIntegrityStatus {
-  /// No envelope to check: a ride recorded before envelopes were written,
-  /// an incomplete ride (`sessionComplete: false`) without an envelope (this
-  /// app seals its checkpoints, so it does not write these), or a video-only
-  /// ride with no JSON.
-  unknown,
-
-  /// Every check that ran passed.
-  verified,
-
-  /// At least one check failed, the envelope is missing where it is
-  /// mandatory, or segment paths were quarantined.
-  modified,
-}
-
-/// Result of an integrity check: a [status] plus machine-readable [issues]
-/// such as `payload-hash-mismatch` or `segment-hash-mismatch:<path>`.
-class RideIntegrityReport {
-  const RideIntegrityReport._({
-    required this.status,
-    required this.hasMetadata,
-    required this.issues,
-  });
-
-  /// Report for a ride without an integrity envelope.
-  const RideIntegrityReport.unknown()
-    : status = RideIntegrityStatus.unknown,
-      hasMetadata = false,
-      issues = const <String>[];
-
-  /// Report for a ride whose checks all passed.
-  const RideIntegrityReport.verified()
-    : status = RideIntegrityStatus.verified,
-      hasMetadata = true,
-      issues = const <String>[];
-
-  /// Report for a ride with at least one failed check listed in [issues].
-  factory RideIntegrityReport.modified(
-    List<String> issues, {
-    bool hasMetadata = true,
-  }) {
-    return RideIntegrityReport._(
-      status: RideIntegrityStatus.modified,
-      hasMetadata: hasMetadata,
-      issues: List<String>.unmodifiable(issues),
-    );
-  }
-
-  /// Overall result.
-  final RideIntegrityStatus status;
-
-  /// Whether the ride JSON carried a usable integrity envelope.
-  final bool hasMetadata;
-
-  /// Failed checks; empty unless [status] is [RideIntegrityStatus.modified].
-  final List<String> issues;
-
-  /// Whether [status] is [RideIntegrityStatus.verified]. Only tests read it.
-  @visibleForTesting
-  bool get isVerified => status == RideIntegrityStatus.verified;
-}
+// The ride-file types live in the codec; existing callers keep importing
+// them from here.
+export '../../../core/ride_file/ride_telemetry_codec.dart'
+    show
+        RideIncident,
+        RideIntegrityReport,
+        RideIntegrityStatus,
+        RideSegmentTimelineEntry;
 
 /// Represents a persisted ride session loaded from a telemetry JSON file.
 ///
@@ -108,18 +55,12 @@ class RideRecord {
   });
 
   /// Lower-case file extensions treated as ride video files.
-  static const List<String> videoFileExtensions = <String>[
-    '.mp4',
-    '.mov',
-    '.mkv',
-    '.avi',
-  ];
+  static const List<String> videoFileExtensions =
+      ride_codec.rideVideoFileExtensions;
 
   /// Returns `true` when [path] ends with one of [videoFileExtensions].
-  static bool isVideoFilePath(String path) {
-    final lower = path.trim().toLowerCase();
-    return videoFileExtensions.any(lower.endsWith);
-  }
+  static bool isVideoFilePath(String path) =>
+      ride_codec.isRideVideoFilePath(path);
 
   /// Path of the ride's main (last) video segment.
   final String videoPath;
@@ -329,7 +270,9 @@ class RideRecord {
     File videoFile, {
     bool verifySegments = false,
   }) async {
-    final telemetryFile = File(_telemetryPathForVideo(videoFile.path));
+    final telemetryFile = File(
+      ride_codec.legacyTelemetryPathForVideo(videoFile.path),
+    );
     if (await telemetryFile.exists()) {
       final ride = await fromTelemetryFile(
         telemetryFile,
@@ -377,480 +320,44 @@ class RideRecord {
     }
 
     try {
-      final json = await _readJsonMap(telemetryFile);
+      final json = await ride_codec.readRideFileJson(telemetryFile);
       if (json == null) {
         return null;
       }
 
-      final resolved = await _resolveSegments(
+      final decoded = await ride_codec.decodeRideFile(
         telemetryFile: telemetryFile,
         json: json,
+        verifySegments: verifySegments,
       );
-      if (resolved == null) {
+      if (decoded == null) {
         return null;
       }
 
-      final samples = _readSamples(json);
-      final segmentTimeline = _readSegmentTimeline(json, resolved: resolved);
-      final integrity = _applyTrustToIntegrity(
-        await _verifyIntegrity(
-          json: json,
-          resolved: resolved,
-          verifySegments: verifySegments,
-        ),
-        resolved.quarantinedSegmentPaths,
-      );
-
+      final summary = decoded.summary;
+      final segments = decoded.segments;
       return RideRecord(
-        videoPath: resolved.videoPath,
-        segmentPaths: resolved.segmentPaths,
-        lockedSegmentPaths: _readLockedSegmentPaths(json, resolved: resolved),
-        // New files store UTC ('Z'); show local wall-clock time. Offset-less
-        // old files already parse as local.
-        createdAt:
-            DateTime.tryParse(json['startedAt']?.toString() ?? '')?.toLocal() ??
-            (await telemetryFile.stat()).modified,
+        videoPath: segments.videoPath,
+        segmentPaths: segments.segmentPaths,
+        lockedSegmentPaths: decoded.lockedSegmentPaths,
+        createdAt: summary.startedAt ?? (await telemetryFile.stat()).modified,
         telemetryPath: telemetryFile.path,
-        rideSessionId: _readOptionalString(json, 'rideSessionId'),
-        isSessionComplete: _readJsonBool(
-          json,
-          'sessionComplete',
-          defaultValue: true,
-        ),
-        distanceKm: _readJsonDouble(json, 'distanceKm'),
-        maxSpeedKmh: _readJsonDouble(json, 'maxSpeedKmh'),
-        averageSpeedKmh: _readJsonDouble(json, 'averageSpeedKmh'),
-        segmentTimeline: segmentTimeline,
-        samples: samples,
-        integrity: integrity,
-        quarantinedSegmentPaths: resolved.quarantinedSegmentPaths,
-        missingSegmentPaths: resolved.missingSegmentPaths,
-        incidents: _readIncidents(json),
-        mockLocationDetected: _readJsonBool(
-          json,
-          'mockLocationDetected',
-          defaultValue: false,
-        ),
+        rideSessionId: summary.rideSessionId,
+        isSessionComplete: summary.sessionComplete,
+        distanceKm: summary.distanceKm,
+        maxSpeedKmh: summary.maxSpeedKmh,
+        averageSpeedKmh: summary.averageSpeedKmh,
+        segmentTimeline: decoded.segmentTimeline,
+        samples: ride_codec.decodeRideSamples(json, TelemetryData.fromJson),
+        integrity: decoded.integrity,
+        quarantinedSegmentPaths: segments.quarantinedSegmentPaths,
+        missingSegmentPaths: segments.missingSegmentPaths,
+        incidents: summary.incidents,
+        mockLocationDetected: summary.mockLocationDetected,
       );
     } catch (_) {
       return null;
     }
-  }
-
-  static Future<Map<String, dynamic>?> _readJsonMap(File telemetryFile) async {
-    final decoded = jsonDecode(await telemetryFile.readAsString());
-    if (decoded is! Map) {
-      return null;
-    }
-    return decoded.map((key, value) => MapEntry(key.toString(), value));
-  }
-
-  static RideIntegrityReport _applyTrustToIntegrity(
-    RideIntegrityReport integrity,
-    List<String> quarantinedPaths,
-  ) {
-    if (quarantinedPaths.isEmpty) {
-      return integrity;
-    }
-
-    final issues = <String>[
-      ...integrity.issues,
-      'quarantined-segment-paths:${quarantinedPaths.length}',
-    ];
-    return RideIntegrityReport.modified(
-      issues,
-      hasMetadata: integrity.hasMetadata,
-    );
-  }
-
-  /// Resolves the declared segment and video paths of [json], applies the
-  /// trusted-root check and records which files are missing. Returns `null`
-  /// when no video path can be determined.
-  static Future<_ResolvedSegments?> _resolveSegments({
-    required File telemetryFile,
-    required Map<String, dynamic> json,
-  }) async {
-    final telemetryDirectory = telemetryFile.parent.path;
-    final trustedRoots = _trustedRootsForTelemetry(telemetryFile);
-    final resolvedByDeclared = <String, String>{};
-    final declaredByResolved = <String, String>{};
-
-    Future<String> resolve(String declaredPath) async {
-      final declared = declaredPath.trim();
-      final cached = resolvedByDeclared[declared];
-      if (cached != null) {
-        return cached;
-      }
-      final resolvedPath = await _resolveDeclaredPath(
-        declared,
-        telemetryDirectory: telemetryDirectory,
-      );
-      resolvedByDeclared[declared] = resolvedPath;
-      declaredByResolved.putIfAbsent(resolvedPath, () => declared);
-      return resolvedPath;
-    }
-
-    final declaredVideoPath = json['videoPath']?.toString().trim() ?? '';
-    final allowed = <String>[];
-    final quarantined = <String>[];
-    final seen = <String>{};
-
-    void addQuarantined(String path) {
-      if (!quarantined.contains(path)) {
-        quarantined.add(path);
-      }
-    }
-
-    for (final declared in _readSegmentPaths(
-      json,
-      fallbackPath: declaredVideoPath,
-    )) {
-      final path = await resolve(declared);
-      if (path.isEmpty || !seen.add(path)) {
-        continue;
-      }
-      if (_isPathInsideAnyTrustedRoot(path, trustedRoots)) {
-        allowed.add(path);
-      } else {
-        addQuarantined(path);
-        if (kDebugMode) {
-          debugPrint(
-            'RideRecord: quarantined out-of-scope segment path from ${telemetryFile.path} -> $path',
-          );
-        }
-      }
-    }
-
-    var existing = await _existingPathsInOrder(allowed);
-
-    if (allowed.isEmpty) {
-      final recoveredPath = await _recoverVideoPathFromTelemetryFile(
-        telemetryFile,
-      );
-      if (recoveredPath != null) {
-        declaredByResolved.putIfAbsent(recoveredPath, () => recoveredPath);
-        if (_isPathInsideAnyTrustedRoot(recoveredPath, trustedRoots)) {
-          allowed.add(recoveredPath);
-          existing = <String>[...existing, recoveredPath];
-        } else {
-          addQuarantined(recoveredPath);
-        }
-      }
-    }
-
-    var videoPath = declaredVideoPath.isEmpty
-        ? ''
-        : await resolve(declaredVideoPath);
-    if (videoPath.isNotEmpty &&
-        !_isPathInsideAnyTrustedRoot(videoPath, trustedRoots)) {
-      addQuarantined(videoPath);
-      videoPath = '';
-    }
-
-    if (videoPath.isEmpty) {
-      if (existing.isNotEmpty) {
-        videoPath = existing.last;
-      } else if (allowed.isNotEmpty) {
-        videoPath = allowed.last;
-      }
-    }
-
-    if (videoPath.isEmpty) {
-      return null;
-    }
-    if (!allowed.contains(videoPath)) {
-      allowed.add(videoPath);
-      if (await File(videoPath).exists()) {
-        existing = <String>[...existing, videoPath];
-      }
-    }
-
-    final existingSet = existing.toSet();
-    return _ResolvedSegments(
-      segmentPaths: List<String>.unmodifiable(allowed),
-      missingSegmentPaths: List<String>.unmodifiable(
-        allowed.where((path) => !existingSet.contains(path)),
-      ),
-      quarantinedSegmentPaths: List<String>.unmodifiable(quarantined),
-      videoPath: videoPath,
-      resolvedByDeclared: Map<String, String>.unmodifiable(resolvedByDeclared),
-      declaredByResolved: Map<String, String>.unmodifiable(declaredByResolved),
-    );
-  }
-
-  /// Maps a declared path to the file to use:
-  ///
-  /// * a plain file name (no separator) is resolved inside
-  ///   [telemetryDirectory];
-  /// * an existing path is kept;
-  /// * a missing path whose file name exists inside [telemetryDirectory] is
-  ///   relocated there (the data directory moved since recording);
-  /// * anything else is kept as declared.
-  static Future<String> _resolveDeclaredPath(
-    String declaredPath, {
-    required String telemetryDirectory,
-  }) async {
-    final path = declaredPath.trim();
-    if (path.isEmpty) {
-      return path;
-    }
-
-    final name = path_utils.fileNameFromPath(path);
-    if (name.isEmpty || name == '.' || name == '..') {
-      return path;
-    }
-
-    final candidatePath = '$telemetryDirectory${Platform.pathSeparator}$name';
-    if (name == path) {
-      return candidatePath;
-    }
-    if (await File(path).exists()) {
-      return path;
-    }
-    if (await File(candidatePath).exists()) {
-      return candidatePath;
-    }
-    return path;
-  }
-
-  static Future<List<String>> _existingPathsInOrder(
-    Iterable<String> paths,
-  ) async {
-    final existingPaths = <String>[];
-    final seen = <String>{};
-
-    for (final path in paths) {
-      final normalizedPath = path.trim();
-      if (normalizedPath.isEmpty || seen.contains(normalizedPath)) {
-        continue;
-      }
-      if (await File(normalizedPath).exists()) {
-        existingPaths.add(normalizedPath);
-        seen.add(normalizedPath);
-      }
-    }
-
-    return existingPaths;
-  }
-
-  static Future<String?> _recoverVideoPathFromTelemetryFile(
-    File telemetryFile,
-  ) async {
-    const telemetrySuffix = '.telemetry.json';
-    if (!telemetryFile.path.toLowerCase().endsWith(telemetrySuffix)) {
-      return null;
-    }
-
-    final basePath = telemetryFile.path.substring(
-      0,
-      telemetryFile.path.length - telemetrySuffix.length,
-    );
-
-    for (final extension in videoFileExtensions) {
-      final candidate = File('$basePath$extension');
-      if (await candidate.exists()) {
-        return candidate.path;
-      }
-    }
-
-    return null;
-  }
-
-  static double _readJsonDouble(Map<String, dynamic> json, String key) =>
-      (json[key] as num?)?.toDouble() ?? 0;
-
-  static bool _readJsonBool(
-    Map<String, dynamic> json,
-    String key, {
-    required bool defaultValue,
-  }) {
-    final raw = json[key];
-    if (raw is bool) {
-      return raw;
-    }
-    if (raw is String) {
-      final normalized = raw.trim().toLowerCase();
-      if (normalized == 'true') {
-        return true;
-      }
-      if (normalized == 'false') {
-        return false;
-      }
-    }
-    if (raw is num) {
-      return raw != 0;
-    }
-    return defaultValue;
-  }
-
-  static List<RideIncident>? _readIncidents(Map<String, dynamic> json) {
-    if (!json.containsKey('incidents')) {
-      return null;
-    }
-    final raw = json['incidents'];
-    final incidents = <RideIncident>[];
-    for (final entry in raw is List ? raw : const <dynamic>[]) {
-      if (entry is! Map) {
-        continue;
-      }
-      final incident = RideIncident.fromJson(
-        entry.map((key, value) => MapEntry(key.toString(), value)),
-      );
-      if (incident != null) {
-        incidents.add(incident);
-      }
-    }
-    incidents.sort((a, b) => a.elapsedMs.compareTo(b.elapsedMs));
-    return List<RideIncident>.unmodifiable(incidents);
-  }
-
-  static String? _readOptionalString(Map<String, dynamic> json, String key) {
-    final raw = json[key]?.toString().trim();
-    if (raw == null || raw.isEmpty) {
-      return null;
-    }
-    return raw;
-  }
-
-  static List<String> _readSegmentPaths(
-    Map<String, dynamic> json, {
-    required String fallbackPath,
-  }) {
-    final raw = json['segmentPaths'];
-    final paths = <String>[];
-    final seen = <String>{};
-    for (final value in raw is List ? raw : const <dynamic>[]) {
-      final path = value.toString().trim();
-      if (path.isEmpty || !seen.add(path)) {
-        continue;
-      }
-      paths.add(path);
-    }
-
-    if (paths.isEmpty) {
-      final fallback = fallbackPath.trim();
-      if (fallback.isNotEmpty) {
-        paths.add(fallback);
-      }
-    }
-    return paths;
-  }
-
-  /// Trusted roots come only from a location the app controls: the
-  /// directory the telemetry file was discovered in. Fields of the JSON
-  /// being checked (such as `storageDirectory` or `videoPath`) are never
-  /// trusted.
-  static List<String> _trustedRootsForTelemetry(File telemetryFile) {
-    // No hard-coded public path: it differs for secondary users and work
-    // profiles, and ride JSON never references exported gallery copies.
-    final roots = <String>[telemetryFile.parent.path];
-
-    final normalized = <String>{};
-    for (final rawRoot in roots) {
-      final candidate = rawRoot.trim();
-      if (candidate.isEmpty) {
-        continue;
-      }
-      normalized.add(path_utils.normalizePath(candidate));
-    }
-    return List<String>.unmodifiable(normalized.toList());
-  }
-
-  static bool _isPathInsideAnyTrustedRoot(
-    String filePath,
-    List<String> trustedRoots,
-  ) {
-    for (final trustedRoot in trustedRoots) {
-      if (path_utils.isPathInsideDirectory(filePath, trustedRoot)) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  static List<TelemetryData> _readSamples(Map<String, dynamic> json) {
-    final samplesJson = json['samples'];
-    final samples = <TelemetryData>[];
-    if (samplesJson is! List) {
-      return samples;
-    }
-
-    for (final raw in samplesJson.whereType<Map>()) {
-      try {
-        final normalized = raw.map(
-          (key, value) => MapEntry(key.toString(), value),
-        );
-        samples.add(TelemetryData.fromJson(normalized));
-      } catch (_) {
-        // Keep loading the ride even if a single sample is malformed.
-      }
-    }
-
-    return samples;
-  }
-
-  /// Reads `segmentTimeline`, maps each entry's declared path to its
-  /// resolved segment path, drops entries for unknown or repeated segments,
-  /// clamps negative starts to 0 (as the writer does) and sorts by start.
-  static List<RideSegmentTimelineEntry> _readSegmentTimeline(
-    Map<String, dynamic> json, {
-    required _ResolvedSegments resolved,
-  }) {
-    final pathSet = resolved.segmentPaths.toSet();
-    final rawTimeline = json['segmentTimeline'];
-    final entries = <RideSegmentTimelineEntry>[];
-    final seenPaths = <String>{};
-    if (rawTimeline is! List) {
-      return entries;
-    }
-
-    for (final rawEntry in rawTimeline.whereType<Map>()) {
-      final entry = rawEntry.map(
-        (key, value) => MapEntry(key.toString(), value),
-      );
-      final path = resolved.resolve(entry['path']?.toString() ?? '');
-      if (path.isEmpty || !pathSet.contains(path) || seenPaths.contains(path)) {
-        continue;
-      }
-
-      final rawStartMs = (entry['startMs'] as num?)?.toInt() ?? 0;
-      final startMs = rawStartMs < 0 ? 0 : rawStartMs;
-      final endMs = (entry['endMs'] as num?)?.toInt() ?? startMs;
-      final normalizedEndMs = endMs >= startMs ? endMs : startMs;
-      entries.add(
-        RideSegmentTimelineEntry(
-          path: path,
-          startMs: startMs,
-          endMs: normalizedEndMs,
-        ),
-      );
-      seenPaths.add(path);
-    }
-
-    entries.sort((a, b) => a.startMs.compareTo(b.startMs));
-    return entries;
-  }
-
-  static List<String> _readLockedSegmentPaths(
-    Map<String, dynamic> json, {
-    required _ResolvedSegments resolved,
-  }) {
-    final raw = json['lockedSegmentPaths'];
-    if (raw is! List || raw.isEmpty) {
-      return const [];
-    }
-
-    final segmentSet = resolved.segmentPaths.toSet();
-    final locked = <String>[];
-    for (final value in raw) {
-      final path = resolved.resolve(value.toString());
-      if (path.isNotEmpty &&
-          segmentSet.contains(path) &&
-          !locked.contains(path)) {
-        locked.add(path);
-      }
-    }
-    return locked;
   }
 
   /// Locks ([locked] `true`) or unlocks every segment of this ride in its
@@ -879,186 +386,44 @@ class RideRecord {
           return false;
         }
 
-        final json = await _readJsonMap(telemetryFile);
+        final json = await ride_codec.readRideFileJson(telemetryFile);
         if (json == null) {
           return false;
         }
 
-        final resolved = await _resolveSegments(
+        final segments = await ride_codec.resolveRideSegments(
           telemetryFile: telemetryFile,
           json: json,
         );
-        if (resolved == null || resolved.quarantinedSegmentPaths.isNotEmpty) {
+        if (segments == null || segments.quarantinedSegmentPaths.isNotEmpty) {
           return false;
         }
 
-        final report = await _verifyIntegrity(
+        final report = await ride_codec.checkRideFileIntegrity(
           json: json,
-          resolved: resolved,
+          segments: segments,
           verifySegments: true,
         );
         if (report.status == RideIntegrityStatus.modified) {
           return false;
         }
 
-        json['lockedSegmentPaths'] = locked
-            ? resolved.segmentPaths.map(resolved.declaredPathFor).toList()
-            : <String>[];
-
-        if (report.status == RideIntegrityStatus.verified) {
-          integrity_utils.resealIntegrityEnvelope(json);
-        }
+        ride_codec.applyLockState(
+          json,
+          segments: segments,
+          locked: locked,
+          reseal: report.status == RideIntegrityStatus.verified,
+        );
 
         await integrity_utils.writeTelemetryAtomically(
           telemetryFile: telemetryFile,
-          content: jsonEncode(json),
+          content: ride_codec.encodeRideFileJson(json),
         );
         return true;
       } catch (_) {
         return false;
       }
     });
-  }
-
-  static int _readSchemaVersion(Map<String, dynamic> json) {
-    final raw = json['schemaVersion'];
-    if (raw is num) {
-      return raw.toInt();
-    }
-    return int.tryParse(raw?.toString() ?? '') ?? 0;
-  }
-
-  /// Checks the integrity envelope of [json].
-  ///
-  /// Fails closed: an invalid envelope, or a missing one on a completed
-  /// ride whose `schemaVersion` makes it mandatory, is reported as modified.
-  /// A declared segment that exists but has no hash is an issue; a segment
-  /// whose file is missing is not (it is reported through
-  /// `missingSegmentPaths`).
-  static Future<RideIntegrityReport> _verifyIntegrity({
-    required Map<String, dynamic> json,
-    required _ResolvedSegments resolved,
-    bool verifySegments = false,
-  }) async {
-    final schemaVersion = _readSchemaVersion(json);
-    final rawIntegrity = json['integrity'];
-    if (rawIntegrity == null) {
-      // Only a completed ride must carry an envelope. An incomplete one
-      // (sessionComplete: false) without it is reported as unknown, not
-      // modified; this app seals its checkpoints, so it never writes one.
-      final isSealedSchema =
-          schemaVersion >= integrity_utils.mandatoryIntegritySchemaVersion;
-      if (isSealedSchema &&
-          _readJsonBool(json, 'sessionComplete', defaultValue: true)) {
-        return RideIntegrityReport.modified(const <String>[
-          'missing-integrity',
-        ], hasMetadata: false);
-      }
-      return const RideIntegrityReport.unknown();
-    }
-    if (rawIntegrity is! Map) {
-      return RideIntegrityReport.modified(const <String>[
-        'invalid-integrity',
-      ], hasMetadata: false);
-    }
-
-    final integrity = rawIntegrity.map(
-      (key, value) => MapEntry(key.toString(), value),
-    );
-    final issues = <String>[];
-
-    final algorithm =
-        (integrity['algo']?.toString().trim().toLowerCase() ?? '');
-    if (algorithm != integrity_utils.integrityAlgorithmSha256) {
-      issues.add('unsupported-integrity-algorithm:$algorithm');
-    }
-
-    final rawEnvelopeVersion = integrity['envelopeVersion'];
-    final envelopeVersion = integrity_utils.integrityEnvelopeVersionOf(
-      integrity,
-    );
-    if (rawEnvelopeVersion != null &&
-        (rawEnvelopeVersion is! num ||
-            envelopeVersion < 1 ||
-            envelopeVersion > integrity_utils.boundIntegrityEnvelopeVersion)) {
-      issues.add('unsupported-integrity-version:$rawEnvelopeVersion');
-    }
-
-    final expectedPayloadHash =
-        integrity['payloadHash']?.toString().trim().toLowerCase() ?? '';
-    if (expectedPayloadHash.isEmpty) {
-      issues.add('missing-payload-hash');
-    } else {
-      final actualPayloadHash = integrity_utils.computeRidePayloadHash(json);
-      if (actualPayloadHash != expectedPayloadHash) {
-        issues.add('payload-hash-mismatch');
-      }
-    }
-
-    final expectedSegmentHashes = _readExpectedSegmentHashes(integrity);
-    final missingPaths = resolved.missingSegmentPaths.toSet();
-    final matchedHashKeys = <String>{};
-    for (final segmentPath in resolved.segmentPaths) {
-      final hashKey = _segmentHashKey(
-        expectedSegmentHashes,
-        declaredPath: resolved.declaredPathFor(segmentPath),
-        resolvedPath: segmentPath,
-      );
-      if (hashKey == null) {
-        if (!missingPaths.contains(segmentPath)) {
-          issues.add('missing-segment-hash:$segmentPath');
-        }
-        continue;
-      }
-      matchedHashKeys.add(hashKey);
-
-      if (!verifySegments || missingPaths.contains(segmentPath)) {
-        continue;
-      }
-
-      final actualHash = await integrity_utils.hashFileSha256(segmentPath);
-      if (actualHash == null) {
-        if (await File(segmentPath).exists()) {
-          issues.add('unreadable-segment-file:$segmentPath');
-        }
-        continue;
-      }
-
-      if (actualHash != expectedSegmentHashes[hashKey]) {
-        issues.add('segment-hash-mismatch:$segmentPath');
-      }
-    }
-
-    for (final hashedPath in expectedSegmentHashes.keys) {
-      if (!matchedHashKeys.contains(hashedPath)) {
-        issues.add('orphan-integrity-hash:$hashedPath');
-      }
-    }
-
-    if (issues.isEmpty) {
-      return const RideIntegrityReport.verified();
-    }
-    return RideIntegrityReport.modified(issues);
-  }
-
-  /// Finds the `segmentHashes` key for a segment: its declared path, its
-  /// resolved path, or its plain file name (for writers that store names
-  /// relative to the recordings directory).
-  static String? _segmentHashKey(
-    Map<String, String> expectedSegmentHashes, {
-    required String declaredPath,
-    required String resolvedPath,
-  }) {
-    for (final candidate in <String>[
-      declaredPath,
-      resolvedPath,
-      path_utils.fileNameFromPath(resolvedPath),
-    ]) {
-      if (expectedSegmentHashes.containsKey(candidate)) {
-        return candidate;
-      }
-    }
-    return null;
   }
 
   /// Re-reads the telemetry JSON and returns a copy of this ride whose
@@ -1076,26 +441,23 @@ class RideRecord {
     }
 
     try {
-      final json = await _readJsonMap(telemetryFile);
+      final json = await ride_codec.readRideFileJson(telemetryFile);
       if (json == null) {
         return this;
       }
 
-      final resolved = await _resolveSegments(
+      final segments = await ride_codec.resolveRideSegments(
         telemetryFile: telemetryFile,
         json: json,
       );
-      if (resolved == null) {
+      if (segments == null) {
         return this;
       }
 
-      final integrity = _applyTrustToIntegrity(
-        await _verifyIntegrity(
-          json: json,
-          resolved: resolved,
-          verifySegments: true,
-        ),
-        resolved.quarantinedSegmentPaths,
+      final integrity = await ride_codec.checkRideFileIntegrity(
+        json: json,
+        segments: segments,
+        verifySegments: true,
       );
 
       return RideRecord(
@@ -1112,8 +474,8 @@ class RideRecord {
         segmentTimeline: segmentTimeline,
         samples: samples,
         integrity: integrity,
-        quarantinedSegmentPaths: resolved.quarantinedSegmentPaths,
-        missingSegmentPaths: resolved.missingSegmentPaths,
+        quarantinedSegmentPaths: segments.quarantinedSegmentPaths,
+        missingSegmentPaths: segments.missingSegmentPaths,
         incidents: incidents,
         mockLocationDetected: mockLocationDetected,
       );
@@ -1121,136 +483,4 @@ class RideRecord {
       return this;
     }
   }
-
-  static Map<String, String> _readExpectedSegmentHashes(
-    Map<String, dynamic> integrity,
-  ) {
-    final raw = integrity['segmentHashes'];
-    if (raw is! Map) {
-      return const <String, String>{};
-    }
-
-    final parsed = <String, String>{};
-    for (final entry in raw.entries) {
-      final path = entry.key.toString().trim();
-      final hash = entry.value.toString().trim().toLowerCase();
-      if (path.isEmpty || hash.isEmpty) {
-        continue;
-      }
-      parsed[path] = hash;
-    }
-    return Map<String, String>.unmodifiable(parsed);
-  }
-
-  static String _telemetryPathForVideo(String videoPath) {
-    final dotIndex = videoPath.lastIndexOf('.');
-    if (dotIndex <= 0) {
-      return '$videoPath.telemetry.json';
-    }
-    return '${videoPath.substring(0, dotIndex)}.telemetry.json';
-  }
-}
-
-/// An incident detected live during a ride (an entry of the ride JSON's
-/// optional top-level `incidents` list).
-class RideIncident {
-  /// Creates an incident record.
-  const RideIncident({
-    required this.elapsedMs,
-    this.timestamp,
-    this.gForce,
-    this.triggerGForce,
-    this.reason,
-  });
-
-  /// Parses one `incidents` entry, or returns `null` when it has no usable
-  /// non-negative `elapsedMs`.
-  static RideIncident? fromJson(Map<String, dynamic> json) {
-    final rawElapsed = json['elapsedMs'];
-    final elapsed = rawElapsed is num
-        ? rawElapsed
-        : num.tryParse(rawElapsed?.toString() ?? '');
-    if (elapsed == null || !elapsed.isFinite || elapsed < 0) {
-      return null;
-    }
-    double? readDouble(String key) {
-      final raw = json[key];
-      final value = raw is num ? raw : num.tryParse(raw?.toString() ?? '');
-      return value == null || !value.isFinite ? null : value.toDouble();
-    }
-
-    final reason = json['reason']?.toString().trim();
-    return RideIncident(
-      elapsedMs: elapsed.toInt(),
-      timestamp: DateTime.tryParse(
-        json['timestamp']?.toString() ?? '',
-      )?.toLocal(),
-      gForce: readDouble('gForce'),
-      triggerGForce: readDouble('triggerGForce'),
-      reason: reason == null || reason.isEmpty ? null : reason,
-    );
-  }
-
-  /// Milliseconds since ride start.
-  final int elapsedMs;
-
-  /// Wall-clock detection time (local), if recorded.
-  final DateTime? timestamp;
-
-  /// Peak g-force of the incident, if recorded.
-  final double? gForce;
-
-  /// Trigger threshold in g at detection time, if recorded.
-  final double? triggerGForce;
-
-  /// Detection reason, e.g. `auto-crash`.
-  final String? reason;
-}
-
-/// Start and end offset, in milliseconds from ride start, of one segment.
-class RideSegmentTimelineEntry {
-  /// Creates a timeline entry for the segment at [path].
-  const RideSegmentTimelineEntry({
-    required this.path,
-    required this.startMs,
-    required this.endMs,
-  });
-
-  /// Resolved segment path.
-  final String path;
-
-  /// Offset of the segment's first frame.
-  final int startMs;
-
-  /// Offset of the segment's end; never before [startMs].
-  final int endMs;
-}
-
-class _ResolvedSegments {
-  const _ResolvedSegments({
-    required this.segmentPaths,
-    required this.missingSegmentPaths,
-    required this.quarantinedSegmentPaths,
-    required this.videoPath,
-    required this.resolvedByDeclared,
-    required this.declaredByResolved,
-  });
-
-  final List<String> segmentPaths;
-  final List<String> missingSegmentPaths;
-  final List<String> quarantinedSegmentPaths;
-  final String videoPath;
-  final Map<String, String> resolvedByDeclared;
-  final Map<String, String> declaredByResolved;
-
-  /// Resolved form of a declared path, or the path itself when it was not
-  /// declared in the segment list.
-  String resolve(String declaredPath) {
-    final declared = declaredPath.trim();
-    return resolvedByDeclared[declared] ?? declared;
-  }
-
-  /// Declared form (as written in the JSON) of a resolved path.
-  String declaredPathFor(String resolvedPath) =>
-      declaredByResolved[resolvedPath] ?? resolvedPath;
 }

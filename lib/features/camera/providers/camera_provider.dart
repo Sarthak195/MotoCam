@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:camera/camera.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:path_provider/path_provider.dart';
+import '../../../core/ride_file/ride_telemetry_codec.dart' as ride_codec;
 import '../../../core/services/app_permission_service.dart';
 import '../../../core/utils/integrity_utils.dart' as integrity_utils;
 import '../../../core/utils/path_utils.dart' as path_utils;
@@ -79,7 +80,8 @@ class CameraProvider extends ChangeNotifier {
   /// Native media channel (Android) used for gallery export and free-space
   /// queries.
   static const platform = MethodChannel('com.example.motocam/media');
-  static const String _galleryRelativePath = 'Movies/MotoCam/Recordings';
+  static const String _galleryRelativePath =
+      ride_codec.publicExportRelativePath;
   static const String _recordingsDirectoryName = 'MotoCam Recordings';
   static const Duration _rollWaitTimeout = Duration(seconds: 60);
 
@@ -984,7 +986,6 @@ class CameraProvider extends ChangeNotifier {
   String _normalizePath(String path) => path_utils.normalizePath(path);
   bool _isPathInsideDirectory(String filePath, String directoryPath) =>
       path_utils.isPathInsideDirectory(filePath, directoryPath);
-  String _fileNameFromPath(String path) => path_utils.fileNameFromPath(path);
 
   Future<String> _buildUniqueSegmentPath(
     String directoryPath,
@@ -1036,7 +1037,7 @@ class CameraProvider extends ChangeNotifier {
 
     final targetPath = await _buildUniqueSegmentPath(
       recordingsDirectoryPath,
-      _fileNameFromPath(sourcePath),
+      path_utils.fileNameFromPath(sourcePath),
     );
 
     // On Android the plugin's cache dir and the recordings root are on
@@ -1864,7 +1865,7 @@ class CameraProvider extends ChangeNotifier {
         continue;
       }
 
-      final fileName = _fileNameFromPath(sourcePath);
+      final fileName = path_utils.fileNameFromPath(sourcePath);
       try {
         await export(sourcePath, fileName);
         exported++;

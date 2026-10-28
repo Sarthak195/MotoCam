@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:crypto/crypto.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:motocam/core/ride_file/ride_telemetry_codec.dart' as ride_codec;
 import 'package:motocam/features/history/models/ride_record.dart';
 import 'package:motocam/features/telemetry/providers/telemetry_provider.dart';
 
@@ -557,9 +558,9 @@ void main() {
     });
   });
 
-  group('TelemetryProvider.sanitizeJsonValue', () {
+  group('sanitizeJsonValue', () {
     test('replaces non-finite doubles with null at any depth', () {
-      final sanitized = TelemetryProvider.sanitizeJsonValue({
+      final sanitized = ride_codec.sanitizeJsonValue({
         'a': double.nan,
         'b': [1.5, double.infinity],
         'c': {'d': double.negativeInfinity, 'e': 'x', 'f': 2},

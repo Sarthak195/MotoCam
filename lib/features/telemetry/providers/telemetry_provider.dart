@@ -4,11 +4,10 @@ import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:sensors_plus/sensors_plus.dart';
-import '../../../core/utils/path_utils.dart' as path_utils;
+import '../../../core/ride_file/ride_telemetry_codec.dart' as ride_codec;
 import '../../../core/utils/integrity_utils.dart' as integrity_utils;
 import '../models/telemetry_data.dart';
 import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
 import 'dart:isolate';
 import 'dart:math' as math;
@@ -33,10 +32,10 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
 
   /// Version of the ride JSON written by this provider. Every version-3 file,
   /// checkpoints included, carries a bound integrity envelope
-  /// (`integrity_utils.buildIntegrityEnvelope`), so readers treat a missing
+  /// (`ride_codec.buildIntegrityEnvelope`), so readers treat a missing
   /// envelope on a completed ride (`sessionComplete` not `false`) as
   /// modified.
-  static const int rideSchemaVersion = 3;
+  static const int rideSchemaVersion = ride_codec.rideFileSchemaVersion;
 
   /// Fixes older than this are saved with `hasFix: false`.
   static const Duration maxFixAge = Duration(seconds: 5);
@@ -121,7 +120,7 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
   bool _mockLocationDetected = false;
   String? _rideSessionId;
   String? _rideTelemetryPath;
-  _RideFilesInput? _checkpointInput;
+  ride_codec.RideFileInput? _checkpointInput;
   Future<void>? _pendingWrite;
   Future<void>? _pendingPrehash;
   final Map<String, _CachedSegmentHash> _segmentHashCache = {};
@@ -935,7 +934,7 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
       return null;
     }
 
-    _checkpointInput = _RideFilesInput(
+    _checkpointInput = ride_codec.RideFileInput(
       videoPath: segmentPaths.isEmpty ? '' : segmentPaths.last,
       segmentPaths: List<String>.from(segmentPaths),
       lockedSegmentPaths: List<String>.from(lockedSegmentPaths ?? const []),
@@ -967,7 +966,7 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
       if (prehash != null) {
         await prehash;
       }
-      final resolved = await _resolveRideFiles(input);
+      final resolved = await ride_codec.resolveRideFileContent(input);
       final segmentHashes = await _cachedSegmentHashes(resolved.segmentPaths);
       // A checkpoint lists only segments it can seal; newer ones follow in
       // the next checkpoint or the final save.
@@ -981,15 +980,17 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
       }
 
       final ride = _snapshotRide(endedAt: DateTime.now());
-      final telemetryPath = _rideTelemetryPath ??= _buildPrimaryTelemetryPath(
-        rideSessionId: sessionId,
-        canonicalVideoPath: files.videoPath,
-        segmentPaths: files.segmentPaths,
-      );
-      final sealed = await _sealPayload(
-        _buildPayloadCore(ride: ride, files: files, sessionComplete: false),
+      final telemetryPath = _rideTelemetryPath ??= ride_codec
+          .rideTelemetryPathFor(
+            rideSessionId: sessionId,
+            videoPath: files.videoPath,
+            segmentPaths: files.segmentPaths,
+          );
+      final sealed = await ride_codec.sealRidePayload(
+        _encodePayload(ride: ride, files: files, sessionComplete: false),
         segmentHashes: segmentHashes,
         segmentCount: files.segmentPaths.length,
+        generatedAt: DateTime.now().toUtc(),
       );
       // Never let a checkpoint land after (and overwrite) the final save.
       if (_rideSessionId != sessionId || !_isRideActive) {
@@ -1041,7 +1042,7 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
     // Snapshot and clear synchronously, before any await.
     final ride = _snapshotRide(endedAt: DateTime.now());
     final telemetryPathHint = _rideTelemetryPath;
-    final input = _RideFilesInput(
+    final input = ride_codec.RideFileInput(
       videoPath: videoPath,
       segmentPaths: List<String>.from(segmentPaths ?? const []),
       lockedSegmentPaths: List<String>.from(lockedSegmentPaths ?? const []),
@@ -1112,20 +1113,20 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   Future<String> _persistRide({
-    required _RideSnapshot ride,
-    required _RideFilesInput input,
+    required ride_codec.RideFileSnapshot ride,
+    required ride_codec.RideFileInput input,
     required String? telemetryPathHint,
   }) async {
     final prehash = _pendingPrehash;
     if (prehash != null) {
       await prehash;
     }
-    final files = await _resolveRideFiles(input);
+    final files = await ride_codec.resolveRideFileContent(input);
     final String telemetryPath =
         telemetryPathHint ??
-        _buildPrimaryTelemetryPath(
+        ride_codec.rideTelemetryPathFor(
           rideSessionId: ride.sessionId,
-          canonicalVideoPath: files.videoPath,
+          videoPath: files.videoPath,
           segmentPaths: files.segmentPaths,
         );
 
@@ -1136,14 +1137,15 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
     if (checkpointFiles.segmentPaths.isNotEmpty) {
       await _enqueueWrite(
         telemetryPath,
-        await _sealPayload(
-          _buildPayloadCore(
+        await ride_codec.sealRidePayload(
+          _encodePayload(
             ride: ride,
             files: checkpointFiles,
             sessionComplete: false,
           ),
           segmentHashes: cachedHashes,
           segmentCount: checkpointFiles.segmentPaths.length,
+          generatedAt: DateTime.now().toUtc(),
         ),
       );
     }
@@ -1151,10 +1153,11 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
     final segmentHashes = await _hashSegments(files.segmentPaths);
     await _enqueueWrite(
       telemetryPath,
-      await _sealPayload(
-        _buildPayloadCore(ride: ride, files: files, sessionComplete: true),
+      await ride_codec.sealRidePayload(
+        _encodePayload(ride: ride, files: files, sessionComplete: true),
         segmentHashes: segmentHashes,
         segmentCount: files.segmentPaths.length,
+        generatedAt: DateTime.now().toUtc(),
       ),
     );
     for (final path in files.segmentPaths) {
@@ -1193,9 +1196,9 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
     _pauseIfIdleInBackground();
   }
 
-  _RideSnapshot _snapshotRide({required DateTime endedAt}) {
+  ride_codec.RideFileSnapshot _snapshotRide({required DateTime endedAt}) {
     final startedAt = _rideStartTime!;
-    return _RideSnapshot(
+    return ride_codec.RideFileSnapshot(
       sessionId: _rideSessionId ?? _buildRideSessionId(startedAt),
       startedAt: startedAt,
       endedAt: endedAt,
@@ -1211,92 +1214,16 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
     );
   }
 
-  Future<_ResolvedRideFiles> _resolveRideFiles(_RideFilesInput input) async {
-    final canonicalVideoPath = input.videoPath.trim();
-    final canonicalStorageDirectory = canonicalVideoPath.isEmpty
-        ? ''
-        : File(canonicalVideoPath).parent.path;
-    final normalizedSegmentPaths = _normalizeSegmentPaths(
-      segmentPaths: input.segmentPaths,
-      fallbackVideoPath: canonicalVideoPath,
-    );
-    var resolvedSegmentPaths = _filterPathsInDirectory(
-      paths: normalizedSegmentPaths,
-      directoryPath: canonicalStorageDirectory,
-    );
-    resolvedSegmentPaths = await _filterExistingPathsInOrder(
-      paths: resolvedSegmentPaths,
-    );
-    if (resolvedSegmentPaths.isEmpty && canonicalVideoPath.isNotEmpty) {
-      if (await File(canonicalVideoPath).exists()) {
-        resolvedSegmentPaths.add(canonicalVideoPath);
-      }
-    }
-    return _ResolvedRideFiles(
-      videoPath: canonicalVideoPath,
-      storageDirectory: canonicalStorageDirectory,
-      segmentPaths: resolvedSegmentPaths,
-      lockedSegmentPaths: _normalizeLockedPaths(
-        lockedSegmentPaths: input.lockedSegmentPaths,
-        knownSegmentPaths: resolvedSegmentPaths,
-      ),
-      segmentTimeline: _normalizeSegmentTimeline(
-        segmentTimeline: input.segmentTimeline,
-        knownSegmentPaths: resolvedSegmentPaths,
-      ),
-      recordingSettings: _normalizeRecordingSettings(input.recordingSettings),
-    );
-  }
-
-  Map<String, dynamic> _buildPayloadCore({
-    required _RideSnapshot ride,
-    required _ResolvedRideFiles files,
+  Map<String, dynamic> _encodePayload({
+    required ride_codec.RideFileSnapshot ride,
+    required ride_codec.RideFileContent files,
     required bool sessionComplete,
-  }) {
-    final payload = <String, dynamic>{
-      'schemaVersion': rideSchemaVersion,
-      'rideSessionId': ride.sessionId,
-      'sessionComplete': sessionComplete,
-      'storagePolicy': 'hybrid-private-primary',
-      'publicExportRelativePath': 'Movies/MotoCam/Recordings',
-      'storageDirectory': files.storageDirectory,
-      'sampleRateMs': sampleInterval.inMilliseconds,
-      'videoPath': files.videoPath,
-      'videoFileName': path_utils.fileNameFromPath(files.videoPath),
-      'segmentPaths': files.segmentPaths,
-      'lockedSegmentPaths': files.lockedSegmentPaths,
-      'segmentTimeline': files.segmentTimeline,
-      'recordingSettings': files.recordingSettings,
-      'startedAt': ride.startedAt.toUtc().toIso8601String(),
-      'endedAt': ride.endedAt.toUtc().toIso8601String(),
-      'distanceKm': ride.distanceKm,
-      'maxSpeedKmh': ride.maxSpeedKmh,
-      'averageSpeedKmh': ride.averageSpeedKmh,
-      'mockLocationDetected': ride.mockLocationDetected,
-      'incidents': ride.incidents,
-      'samples': ride.samples,
-    };
-    return sanitizeJsonValue(payload) as Map<String, dynamic>;
-  }
-
-  /// Returns a copy of [value] in which every non-finite double (NaN or
-  /// infinity, which `jsonEncode` rejects) is replaced by `null`.
-  @visibleForTesting
-  static Object? sanitizeJsonValue(Object? value) {
-    if (value is double) {
-      return value.isFinite ? value : null;
-    }
-    if (value is Map) {
-      return <String, dynamic>{
-        for (final entry in value.entries)
-          entry.key.toString(): sanitizeJsonValue(entry.value),
-      };
-    }
-    if (value is List) {
-      return [for (final item in value) sanitizeJsonValue(item)];
-    }
-    return value;
-  }
+  }) => ride_codec.encodeRidePayload(
+    ride: ride,
+    files: files,
+    sessionComplete: sessionComplete,
+    sampleRateMs: sampleInterval.inMilliseconds,
+  );
 
   String _buildRideSessionId(DateTime startTime) {
     final timestamp = startTime.toUtc().millisecondsSinceEpoch;
@@ -1306,115 +1233,6 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
     final randomHex =
         '${r1.toRadixString(16).padLeft(8, '0')}${r2.toRadixString(16).padLeft(8, '0')}';
     return '${timestamp}_$randomHex';
-  }
-
-  List<String> _normalizeSegmentPaths({
-    required List<String>? segmentPaths,
-    required String fallbackVideoPath,
-  }) {
-    final ordered = <String>[];
-    final seen = <String>{};
-
-    for (final rawPath in segmentPaths ?? const <String>[]) {
-      final path = rawPath.trim();
-      if (path.isEmpty || !seen.add(path)) {
-        continue;
-      }
-      ordered.add(path);
-    }
-
-    if (fallbackVideoPath.isNotEmpty && seen.add(fallbackVideoPath)) {
-      ordered.add(fallbackVideoPath);
-    }
-
-    return ordered;
-  }
-
-  List<String> _normalizeLockedPaths({
-    required List<String>? lockedSegmentPaths,
-    required List<String> knownSegmentPaths,
-  }) {
-    final knownSet = knownSegmentPaths.toSet();
-    final ordered = <String>[];
-    final seen = <String>{};
-
-    for (final rawPath in lockedSegmentPaths ?? const <String>[]) {
-      final path = rawPath.trim();
-      if (path.isEmpty || !knownSet.contains(path) || !seen.add(path)) {
-        continue;
-      }
-      ordered.add(path);
-    }
-
-    return ordered;
-  }
-
-  List<Map<String, dynamic>> _normalizeSegmentTimeline({
-    required List<Map<String, dynamic>>? segmentTimeline,
-    required List<String> knownSegmentPaths,
-  }) {
-    final knownSet = knownSegmentPaths.toSet();
-    final normalized = <Map<String, dynamic>>[];
-    final seen = <String>{};
-
-    for (final entry in segmentTimeline ?? const <Map<String, dynamic>>[]) {
-      final path = (entry['path']?.toString() ?? '').trim();
-      if (path.isEmpty || !knownSet.contains(path) || !seen.add(path)) {
-        continue;
-      }
-
-      final startMs = (entry['startMs'] as num?)?.toInt() ?? 0;
-      final endMs = (entry['endMs'] as num?)?.toInt() ?? startMs;
-      final normalizedStartMs = startMs < 0 ? 0 : startMs;
-      final normalizedEndMs = endMs >= normalizedStartMs
-          ? endMs
-          : normalizedStartMs;
-
-      normalized.add({
-        'path': path,
-        'startMs': normalizedStartMs,
-        'endMs': normalizedEndMs,
-      });
-    }
-
-    normalized.sort((a, b) {
-      final aStart = (a['startMs'] as int?) ?? 0;
-      final bStart = (b['startMs'] as int?) ?? 0;
-      return aStart.compareTo(bStart);
-    });
-
-    return normalized;
-  }
-
-  List<String> _filterPathsInDirectory({
-    required List<String> paths,
-    required String directoryPath,
-  }) {
-    if (directoryPath.trim().isEmpty) {
-      return List<String>.from(paths);
-    }
-
-    final filtered = <String>[];
-    for (final path in paths) {
-      if (_isPathInsideDirectory(path, directoryPath)) {
-        filtered.add(path);
-      }
-    }
-    return filtered;
-  }
-
-  Future<List<String>> _filterExistingPathsInOrder({
-    required List<String> paths,
-  }) async {
-    final existing = <String>[];
-    for (final path in paths) {
-      if (await File(path).exists()) {
-        existing.add(path);
-      } else {
-        debugPrint('Telemetry: dropping missing segment path $path');
-      }
-    }
-    return existing;
   }
 
   /// Serialises every ride-file write of this provider so that checkpoints
@@ -1446,39 +1264,10 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
     required Map<String, dynamic> payload,
   }) async {
     final telemetryFile = File(telemetryPath);
-    final encodedPayload = jsonEncode(payload);
     await integrity_utils.writeTelemetryAtomically(
       telemetryFile: telemetryFile,
-      content: encodedPayload,
+      content: ride_codec.encodeRideFileJson(payload),
     );
-  }
-
-  // Path utilities delegate to shared module.
-  bool _isPathInsideDirectory(String filePath, String directoryPath) =>
-      path_utils.isPathInsideDirectory(filePath, directoryPath);
-
-  Map<String, dynamic> _normalizeRecordingSettings(
-    Map<String, dynamic>? settings,
-  ) {
-    final source = settings ?? const <String, dynamic>{};
-    final normalized = <String, dynamic>{};
-
-    for (final entry in source.entries) {
-      final key = entry.key.trim();
-      if (key.isEmpty) {
-        continue;
-      }
-
-      final value = entry.value;
-      if (value == null || value is num || value is bool || value is String) {
-        normalized[key] = value;
-        continue;
-      }
-
-      normalized[key] = value.toString();
-    }
-
-    return normalized;
   }
 
   /// Starts hashing segments that are not cached yet in a background isolate.
@@ -1578,61 +1367,6 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
       }
     }
     return hashes;
-  }
-
-  /// Returns [payload] with a bound integrity envelope (see
-  /// `integrity_utils.buildIntegrityEnvelope`) built in a background isolate.
-  static Future<Map<String, dynamic>> _sealPayload(
-    Map<String, dynamic> payload, {
-    required Map<String, String> segmentHashes,
-    required int segmentCount,
-  }) async {
-    final envelope = await _buildIntegrityEnvelopeInBackground(
-      payload: payload,
-      segmentHashes: segmentHashes,
-      segmentCount: segmentCount,
-      generatedAt: DateTime.now().toUtc(),
-    );
-    return <String, dynamic>{...payload, 'integrity': envelope};
-  }
-
-  // Static so the isolate closure captures only its arguments, never `this`.
-  static Future<Map<String, dynamic>> _buildIntegrityEnvelopeInBackground({
-    required Map<String, dynamic> payload,
-    required Map<String, String> segmentHashes,
-    required int segmentCount,
-    required DateTime generatedAt,
-  }) => Isolate.run(
-    () => integrity_utils.buildIntegrityEnvelope(
-      payload: payload,
-      segmentHashes: segmentHashes,
-      segmentCount: segmentCount,
-      generatedAt: generatedAt,
-    ),
-  );
-
-  String _buildPrimaryTelemetryPath({
-    required String rideSessionId,
-    required String canonicalVideoPath,
-    required List<String> segmentPaths,
-  }) {
-    String? directoryPath;
-    if (segmentPaths.isNotEmpty) {
-      directoryPath = File(segmentPaths.first).parent.path;
-    } else if (canonicalVideoPath.isNotEmpty) {
-      directoryPath = File(canonicalVideoPath).parent.path;
-    }
-
-    final safeSessionId = rideSessionId.replaceAll(
-      RegExp(r'[^a-zA-Z0-9_-]'),
-      '_',
-    );
-    final fileName = 'ride_$safeSessionId.telemetry.json';
-
-    if (directoryPath == null || directoryPath.isEmpty) {
-      return fileName;
-    }
-    return '$directoryPath${Platform.pathSeparator}$fileName';
   }
 
   void _detectCrash(double gForce) {
@@ -1739,82 +1473,6 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
     DateTime? timestamp,
   }) {
     _onRawAcceleration(x, y, z, at: timestamp);
-  }
-}
-
-class _RideSnapshot {
-  _RideSnapshot({
-    required this.sessionId,
-    required this.startedAt,
-    required this.endedAt,
-    required this.samples,
-    required this.incidents,
-    required this.distanceKm,
-    required this.maxSpeedKmh,
-    required this.averageSpeedKmh,
-    required this.mockLocationDetected,
-  });
-
-  final String sessionId;
-  final DateTime startedAt;
-  final DateTime endedAt;
-  final List<Map<String, dynamic>> samples;
-  final List<Map<String, dynamic>> incidents;
-  final double distanceKm;
-  final double maxSpeedKmh;
-  final double averageSpeedKmh;
-  final bool mockLocationDetected;
-}
-
-class _RideFilesInput {
-  _RideFilesInput({
-    required this.videoPath,
-    required this.segmentPaths,
-    required this.lockedSegmentPaths,
-    required this.segmentTimeline,
-    required this.recordingSettings,
-  });
-
-  final String videoPath;
-  final List<String> segmentPaths;
-  final List<String> lockedSegmentPaths;
-  final List<Map<String, dynamic>> segmentTimeline;
-  final Map<String, dynamic> recordingSettings;
-}
-
-class _ResolvedRideFiles {
-  _ResolvedRideFiles({
-    required this.videoPath,
-    required this.storageDirectory,
-    required this.segmentPaths,
-    required this.lockedSegmentPaths,
-    required this.segmentTimeline,
-    required this.recordingSettings,
-  });
-
-  final String videoPath;
-  final String storageDirectory;
-  final List<String> segmentPaths;
-  final List<String> lockedSegmentPaths;
-  final List<Map<String, dynamic>> segmentTimeline;
-  final Map<String, dynamic> recordingSettings;
-
-  /// Returns a copy that keeps only the segments in [keep]; the video path
-  /// falls back to the last kept segment.
-  _ResolvedRideFiles restrictedTo(Set<String> keep) {
-    final segments = segmentPaths.where(keep.contains).toList();
-    return _ResolvedRideFiles(
-      videoPath: keep.contains(videoPath)
-          ? videoPath
-          : (segments.isEmpty ? '' : segments.last),
-      storageDirectory: storageDirectory,
-      segmentPaths: segments,
-      lockedSegmentPaths: lockedSegmentPaths.where(keep.contains).toList(),
-      segmentTimeline: segmentTimeline
-          .where((entry) => keep.contains(entry['path']))
-          .toList(),
-      recordingSettings: recordingSettings,
-    );
   }
 }
 

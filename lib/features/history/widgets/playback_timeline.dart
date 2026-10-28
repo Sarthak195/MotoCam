@@ -6,6 +6,7 @@
 
 import 'dart:math' as math;
 
+import '../../../core/ride_file/ride_telemetry_codec.dart' as ride_codec;
 import '../../telemetry/models/telemetry_data.dart';
 import '../models/ride_record.dart';
 
@@ -94,34 +95,19 @@ class SegmentSeekTarget {
 }
 
 /// Returns the declared segment paths of a ride in order, trimmed and without
-/// duplicates, followed by [videoPath] when it is not already listed.
+/// duplicates, followed by [videoPath] when it is not already listed: the
+/// ride-file codec's segment-list rule (`normalizeSegmentPathList`).
 List<String> orderedDeclaredSegmentPaths({
   required List<String> segmentPaths,
   required String videoPath,
-}) {
-  final ordered = <String>[];
-  final seen = <String>{};
-
-  void addPath(String rawPath) {
-    final path = rawPath.trim();
-    if (path.isEmpty || !seen.add(path)) {
-      return;
-    }
-    ordered.add(path);
-  }
-
-  for (final path in segmentPaths) {
-    addPath(path);
-  }
-  addPath(videoPath);
-  return ordered;
-}
+}) => ride_codec.normalizeSegmentPathList(segmentPaths, videoPath: videoPath);
 
 /// Builds a gap-free, non-overlapping, start-ordered timeline for
 /// [declaredPaths].
 ///
-/// Entries of [storedTimeline] are kept (first entry per path wins, negative
-/// starts clamp to 0, overlaps are pushed later). A stored entry shorter than
+/// Entries of [storedTimeline] are kept (first entry per path wins, the
+/// codec's span rule `normalizeTimelineSpan` applies, every entry lasts at
+/// least 1 ms, overlaps are pushed later). A stored entry shorter than
 /// [minPlaybackSegmentMs] (for example one saved without an end) takes its
 /// length from [probedDurationsByPath] when that has one. Declared paths
 /// without a stored entry are appended after the last stored entry, lasting at
@@ -141,8 +127,9 @@ List<RideSegmentTimelineEntry> buildEffectiveTimeline({
     if (path.isEmpty || !seenPaths.add(path)) {
       continue;
     }
-    final startMs = math.max(entry.startMs, 0);
-    var endMs = math.max(entry.endMs, startMs + 1);
+    final span = ride_codec.normalizeTimelineSpan(entry.startMs, entry.endMs);
+    final startMs = span.startMs;
+    var endMs = math.max(span.endMs, startMs + 1);
     final probedMs = probedDurationsByPath[path]?.inMilliseconds ?? 0;
     if (endMs - startMs < minPlaybackSegmentMs && probedMs > 0) {
       endMs = startMs + probedMs;
