@@ -2,7 +2,9 @@ import 'dart:io';
 
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:motocam/core/services/gallery_copies.dart';
 import 'package:motocam/features/camera/providers/gallery_export.dart';
+import 'package:motocam/features/history/services/gallery_copy_removal.dart';
 import 'package:motocam/features/history/services/gallery_links.dart';
 
 final String _sep = Platform.pathSeparator;
@@ -11,13 +13,19 @@ final String _sep = Platform.pathSeparator;
 /// error code queued for the file.
 class _FakeNative {
   final List<String> calls = <String>[];
+  final List<String> sources = <String>[];
   final Map<String, List<String>> errors = <String, List<String>>{};
+
+  /// Runs while the copy of a file "is made", before the answer.
+  Future<void> Function(String displayName)? during;
 
   Future<String?> call({
     required String sourcePath,
     required String displayName,
   }) async {
     calls.add(displayName);
+    sources.add(sourcePath);
+    await during?.call(displayName);
     final queued = errors[displayName];
     if (queued != null && queued.isNotEmpty) {
       throw PlatformException(code: queued.removeAt(0));
@@ -53,6 +61,7 @@ void main() {
   GalleryExporter exporter({
     GalleryLinkStore? store,
     Future<bool> Function()? requestPermission,
+    GalleryCopyStatusCall? deleteCopies,
   }) => GalleryExporter(
     store: store ?? GalleryLinkStore(storeFile),
     exportVideo: native.call,
@@ -61,6 +70,7 @@ void main() {
       roots: <String>[root.path, legacy.path],
     ),
     requestStoragePermission: requestPermission,
+    deleteCopies: deleteCopies,
   );
 
   GalleryExportItem item(String? id, File file) =>
@@ -261,11 +271,99 @@ void main() {
       expect(run.failed, 1);
       expect(run.permissionDenied, isTrue);
 
-      run = await queue.drain();
+      // A drain that does not ask (the launch retry) leaves the entry
+      // waiting without counting an attempt, however often it runs.
+      for (var i = 0; i < GalleryExporter.maxAttempts + 1; i++) {
+        native.errors['a.mp4'] = <String>[galleryPermissionDeniedCode];
+        run = await queue.drain();
+        expect(run.failed, 0);
+        expect(run.awaitingPermission, 1);
+        expect(run.hasOutcome, isFalse);
+      }
       expect(asked, 1);
-      expect(run.permissionDenied, isTrue);
+      final data = await queue.store.read();
+      expect(data.pending['r1|a.mp4']!.attempts, 1);
     },
   );
+
+  test('a copy whose entry was dropped meanwhile is deleted', () async {
+    final a = write(root, 'a.mp4');
+    final b = write(root, 'b.mp4');
+    final store = GalleryLinkStore(storeFile);
+    final deleted = <String>[];
+    final queue = exporter(
+      store: store,
+      deleteCopies: (uris) async {
+        deleted.addAll(uris);
+        return <String, GalleryCopyStatus>{
+          for (final uri in uris) uri: GalleryCopyStatus.deleted,
+        };
+      },
+    );
+    await queue.enqueue(<GalleryExportItem>[item('r1', a), item('r1', b)]);
+    // The ride is deleted (or its copies removed) while a.mp4 is copied.
+    native.during = (name) async {
+      if (name == 'a.mp4') {
+        await store.dropPending(<String>['r1|a.mp4', 'r1|b.mp4']);
+      }
+    };
+    final run = await queue.drain();
+    expect(run.discarded, 1);
+    expect(run.exported, 0);
+    expect(native.calls, <String>['a.mp4']);
+    expect(deleted, <String>['content://media/external/video/media/a.mp4']);
+    final data = await store.read();
+    expect(data.links, isEmpty);
+    expect(data.pending, isEmpty);
+  });
+
+  test('a dropped entry\'s copy is linked when deleting it fails', () async {
+    final a = write(root, 'a.mp4');
+    final store = GalleryLinkStore(storeFile);
+    final queue = exporter(
+      store: store,
+      deleteCopies: (uris) async => <String, GalleryCopyStatus>{
+        for (final uri in uris) uri: GalleryCopyStatus.failed,
+      },
+    );
+    await queue.enqueue(<GalleryExportItem>[item('r1', a)]);
+    native.during = (_) => store.dropPending(<String>['r1|a.mp4']);
+    final run = await queue.drain();
+    expect(run.exported, 1);
+    expect(run.discarded, 0);
+    expect((await store.read()).links.keys, <String>['r1|a.mp4']);
+  });
+
+  test('a failed copy whose entry was dropped is not queued again', () async {
+    final a = write(root, 'a.mp4');
+    native.errors['a.mp4'] = <String>['EXPORT_FAILED'];
+    final store = GalleryLinkStore(storeFile);
+    final queue = exporter(store: store);
+    await queue.enqueue(<GalleryExportItem>[item('r1', a)]);
+    native.during = (_) => store.dropPending(<String>['r1|a.mp4']);
+    final run = await queue.drain();
+    expect(run.failed, 1);
+    expect((await store.read()).pending, isEmpty);
+  });
+
+  test('a file moved during the copy is copied from its new place', () async {
+    final old = write(legacy, 'm.mp4');
+    native.errors['m.mp4'] = <String>['SOURCE_NOT_FOUND'];
+    // The migration moves the file while the first copy starts.
+    native.during = (name) async {
+      if (old.existsSync()) {
+        old.renameSync('${root.path}${_sep}m.mp4');
+      }
+    };
+    final store = GalleryLinkStore(storeFile);
+    final queue = exporter(store: store);
+    await queue.enqueue(<GalleryExportItem>[item('r1', old)]);
+    final run = await queue.drain();
+    expect(run.exported, 1);
+    expect(run.missing, 0);
+    expect(native.sources, <String>[old.path, '${root.path}${_sep}m.mp4']);
+    expect((await store.read()).links.keys, <String>['r1|m.mp4']);
+  });
 
   test('pauses before the next copy and keeps the rest queued', () async {
     final a = write(root, 'a.mp4');

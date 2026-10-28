@@ -11,6 +11,7 @@ import 'dart:io';
 import 'package:flutter/services.dart';
 
 import '../../../core/utils/path_utils.dart' as path_utils;
+import '../../history/services/gallery_copy_removal.dart';
 import '../../history/services/gallery_links.dart';
 
 /// A private segment to copy to the gallery.
@@ -69,6 +70,8 @@ class GalleryExportRun {
     this.alreadySaved = 0,
     this.missing = 0,
     this.failed = 0,
+    this.discarded = 0,
+    this.awaitingPermission = 0,
     this.permissionDenied = false,
     this.paused = false,
   });
@@ -85,6 +88,16 @@ class GalleryExportRun {
   /// Segments that could not be copied in this run (they stay queued until
   /// [GalleryExporter.maxAttempts] failed attempts).
   final int failed;
+
+  /// Copies deleted again at once because their entry was dropped from the
+  /// queue while they were made (the ride was deleted or unlocked, or its
+  /// copies removed).
+  final int discarded;
+
+  /// Segments left queued, without counting an attempt, because the
+  /// storage permission was missing and this drain did not ask for it
+  /// (Android 9 and lower).
+  final int awaitingPermission;
 
   /// Whether at least one failure was the storage permission being denied
   /// (Android 9 and lower).
@@ -147,12 +160,15 @@ class GalleryExporter {
   ///
   /// [requestStoragePermission] asks for the storage permission (Android 9
   /// and lower) and returns whether it was granted; a drain calls it only
-  /// when `askPermission` is true.
+  /// when `askPermission` is true. [deleteCopies] deletes gallery copies
+  /// by content URI (the app passes `GalleryCopies.delete`); without it a
+  /// copy whose entry was dropped during the copy is linked instead.
   GalleryExporter({
     required this.store,
     required this.exportVideo,
     required this.locate,
     this.requestStoragePermission,
+    this.deleteCopies,
     this.relativePath = 'Movies/MotoCam/Recordings',
     DateTime Function()? now,
   }) : _now = now ?? DateTime.now;
@@ -171,6 +187,9 @@ class GalleryExporter {
 
   /// Asks for the storage permission; see the constructor.
   final Future<bool> Function()? requestStoragePermission;
+
+  /// Deletes fresh copies whose entry was dropped; see the constructor.
+  final GalleryCopyStatusCall? deleteCopies;
 
   /// The gallery folder copies go to (recorded in each link).
   final String relativePath;
@@ -262,12 +281,17 @@ class GalleryExporter {
   ///
   /// For each entry: an entry whose key is already linked is dropped
   /// (never copied twice); its file is found with [locate] and the entry is
-  /// dropped when the file is gone; a copy moves it from `pending` to
-  /// `links`. A failed copy stays queued until [maxAttempts] failed
-  /// attempts. On `PERMISSION_DENIED`, when [askPermission] is true,
-  /// [requestStoragePermission] is asked once per drain and the segment is
-  /// tried once more. [shouldPause] is checked before each entry; when it
-  /// returns true the drain stops and the rest stays queued.
+  /// dropped when the file is gone (on `SOURCE_NOT_FOUND` it is looked up
+  /// once more and copied from its new place, because the migration may
+  /// have just moved it); a copy moves it from `pending` to `links`. An
+  /// entry dropped from the queue while its copy ran gets that copy deleted
+  /// with [deleteCopies] (linked when that fails). A failed copy stays
+  /// queued until [maxAttempts] failed attempts. On `PERMISSION_DENIED`,
+  /// when [askPermission] is true, [requestStoragePermission] is asked once
+  /// per drain and the segment is tried once more; when it is false the
+  /// entry waits without counting an attempt. [shouldPause] is checked
+  /// before each entry; when it returns true the drain stops and the rest
+  /// stays queued.
   /// [onProgress] receives (entries done, entries to do).
   Future<GalleryExportRun> drain({
     Set<String>? onlyKeys,
@@ -291,6 +315,8 @@ class GalleryExporter {
     required bool Function()? shouldPause,
     required void Function(int done, int total)? onProgress,
   }) async {
+    // The store's live data: an entry dropped while a copy runs (its ride
+    // was deleted or unlocked, or its copies removed) is seen here.
     final data = await store.read();
     final keys = data.pending.keys
         .where((key) => onlyKeys == null || onlyKeys.contains(key))
@@ -299,14 +325,15 @@ class GalleryExporter {
     var alreadySaved = 0;
     var missing = 0;
     var failed = 0;
+    var discarded = 0;
+    var awaitingPermission = 0;
     var permissionDenied = false;
     var paused = false;
+    final request = requestStoragePermission;
+    final canAsk = askPermission && request != null;
     bool? permissionGranted;
     var done = 0;
     onProgress?.call(0, keys.length);
-
-    Future<String?> copy(String path, PendingGalleryExport entry) =>
-        exportVideo(sourcePath: path, displayName: entry.fileName);
 
     for (final key in keys) {
       if (shouldPause?.call() ?? false) {
@@ -324,7 +351,7 @@ class GalleryExporter {
         onProgress?.call(++done, keys.length);
         continue;
       }
-      final path = await locate(entry);
+      var path = await locate(entry);
       if (path == null) {
         missing++;
         await store.update((data) => data.pending.remove(key));
@@ -334,59 +361,82 @@ class GalleryExporter {
 
       String? uri;
       var sourceGone = false;
-      var deniedHere = false;
-      try {
-        uri = await copy(path, entry);
-      } on PlatformException catch (e) {
-        if (e.code == 'SOURCE_NOT_FOUND') {
-          sourceGone = true;
-        } else if (e.code == galleryPermissionDeniedCode) {
-          final request = requestStoragePermission;
-          if (askPermission && request != null && permissionGranted == null) {
-            try {
-              permissionGranted = await request();
-            } catch (_) {
-              permissionGranted = false;
-            }
-          }
-          if (permissionGranted ?? false) {
-            try {
-              uri = await copy(path, entry);
-            } on PlatformException catch (retryError) {
-              deniedHere = retryError.code == galleryPermissionDeniedCode;
-            } catch (_) {
-              // Counted as a failure below.
-            }
-          } else {
-            deniedHere = true;
-          }
+      var denied = false;
+      Future<void> attempt(String from) async {
+        sourceGone = false;
+        denied = false;
+        try {
+          uri = await exportVideo(
+            sourcePath: from,
+            displayName: entry.fileName,
+          );
+        } on PlatformException catch (e) {
+          sourceGone = e.code == 'SOURCE_NOT_FOUND';
+          denied = e.code == galleryPermissionDeniedCode;
+        } catch (_) {
+          // Counted as a failure below; the private copy stays.
         }
-      } catch (_) {
-        // Counted as a failure below; the private copy stays.
       }
 
+      await attempt(path);
       if (sourceGone) {
+        // The migration may have moved the file just now: look once more.
+        final moved = await locate(entry);
+        if (moved != null && moved != path) {
+          path = moved;
+          await attempt(moved);
+        }
+      }
+      if (denied && canAsk) {
+        if (permissionGranted == null) {
+          try {
+            permissionGranted = await request();
+          } catch (_) {
+            permissionGranted = false;
+          }
+        }
+        if (permissionGranted) {
+          await attempt(path);
+        }
+      }
+
+      final copied = uri;
+      if (copied != null && copied.isNotEmpty) {
+        // Dropped from the queue while the copy ran: the copy is deleted
+        // at once, or linked when that fails, so none is left untracked.
+        if (!data.pending.containsKey(key) && await _discardCopy(copied)) {
+          discarded++;
+        } else {
+          exported++;
+          final link = GalleryLink(
+            rideSessionId: entry.rideSessionId,
+            fileName: entry.fileName,
+            contentUri: copied,
+            displayName: entry.fileName,
+            relativePath: relativePath,
+            exportedAt: _now(),
+          );
+          await store.update((data) {
+            data.pending.remove(key);
+            data.links[key] = link;
+          });
+        }
+      } else if (sourceGone) {
         missing++;
         await store.update((data) => data.pending.remove(key));
-      } else if (uri != null && uri.isNotEmpty) {
-        exported++;
-        final link = GalleryLink(
-          rideSessionId: entry.rideSessionId,
-          fileName: entry.fileName,
-          contentUri: uri,
-          displayName: entry.fileName,
-          relativePath: relativePath,
-          exportedAt: _now(),
-        );
-        await store.update((data) {
-          data.pending.remove(key);
-          data.links[key] = link;
-        });
+      } else if (denied && !canAsk) {
+        // Nobody was asked for the permission in this drain: the entry
+        // waits, untouched, for a drain that may ask.
+        awaitingPermission++;
       } else {
         failed++;
-        permissionDenied = permissionDenied || deniedHere;
+        permissionDenied = permissionDenied || denied;
         final attempts = entry.attempts + 1;
         await store.update((data) {
+          if (!data.pending.containsKey(key)) {
+            // Dropped meanwhile; never queued again here.
+            return;
+          }
           if (attempts >= maxAttempts) {
             data.pending.remove(key);
           } else {
@@ -402,9 +452,25 @@ class GalleryExporter {
       alreadySaved: alreadySaved,
       missing: missing,
       failed: failed,
+      discarded: discarded,
+      awaitingPermission: awaitingPermission,
       permissionDenied: permissionDenied,
       paused: paused,
     );
+  }
+
+  /// Deletes the fresh gallery copy at [uri] with [deleteCopies]; returns
+  /// whether it is gone.
+  Future<bool> _discardCopy(String uri) async {
+    final delete = deleteCopies;
+    if (delete == null) {
+      return false;
+    }
+    try {
+      return (await delete(<String>[uri]))[uri]?.isRemoved ?? false;
+    } catch (_) {
+      return false;
+    }
   }
 }
 
@@ -417,6 +483,8 @@ String gallerySaveSummary(GalleryExportRun run) {
     if (run.alreadySaved > 0)
       '${segments(run.alreadySaved)} already in the gallery',
     if (run.missing > 0) '${segments(run.missing)} no longer on the phone',
+    if (run.discarded > 0)
+      '${segments(run.discarded)} not kept: the ride changed meanwhile',
     if (run.failed > 0)
       run.permissionDenied
           ? '${segments(run.failed)} not saved: storage access was denied. '

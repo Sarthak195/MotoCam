@@ -2293,6 +2293,8 @@ class CameraProvider extends ChangeNotifier {
         exportVideo: _exportVideoToGallery,
         locate: _locateGalleryExportSource,
         requestStoragePermission: _requestLegacyStoragePermission,
+        // A copy whose ride was deleted or unlocked during the copy.
+        deleteCopies: GalleryCopies.delete,
         relativePath: _galleryRelativePath,
       );
     }();
@@ -2341,16 +2343,18 @@ class CameraProvider extends ChangeNotifier {
   }
 
   // The gallery export pauses while a recording starts or runs; the rest
-  // stays queued and the next stop drains it.
+  // stays queued and the next stop drains it
+  // (_resumeGalleryExportsAfterStop).
   bool _shouldPauseGalleryExport() =>
       _isDisposed || isRecording || _isStartingRecording;
 
   /// Queues [segmentPaths] (the stopped session's locked segments) for
   /// export, persisted at once in the gallery link store, and drains the
-  /// queue about 2 s later.
-  void _enqueueDeferredGalleryExport(Iterable<String> segmentPaths) {
+  /// queue about 2 s later. Returns whether anything was handed over (then
+  /// that drain also copies what was queued before).
+  bool _enqueueDeferredGalleryExport(Iterable<String> segmentPaths) {
     if (!Platform.isAndroid) {
-      return;
+      return false;
     }
     // Still the stopped ride's id: telemetry clears it only when the ride
     // is saved, after stopRecording returns.
@@ -2364,7 +2368,7 @@ class CameraProvider extends ChangeNotifier {
           ),
     ];
     if (items.isEmpty) {
-      return;
+      return false;
     }
     unawaited(() async {
       final exporter = await _galleryExporter();
@@ -2378,6 +2382,23 @@ class CameraProvider extends ChangeNotifier {
         return;
       }
       _scheduleGalleryExportDrain(askPermission: true, noun: 'locked clip');
+    }());
+    return true;
+  }
+
+  /// After a stop that queued nothing: drains, about 2 s later, what is
+  /// still queued (a Save to gallery or a drain that the recording paused,
+  /// or a queue the launch retry left), without asking for a permission.
+  void _resumeGalleryExportsAfterStop() {
+    if (!Platform.isAndroid || _isDisposed) {
+      return;
+    }
+    unawaited(() async {
+      final exporter = await _galleryExporter();
+      if (exporter == null || (await exporter.store.read()).pending.isEmpty) {
+        return;
+      }
+      _scheduleGalleryExportDrain(askPermission: false, noun: 'clip');
     }());
   }
 
@@ -2648,13 +2669,17 @@ class CameraProvider extends ChangeNotifier {
       _log('Final persisted video path: $finalVideoPath');
 
       // Locked clips leave private storage only when the rider opted in.
+      var queuedGalleryExport = false;
       if (autoExportLockedClipsToGallery && _sessionSegmentPaths.isNotEmpty) {
         final exportCandidates = _segmentsSelectedForPublicExport();
         if (exportCandidates.isNotEmpty) {
-          _enqueueDeferredGalleryExport(exportCandidates);
+          queuedGalleryExport = _enqueueDeferredGalleryExport(exportCandidates);
         } else {
           _log('No locked segments selected for public export.');
         }
+      }
+      if (!queuedGalleryExport) {
+        _resumeGalleryExportsAfterStop();
       }
 
       _queueDeferredMaintenance();

@@ -396,6 +396,20 @@ class GalleryLinkStore extends ChangeNotifier {
     });
   }
 
+  /// Drops the pending entries among [keys] from the export queue (their
+  /// copies are no longer wanted) and returns how many were dropped. A drain
+  /// already copying one of them deletes that copy when it finishes (see
+  /// `GalleryExporter.drain`).
+  Future<int> dropPending(Iterable<String> keys) async {
+    final data = await read();
+    final queued = keys.where(data.pending.containsKey).toSet();
+    if (queued.isEmpty) {
+      return 0;
+    }
+    await update((data) => queued.forEach(data.pending.remove));
+    return queued.length;
+  }
+
   /// Drops every link and pending entry of [ride] whose video file is gone
   /// (the ride, or part of it, was deleted). Gallery copies themselves are
   /// never touched here.

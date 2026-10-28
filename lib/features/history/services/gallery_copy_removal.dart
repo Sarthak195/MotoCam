@@ -46,13 +46,28 @@ class GalleryRemovalResult {
 /// MediaStore refuses on API 29+ go to [requestDelete], which shows the
 /// system prompt (one for all of them on API 30+). Links of copies that are
 /// still there stay in [store], so the removal can be tried again.
+///
+/// [rideKeys] (the ride's `galleryKeysOfRide` keys) first drops the ride's
+/// queued exports from [store], so no new copy appears after the removal,
+/// and adds the ride's links recorded since [links] was read.
 Future<GalleryRemovalResult> removeGalleryCopies(
   List<GalleryLink> links, {
   required GalleryLinkStore? store,
+  Iterable<String> rideKeys = const <String>[],
   GalleryCopyStatusCall delete = GalleryCopies.delete,
   GalleryCopyStatusCall requestDelete = GalleryCopies.requestDelete,
   Future<bool> Function()? requestStoragePermission,
 }) async {
+  if (store != null && rideKeys.isNotEmpty) {
+    await store.dropPending(rideKeys);
+    final data = await store.read();
+    final known = links.map((link) => link.contentUri).toSet();
+    final current = <GalleryLink>[for (final key in rideKeys) ?data.links[key]];
+    links = <GalleryLink>[
+      ...links,
+      ...current.where((link) => !known.contains(link.contentUri)),
+    ];
+  }
   final uris = <String>{
     for (final link in links)
       if (link.contentUri.isNotEmpty) link.contentUri,

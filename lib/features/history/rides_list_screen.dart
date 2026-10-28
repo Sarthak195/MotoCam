@@ -312,7 +312,9 @@ class _RidesListScreenState extends State<RidesListScreen> {
 
   Future<void> _confirmAndUnlock(RideRecord ride) async {
     final lockKey = _lockKeyFor(ride);
-    if (_lockUpdatesInFlight.contains(lockKey) || _refuseWhileFilesChange()) {
+    if (_lockUpdatesInFlight.contains(lockKey) ||
+        _galleryProgress.containsKey(lockKey) ||
+        _refuseWhileFilesChange()) {
       return;
     }
 
@@ -396,6 +398,14 @@ class _RidesListScreenState extends State<RidesListScreen> {
         ),
       );
     }
+    // Queued copies of an unlocked ride are cancelled (the automatic export
+    // is for locked clips); a copy being made now is deleted when it ends.
+    var cancelledCopies = 0;
+    if (unlocked && Platform.isAndroid) {
+      final links = _galleryLinks ?? await GalleryLinkStore.shared();
+      cancelledCopies =
+          await links?.dropPending(galleryKeysOfRide(ride).keys) ?? 0;
+    }
     if (!mounted) {
       return;
     }
@@ -410,7 +420,12 @@ class _RidesListScreenState extends State<RidesListScreen> {
     messenger.showSnackBar(
       SnackBar(
         content: Text(switch (result) {
-          RideLockChangeResult.saved => 'Clip unlocked.',
+          RideLockChangeResult.saved =>
+            cancelledCopies == 0
+                ? 'Clip unlocked.'
+                : 'Clip unlocked. $cancelledCopies queued gallery '
+                      'cop${cancelledCopies == 1 ? 'y was' : 'ies were'} '
+                      'cancelled.',
           RideLockChangeResult.refused =>
             'Could not unlock this clip: its files failed the integrity check or could not be read.',
           RideLockChangeResult.signingFailed =>
@@ -424,6 +439,7 @@ class _RidesListScreenState extends State<RidesListScreen> {
     final links = _galleryLinksOf(ride);
     if (unlocked && links.isNotEmpty) {
       await _offerToRemoveGalleryCopies(
+        ride,
         links,
         reason: 'The clip is unlocked. ',
         canRetry: true,
@@ -432,11 +448,13 @@ class _RidesListScreenState extends State<RidesListScreen> {
   }
 
   /// Asks (default: keep) whether to remove [links]' gallery copies, then
-  /// removes them and reports what was not removed. [reason] starts the
-  /// dialog text; [canRetry] is false when the ride is about to be deleted
-  /// (its menu cannot offer the removal again). Returns whether the rider
-  /// chose to remove them.
+  /// removes them (after cancelling [ride]'s queued copies, and including
+  /// copies linked since [links] was read) and reports what was not
+  /// removed. [reason] starts the dialog text; [canRetry] is false when the
+  /// ride is about to be deleted (its menu cannot offer the removal again).
+  /// Returns whether the rider chose to remove them.
   Future<bool> _offerToRemoveGalleryCopies(
+    RideRecord ride,
     List<GalleryLink> links, {
     required String reason,
     required bool canRetry,
@@ -469,11 +487,12 @@ class _RidesListScreenState extends State<RidesListScreen> {
     if (remove != true || !mounted) {
       return false;
     }
-    await _removeGalleryCopies(links, canRetry: canRetry);
+    await _removeGalleryCopies(ride, links, canRetry: canRetry);
     return true;
   }
 
   Future<void> _removeGalleryCopies(
+    RideRecord ride,
     List<GalleryLink> links, {
     required bool canRetry,
   }) async {
@@ -481,6 +500,7 @@ class _RidesListScreenState extends State<RidesListScreen> {
     final result = await removeGalleryCopies(
       links,
       store: _galleryLinks ?? await GalleryLinkStore.shared(),
+      rideKeys: galleryKeysOfRide(ride).keys,
       requestStoragePermission: () async =>
           AppPermissionService.isPermissionGranted(
             await Permission.storage.request(),
@@ -502,7 +522,12 @@ class _RidesListScreenState extends State<RidesListScreen> {
   /// [CameraProvider.saveRideToGallery], with progress and a summary.
   Future<void> _confirmAndSaveToGallery(RideRecord ride) async {
     final key = _lockKeyFor(ride);
-    if (_galleryProgress.containsKey(key) || _refuseWhileFilesChange()) {
+    // Never while the ride is being deleted or unlocked: a copy made then
+    // would miss the removal those offer.
+    if (_galleryProgress.containsKey(key) ||
+        _deletesInFlight.contains(key) ||
+        _lockUpdatesInFlight.contains(key) ||
+        _refuseWhileFilesChange()) {
       return;
     }
     final camera = context.read<CameraProvider>();
@@ -550,7 +575,11 @@ class _RidesListScreenState extends State<RidesListScreen> {
         ],
       ),
     );
-    if (confirmed != true || !mounted || _refuseWhileFilesChange()) {
+    if (confirmed != true ||
+        !mounted ||
+        _deletesInFlight.contains(key) ||
+        _lockUpdatesInFlight.contains(key) ||
+        _refuseWhileFilesChange()) {
       return;
     }
     setState(() {
@@ -602,7 +631,12 @@ class _RidesListScreenState extends State<RidesListScreen> {
       _galleryProgress[key] = null;
     });
     try {
-      await _offerToRemoveGalleryCopies(links, reason: '', canRetry: true);
+      await _offerToRemoveGalleryCopies(
+        ride,
+        links,
+        reason: '',
+        canRetry: true,
+      );
     } finally {
       if (mounted) {
         setState(() {
@@ -614,7 +648,9 @@ class _RidesListScreenState extends State<RidesListScreen> {
 
   Future<void> _confirmAndDelete(RideRecord ride) async {
     final key = _lockKeyFor(ride);
-    if (_deletesInFlight.contains(key) || _refuseWhileFilesChange()) {
+    if (_deletesInFlight.contains(key) ||
+        _galleryProgress.containsKey(key) ||
+        _refuseWhileFilesChange()) {
       return;
     }
     final messenger = ScaffoldMessenger.of(context);
@@ -663,11 +699,14 @@ class _RidesListScreenState extends State<RidesListScreen> {
     // Before the ride's files go: deleting them drops the links.
     if (links.isNotEmpty) {
       await _offerToRemoveGalleryCopies(
+        ride,
         links,
         reason: 'The ride will be deleted next. ',
         canRetry: false,
       );
-      if (!mounted || _refuseWhileFilesChange()) {
+      if (!mounted ||
+          _galleryProgress.containsKey(key) ||
+          _refuseWhileFilesChange()) {
         return;
       }
     }
@@ -1091,13 +1130,16 @@ class _RidesListScreenState extends State<RidesListScreen> {
     final segmentCount = ride.segmentPaths.length;
     final availableSegmentCount = ride.availableSegmentCount;
     final isUpdatingLock = _lockUpdatesInFlight.contains(_lockKeyFor(ride));
-    final canToggleLockState = _canChangeLockState(ride) && !isUpdatingLock;
+    // A gallery save or removal of the ride blocks unlocking and deleting
+    // it until it ends.
+    final galleryBusy = _galleryProgress.containsKey(_lockKeyFor(ride));
+    final canToggleLockState =
+        _canChangeLockState(ride) && !isUpdatingLock && !galleryBusy;
     final badges = _buildBadges(ride);
     final videoCoverage = _videoCoverageText(ride);
     final isDeleting = _deletesInFlight.contains(_lockKeyFor(ride));
     final videoLine = describeVideoCheck(_videoCheckOf(ride));
     final galleryCopies = _galleryLinksOf(ride).length;
-    final galleryBusy = _galleryProgress.containsKey(_lockKeyFor(ride));
     final showGalleryMenu = Platform.isAndroid;
 
     return Card(
@@ -1194,6 +1236,8 @@ class _RidesListScreenState extends State<RidesListScreen> {
                 IconButton(
                   tooltip: canToggleLockState
                       ? 'Unlock clip'
+                      : galleryBusy
+                      ? 'Wait for the gallery copies to finish'
                       : 'Integrity warning: lock state changes disabled',
                   padding: EdgeInsets.zero,
                   constraints: const BoxConstraints(
@@ -1217,7 +1261,9 @@ class _RidesListScreenState extends State<RidesListScreen> {
                 )
               else
                 IconButton(
-                  tooltip: ride.isLocked && _canChangeLockState(ride)
+                  tooltip: galleryBusy
+                      ? 'Wait for the gallery copies to finish'
+                      : ride.isLocked && _canChangeLockState(ride)
                       ? 'Unlock the ride to delete it'
                       : 'Delete ride',
                   padding: EdgeInsets.zero,
@@ -1226,7 +1272,7 @@ class _RidesListScreenState extends State<RidesListScreen> {
                     minHeight: 28,
                   ),
                   iconSize: 20,
-                  onPressed: () => _confirmAndDelete(ride),
+                  onPressed: galleryBusy ? null : () => _confirmAndDelete(ride),
                   icon: const Icon(Icons.delete_outline),
                 ),
               if (showGalleryMenu && galleryBusy)

@@ -116,6 +116,26 @@ void main() {
     expect(data.pending['r|c.mp4']!.attempts, 0);
   });
 
+  test('dropPending removes only queued keys and reports them', () async {
+    final store = GalleryLinkStore(storeFile());
+    await store.update((data) {
+      for (final name in <String>['a.mp4', 'b.mp4']) {
+        final entry = PendingGalleryExport(
+          rideSessionId: 'r1',
+          fileName: name,
+          sourcePath: name,
+          queuedAt: DateTime(2026),
+        );
+        data.pending[entry.key] = entry;
+      }
+    });
+    expect(await store.dropPending(<String>['r1|a.mp4', 'r1|x.mp4']), 1);
+    expect(await store.dropPending(<String>['r1|x.mp4']), 0);
+    expect((await GalleryLinkStore(storeFile()).read()).pending.keys, <String>[
+      'r1|b.mp4',
+    ]);
+  });
+
   test('a missing file reads as empty', () async {
     final data = await GalleryLinkStore(storeFile()).read();
     expect(data.links, isEmpty);

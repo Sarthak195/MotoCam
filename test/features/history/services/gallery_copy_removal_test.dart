@@ -42,6 +42,40 @@ void main() {
         for (final uri in uris) uri: byName[uri.split('/').last]!,
       };
 
+  test('drops the ride\'s queued copies and removes newer links', () async {
+    await store.update((data) {
+      for (final name in <String>['d', 'other']) {
+        final entry = PendingGalleryExport(
+          rideSessionId: name == 'other' ? 'r2' : 'r1',
+          fileName: name,
+          sourcePath: name,
+          queuedAt: DateTime(2026),
+        );
+        data.pending[entry.key] = entry;
+      }
+      // Linked after the dialog read the ride's links.
+      data.links['r1|e'] = _link('e');
+    });
+    final deleted = <String>[];
+    final result = await removeGalleryCopies(
+      <GalleryLink>[_link('a')],
+      store: store,
+      rideKeys: <String>['r1|a', 'r1|d', 'r1|e'],
+      delete: (uris) async {
+        deleted.addAll(uris);
+        return <String, GalleryCopyStatus>{
+          for (final uri in uris) uri: GalleryCopyStatus.deleted,
+        };
+      },
+      requestDelete: (uris) async => <String, GalleryCopyStatus>{},
+    );
+    expect(result.removed.map((l) => l.fileName), <String>['a', 'e']);
+    expect(deleted.map((uri) => uri.split('/').last), <String>['a', 'e']);
+    final data = await store.read();
+    expect(data.pending.keys, <String>['r2|other']);
+    expect(data.links.keys, <String>['r1|b', 'r1|c']);
+  });
+
   test('deleted and missing copies count as removed', () async {
     var prompts = 0;
     final result = await removeGalleryCopies(
