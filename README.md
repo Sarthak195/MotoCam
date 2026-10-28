@@ -21,8 +21,8 @@ MotoCam is a Flutter dashcam app for motorcycle riders. It records video in fixe
 
 | Platform | Status |
 |---|---|
-| Android | Supported. All four native method channels are implemented in Kotlin. Builds target SDK 36 with `minSdk` from Flutter (`flutter.minSdkVersion`, 24, that is Android 7.0, with Flutter 3.41.2). The v0.1.11 and v0.1.12 release notes list the devices those releases were tested on: RMX1801 (Android 10) and I2011 (Android 11). No later release notes list test devices. |
-| iOS | Builds, but the Android-native features are unavailable: there is no background recording service, notification Stop, Picture-in-Picture, device status or gallery export. Recording needs the app in the foreground with the screen on. No iOS build has been released. See [docs/platform-integration.md](docs/platform-integration.md#ios-current-state). |
+| Android | Supported. All five native method channels are implemented in Kotlin. Builds target SDK 36 with `minSdk` from Flutter (`flutter.minSdkVersion`, 24, that is Android 7.0, with Flutter 3.41.2). The v0.1.11 and v0.1.12 release notes list the devices those releases were tested on: RMX1801 (Android 10) and I2011 (Android 11). No later release notes list test devices. |
+| iOS | Builds, but the Android-native features are unavailable: there is no background recording service, notification Stop, Picture-in-Picture, device status, gallery export or ride signing. Recording needs the app in the foreground with the screen on. No iOS build has been released. See [docs/platform-integration.md](docs/platform-integration.md#ios-current-state). |
 | Web, desktop | Not targeted. The repository has no web or desktop platform folders. |
 
 Current limitations:
@@ -43,7 +43,7 @@ The UI is portrait-only and always dark (Material 3). There is no localization; 
 - **Crash-safe ride files.** Once the first segment is saved, the ride's telemetry JSON is written as a checkpoint whenever a segment or lock is added and every 30 s, so a ride survives a crash or kill before STOP. A failed save can be retried.
 - **Blackout mode.** Hides the preview behind a black screen while recording continues; hold for 2 s to exit.
 - **Ride history and playback.** Rides grouped into Locked Clips and All Rides, plus video-only entries for videos without a ride file. Rides can be unlocked and deleted after a confirmation. Playback runs all segments as one timeline, marks missing segments and gaps on the seekbar, and shows a telemetry overlay, a speed graph with incident and lock markers, and a collapsible OpenStreetMap route map that loads tiles only after a one-time consent.
-- **Integrity checks.** Each ride's telemetry file carries an unkeyed SHA-256 integrity check over its payload and every segment file. It detects accidental corruption and naive edits; it is not tamper-proof, because anyone who can rewrite the files can recompute the hashes. The rides list checks the ride data only and shows one of `INTEGRITY WARNING`, `SIMULATED GPS` (fixes from a mock location provider), `DATA UNMODIFIED` or `UNVERIFIED`, plus `VIDEOS VERIFIED` or `VIDEO CHECK FAILED` once the ride's segments were checked. Separate badges mark segment paths outside the ride's folder, which are quarantined and not played (`QUARANTINED n`), missing segment files (`INCOMPLETE`) and rides kept only as a checkpoint (`RECOVERED (INCOMPLETE)`). Opening a ride hashes its segment files one at a time in the background, starting with the segment about to play; leaving the screen stops the check, and results are kept in a ride index cache (which also spares the list from re-reading unchanged ride files), so an unchanged segment is not hashed again. Segments that fail the check still play and are marked on the seekbar; "Check videos again" re-hashes them all.
+- **Integrity checks.** Each ride's telemetry file carries a SHA-256 integrity check over its payload and every segment file. On Android the final save is also signed with a key that never leaves the phone's Android Keystore. The signature shows that the files were not changed by anyone without this app's key on this phone; it does not prove the footage is genuine (a rooted phone or a modified app can sign anything). A ride shows as signed only on the phone and install that recorded it: a copy on another phone shows only as data unmodified, a reinstall creates a new key (older rides then count as signed by another key), and iOS rides are not signed. Unsigned rides keep only the checksum, which detects accidental corruption and naive edits but which anyone who can rewrite the files can recompute. The rides list checks the ride data only and shows one of `INTEGRITY WARNING`, `SIMULATED GPS` (fixes from a mock location provider), `SIGNED ON THIS PHONE`, `DATA UNMODIFIED` or `UNVERIFIED`, plus `VIDEOS VERIFIED` or `VIDEO CHECK FAILED` once the ride's segments were checked. Separate badges mark segment paths outside the ride's folder, which are quarantined and not played (`QUARANTINED n`), missing segment files (`INCOMPLETE`) and rides kept only as a checkpoint (`RECOVERED (INCOMPLETE)`). Opening a ride hashes its segment files one at a time in the background, starting with the segment about to play; leaving the screen stops the check, and results are kept in a ride index cache (which also spares the list from re-reading unchanged ride files), so an unchanged segment is not hashed again. Segments that fail the check still play and are marked on the seekbar; "Check videos again" re-hashes them all.
 - **Gallery export (Android, opt-in).** Off by default. When the rider turns it on, locked segments are copied to the device gallery (`Movies/MotoCam/Recordings`) when recording stops. MotoCam never removes these copies. There is no manual export button.
 
 Each feature, with its exact behaviour and the code behind it, is described in [docs/features.md](docs/features.md).
@@ -107,7 +107,7 @@ MotoCam/
 ├── android/                   Gradle project, manifest, Kotlin MainActivity and BackgroundRecordingService
 ├── ios/                       Xcode Runner project and Podfile (no native channel handlers)
 ├── lib/                       Dart source (see below)
-├── test/                      Unit and widget tests (397 tests in 30 files)
+├── test/                      Unit and widget tests (450 tests in 33 files)
 ├── docs/                      Developer documentation and audit reports
 ├── release-notes/             Per-release notes, v0.1.8.md to v0.1.13.md
 ├── scripts/                   release-security-precheck.ps1, generate-keystore.ps1
@@ -127,9 +127,11 @@ lib/
 │   │   ├── app_permission_service.dart         Runtime permission audit
 │   │   ├── background_recording_service.dart   Android foreground-service bridge
 │   │   ├── device_status_service.dart          Battery, temperature and thermal status (Android)
-│   │   └── pip_service.dart                    Picture-in-Picture bridge
+│   │   ├── pip_service.dart                    Picture-in-Picture bridge
+│   │   └── ride_signing_service.dart           Ride signing key channel and signed-ride registry (Android)
 │   ├── ride_file/
 │   │   ├── ride_integrity.dart                 Ride integrity envelope: build, re-seal, check
+│   │   ├── ride_signature.dart                 Envelope v3 signature: strict parsing, ES256 verification, who signed
 │   │   └── ride_telemetry_codec.dart           The one codec for the ride telemetry JSON
 │   └── utils/
 │       ├── format_utils.dart                   Shared elapsed-time format
@@ -223,7 +225,7 @@ Map tiles come from `tile.openstreetmap.org`, so the route map needs a network c
 | Debug APK | `flutter build apk --debug` |
 | Release APK | `flutter build apk --release` |
 
-- `flutter analyze` is clean, all 397 tests pass and the tree is `dart format`-clean.
+- `flutter analyze` is clean, all 450 tests pass and the tree is `dart format`-clean.
 - CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs on pushes to `main` and on pull requests with Flutter 3.41.2. It runs `flutter pub get --enforce-lockfile`, `flutter analyze`, the precheck, `flutter test --coverage`, a debug APK build and the format check, and builds the iOS app for the simulator in a second job.
 - The precheck mostly checks Android: the release signing config in `build.gradle.kts`, the manifest (no background location or all-files access, backups off, the signature-protected internal broadcast permission), that no credential or keystore files are tracked and that the Android assets folder is empty. It also checks the iOS `Info.plist` keys and the `ios/Podfile` permission macros, then runs `flutter analyze` and `flutter test` unless skipped. It fails when any step fails. It reads no signing credentials.
 - Release builds need four signing values. Gradle reads them from the environment variables `MOTOCAM_KEYSTORE_FILE`, `MOTOCAM_KEYSTORE_PASSWORD`, `MOTOCAM_KEY_ALIAS` and `MOTOCAM_KEY_PASSWORD`, or from `android/key.properties` (copied from `android/key.properties.template`). Each environment variable wins over its file value, and a relative keystore path is resolved against `android/app/`. Gradle stops with `Release signing config missing: ...` (naming the missing values) or `Release keystore not found ...` only when a task that packages or signs a release artifact is about to run. Release builds use R8 minification and resource shrinking. See [docs/release.md](docs/release.md#signing-setup-android).

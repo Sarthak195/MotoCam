@@ -1,6 +1,6 @@
 # Native platform integration
 
-How MotoCam's Dart code talks to native Android code through four method channels, what the Android manifest, resources and runtime permission flow look like, and the current state of the iOS project. All native behaviour described here is Android-only unless a section says otherwise; iOS has no native channel handlers.
+How MotoCam's Dart code talks to native Android code through five method channels, what the Android manifest, resources and runtime permission flow look like, and the current state of the iOS project. All native behaviour described here is Android-only unless a section says otherwise; iOS has no native channel handlers.
 
 ## Contents
 
@@ -10,6 +10,7 @@ How MotoCam's Dart code talks to native Android code through four method channel
   - [device_status](#comexamplemotocamdevice_status)
   - [pip](#comexamplemotocampip)
   - [media](#comexamplemotocammedia)
+  - [integrity](#comexamplemotocamintegrity)
 - [Android details](#android-details)
   - [Foreground service](#foreground-service)
   - [Camera lifecycle hold](#camera-lifecycle-hold)
@@ -17,6 +18,7 @@ How MotoCam's Dart code talks to native Android code through four method channel
   - [Battery-optimization exemption](#battery-optimization-exemption)
   - [Media scanning and gallery export](#media-scanning-and-gallery-export)
   - [Battery and thermal status](#battery-and-thermal-status)
+  - [Ride signing key](#ride-signing-key)
 - [Android manifest permission matrix](#android-manifest-permission-matrix)
 - [Runtime permission flow](#runtime-permission-flow)
 - [iOS: current state](#ios-current-state)
@@ -27,8 +29,9 @@ How MotoCam's Dart code talks to native Android code through four method channel
 
 | File | Platform | Role |
 |---|---|---|
-| [MainActivity.kt](../android/app/src/main/kotlin/com/example/motocam/MainActivity.kt) | Android | `MainActivity : FlutterActivity`. `configureFlutterEngine` registers the handlers for all four channels. Also owns the PiP hooks (`onUserLeaveHint`, `onPause`, `onPictureInPictureModeChanged`), the camera lifecycle hold (it overrides `lifecycle`; see [Camera lifecycle hold](#camera-lifecycle-hold)), the keep-screen-on window flag, the `BroadcastReceiver` for the notification Stop and the service's stopped broadcast (registered in `onCreate`, unregistered in `onDestroy`), `readBatteryStatus`, `thermalStatusLabel`, `isPipSupported` and `stopBackgroundRecordingService`. `onDestroy` also clears the keep-screen-on flag, releases the hold and stops the foreground service if this activity started it. There are no `onResume` or `onNewIntent` overrides. |
+| [MainActivity.kt](../android/app/src/main/kotlin/com/example/motocam/MainActivity.kt) | Android | `MainActivity : FlutterActivity`. `configureFlutterEngine` registers the handlers for four channels and, with one line, the `integrity` channel of `RideSigner`. Also owns the PiP hooks (`onUserLeaveHint`, `onPause`, `onPictureInPictureModeChanged`), the camera lifecycle hold (it overrides `lifecycle`; see [Camera lifecycle hold](#camera-lifecycle-hold)), the keep-screen-on window flag, the `BroadcastReceiver` for the notification Stop and the service's stopped broadcast (registered in `onCreate`, unregistered in `onDestroy`), `readBatteryStatus`, `thermalStatusLabel`, `isPipSupported` and `stopBackgroundRecordingService`. `onDestroy` also clears the keep-screen-on flag, releases the hold and stops the foreground service if this activity started it. There are no `onResume` or `onNewIntent` overrides. |
 | [BackgroundRecordingService.kt](../android/app/src/main/kotlin/com/example/motocam/BackgroundRecordingService.kt) | Android | `BackgroundRecordingService : Service`. The foreground service that shows the recording notification and holds a partial wake lock while recording. Not bound (`onBind` returns `null`); driven entirely by intent actions. Overrides `onCreate` (creates the notification channel), `onStartCommand`, `onTaskRemoved` and `onDestroy`. Its `companion object` holds the action and extra constants and `grantedForegroundServiceTypes(context)`. When it stops it sends `FOREGROUND_STOPPED` with the hold token it was started with. |
+| [RideSigner.kt](../android/app/src/main/kotlin/com/example/motocam/RideSigner.kt) | Android | `RideSigner : MethodChannel.MethodCallHandler`, the `integrity` channel: the device-bound ride signing key (see [Ride signing key](#ride-signing-key)). `RideSigner.register(messenger)` creates the channel; Keystore work runs on one background thread shared by every engine. |
 | [AppDelegate.swift](../ios/Runner/AppDelegate.swift) | iOS | `AppDelegate : FlutterAppDelegate, FlutterImplicitEngineDelegate`. `didInitializeImplicitFlutterEngine` only calls `GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)`. No method channels. |
 | [SceneDelegate.swift](../ios/Runner/SceneDelegate.swift) | iOS | An empty `SceneDelegate : FlutterSceneDelegate`, named by the `UIApplicationSceneManifest` in `Info.plist` (see [iOS](#ios-current-state)). |
 
@@ -42,14 +45,16 @@ The Dart side of each channel lives in a small service class:
 | [device_status_service.dart](../lib/core/services/device_status_service.dart) | `DeviceStatusService` | `device_status` |
 | [pip_service.dart](../lib/core/services/pip_service.dart) | `PipService` (singleton, `instance`) | `pip` |
 | [camera_provider.dart](../lib/features/camera/providers/camera_provider.dart) | `CameraProvider.platform` (public static constant) | `media` |
+| [ride_signing_service.dart](../lib/core/services/ride_signing_service.dart) | `RideSigningService` (`instance`); the same file holds `SignedRideRegistry` and `loadRideSignerContext` | `integrity` |
 | [app_permission_service.dart](../lib/core/services/app_permission_service.dart) | `AppPermissionService` | none (uses `permission_handler`, `BackgroundRecordingService` and a `DeviceStatusService`, an optional const-constructor parameter that defaults to `const DeviceStatusService()`) |
 
-The four service classes above (every row except `CameraProvider`) are created or first used by [recording_screen.dart](../lib/features/recording/recording_screen.dart) (`RecordingScreen` is the app's home screen), whose `initState` calls `PipService.initialize`, `BackgroundRecordingService.initialize`, starts device-status polling and runs the permission bootstrap. The `media` channel belongs to `CameraProvider`, which `main.dart` creates in its `MultiProvider`.
+The four service classes above other than `CameraProvider` and `RideSigningService` are created or first used by [recording_screen.dart](../lib/features/recording/recording_screen.dart) (`RecordingScreen` is the app's home screen), whose `initState` calls `PipService.initialize`, `BackgroundRecordingService.initialize`, starts device-status polling and runs the permission bootstrap. The `media` channel belongs to `CameraProvider`, which `main.dart` creates in its `MultiProvider`. The `integrity` channel is used by `TelemetryProvider` (signing the final save), `RidesListScreen` (reading this phone's key) and `RideRecord.setLockState` (re-signing).
 
 Platform gating on the Dart side:
 
 - `BackgroundRecordingService`, `DeviceStatusService` and the Android block of `AppPermissionService` check `defaultTargetPlatform == TargetPlatform.android`. Under `flutter test`, `defaultTargetPlatform` is Android, so these calls reach the channels in tests; the widget test mocks them.
 - `PipService` is not gated; it relies on catching the exception and returning `false`.
+- `RideSigningService` is not gated: on iOS and in tests the `MissingPluginException` (like a `PlatformException`, a malformed reply or the 5 s timeout) gives `null`, so rides are saved unsigned (envelope version 2) and no ride shows as signed by this phone.
 - In `CameraProvider`, the gallery export is gated with `dart:io` `Platform.isAndroid`. `availableStorageBytes` is not gated: on iOS the call fails, returns `null`, and an unknown free space never blocks recording.
 
 ## Method-channel reference
@@ -103,6 +108,17 @@ Dart: `CameraProvider.platform`, used by `availableStorageBytes` and `_drainGall
 | `exportVideoToGallery` | D→N | `sourcePath`, `displayName`, `relativePath` (Strings) | String: MediaStore item URI (API 29+) or absolute file path (API 24-28). Dart discards it | `INVALID_ARGS` (missing or blank `sourcePath`/`displayName`), `PERMISSION_DENIED` (API 24-28 without `WRITE_EXTERNAL_STORAGE`), `SOURCE_NOT_FOUND`, `EXPORT_FAILED` (exception message) | `_drainGalleryExportQueue`, one awaited call per queued locked segment, only when gallery export is on | Checks the permission on the calling thread, then copies on a new `Thread` and replies via `runOnUiThread`. See [Media scanning and gallery export](#media-scanning-and-gallery-export) | Never called |
 
 Dart always sends `relativePath` `Movies/MotoCam/Recordings`. Kotlin uses `Movies/MotoCam/Videos` only when the argument is absent. Both native branches honour the argument.
+
+### com.example.motocam/integrity
+
+Dart: `RideSigningService` ([ride_signing_service.dart](../lib/core/services/ride_signing_service.dart)). Kotlin: `RideSigner` ([RideSigner.kt](../android/app/src/main/kotlin/com/example/motocam/RideSigner.kt)), registered by `RideSigner.register(flutterEngine.dartExecutor.binaryMessenger)` in `configureFlutterEngine`. Both methods run the Keystore work on a single background thread (so the key is created once even when calls overlap) and reply on the main thread. The Dart wrapper returns `null` on `MissingPluginException`, any `PlatformException`, a reply of the wrong shape (or a `publicKey` that is not canonical base64) and after a 5 s timeout; it never throws.
+
+| Method | Dir | Arguments | Return | Errors | Dart caller | Kotlin handler behaviour | iOS |
+|---|---|---|---|---|---|---|---|
+| `getSigningKey` | D→N | none | Map: `keyId` (String, first 16 lowercase hex characters of the SHA-256 of the key DER, for display and logs only), `publicKey` (String, base64 `NO_WRAP` of the X.509 SubjectPublicKeyInfo DER) | `KEY_UNAVAILABLE` (exception message) | `RideSigningService.sessionSigningKey` (first success cached for the app session), from `loadRideSignerContext` when Ride History loads | Loads the key under alias `motocam_ride_signing_v1`, creating it first when it does not exist | `MissingPluginException` → `null` |
+| `signPayloadHash` | D→N | `payloadHash` (String, 64 lowercase hex characters) | Map: `alg` (`ES256`), `keyId`, `publicKey` (as above), `sig` (base64 `NO_WRAP` of the DER ECDSA signature from `SHA256withECDSA` over the UTF-8 bytes of `payloadHash`) | `INVALID_ARGS` (missing or not 64 lowercase hex characters, checked before any Keystore work), `SIGNING_FAILED` (exception message) | `TelemetryProvider._persistRide` (final save only, through `sealAndSignRidePayload`) and `RideRecord.setLockState` (re-signing a ride this phone signed) | Loads or creates the key, then signs | `MissingPluginException` → `null` |
+
+Dart checks every signature it receives (on a background isolate) before storing it; one that does not verify is treated as a failure.
 
 ## Android details
 
@@ -186,6 +202,22 @@ The activity is declared with `android:supportsPictureInPicture="true"`, `androi
 - **Mode changes.** `onPictureInPictureModeChanged` sends `onPipModeChanged(bool)`. `RecordingScreen` switches to its compact PiP view immediately on entry and back to the full view 200 ms after exit.
 
 `isRecordingActive` lives on the activity instance, is not persisted, and is set by the `startForegroundRecording` handler (also when the service is refused) and cleared by `stopForegroundRecording` and `onDestroy`. The PiP layout and the stall recovery after returning from PiP are covered in [features.md](features.md#picture-in-picture-and-screen-off-recording) and [recording-pipeline.md](recording-pipeline.md#lifecycle-background-and-the-foreground-service).
+
+### Ride signing key
+
+`RideSigner` keeps one Android Keystore key per install for the ride integrity envelope (version 3, see [data-formats.md](data-formats.md#signature-version-3)):
+
+| Property | Value |
+|---|---|
+| Alias | `motocam_ride_signing_v1` in `AndroidKeyStore` |
+| Algorithm | EC P-256 (`secp256r1`), purposes `SIGN` and `VERIFY`, digest `SHA256` |
+| Created | On first use (the first `getSigningKey` or `signPayloadHash`), by `KeyPairGenerator` |
+| Hardware | StrongBox (`setIsStrongBoxBacked(true)`) on API 28+; when that fails (`StrongBoxUnavailableException` or any other error) the key is created in the TEE (or software keystore) instead |
+| Export | The private key never leaves the Keystore; only the public key's SubjectPublicKeyInfo DER is returned |
+| Authentication | None (`setUserAuthenticationRequired(false)`), and `setUnlockedDeviceRequired` is not set: rides are saved while the phone is locked (Stop from the notification) |
+| Lifetime | Deleted with the app. A reinstall creates a new key, so rides signed before it show as signed by another key, and the signed-ride registry (SharedPreferences, also cleared) starts empty. `allowBackup` is `false`, so neither the key nor the registry is restored from a backup |
+
+The key only proves which app install signed a ride. It does not prove the footage is genuine: on a rooted phone, or with a modified app, anything can be signed with it. No manifest permission is needed.
 
 ### Battery-optimization exemption
 
@@ -296,7 +328,7 @@ Details:
 
 ## iOS: current state
 
-The iOS project builds the Flutter app with cross-platform plugins only. None of the native integrations above is implemented for it: the `pip`, `device_status`, `media` and `background_recording` channels have no iOS handlers.
+The iOS project builds the Flutter app with cross-platform plugins only. None of the native integrations above is implemented for it: the `pip`, `device_status`, `media`, `background_recording` and `integrity` channels have no iOS handlers. iOS rides are therefore saved with a version 2 envelope (not signed), and a signed ride copied to an iOS device shows as signed with the signer unknown ("DATA UNMODIFIED").
 
 **Info.plist** ([Info.plist](../ios/Runner/Info.plist)) follows the Flutter 3.41.2 app template and adds MotoCam's keys:
 
@@ -394,7 +426,7 @@ MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "com.example.motocam/f
 
 **6. iOS.** Either gate the Dart call so it never runs on iOS, or add a handler in `AppDelegate.didInitializeImplicitFlutterEngine`, where the bridge's `applicationRegistrar.messenger()` (or `pluginRegistry.registrar(forPlugin:)`) provides a `FlutterBinaryMessenger` for a `FlutterMethodChannel`. Add any required usage strings to `Info.plist`, and if the feature uses another `permission_handler` permission, add its macro to the Podfile's `post_install`.
 
-**7. Tests and docs.** The service tests in [test/core/services/](../test/core/services/) mock the `background_recording`, `device_status` and `pip` channels (and the `permission_handler` channel) with `TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler`. [widget_test.dart](../test/widget_test.dart) mocks the permissions, `background_recording`, `device_status` and `pip` channels before pumping `MotoCamApp`. No test mocks the `media` channel. Add a service test for the new channel, add the channel to the widget-test mocks if `RecordingScreen` reaches it, and add it to the [method-channel reference](#method-channel-reference) above.
+**7. Tests and docs.** The service tests in [test/core/services/](../test/core/services/) mock the `background_recording`, `device_status` and `pip` channels (and the `permission_handler` channel) with `TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler`. [widget_test.dart](../test/widget_test.dart) mocks the permissions, `background_recording`, `device_status` and `pip` channels before pumping `MotoCamApp`. No test mocks the `media` channel. [ride_signing_service_test.dart](../test/core/services/ride_signing_service_test.dart) mocks the `integrity` channel (replies, `PlatformException`, a malformed reply, the timeout) and runs without a handler for the `MissingPluginException` case. Add a service test for the new channel, add the channel to the widget-test mocks if `RecordingScreen` reaches it, and add it to the [method-channel reference](#method-channel-reference) above.
 
 ## Related documents
 

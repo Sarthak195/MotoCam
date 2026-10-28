@@ -49,8 +49,9 @@ const int mandatoryIntegritySchemaVersion = 3;
 
 /// Outcome of checking a ride's integrity envelope.
 ///
-/// The envelope is an unkeyed SHA-256 checksum, so [verified] means the
-/// checked data is unmodified since recording, not that it is tamper-proof.
+/// [verified] means the checked data is unmodified since recording. For a
+/// version 3 envelope it also means the signature matched; who signed it is
+/// in [RideIntegrityReport.signedBy]. It never proves the footage genuine.
 enum RideIntegrityStatus {
   /// No envelope to check: a ride recorded before envelopes were written,
   /// an incomplete ride (`sessionComplete: false`) without an envelope (this

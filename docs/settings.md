@@ -142,15 +142,16 @@ Values that are no longer offered, such as resolutions outside {480, 720, 1080, 
 
 ## Other persisted preferences
 
-Three keys are stored outside `AppSettingsProvider`, with the same `SharedPreferences` API and prefix. They have no UI in the settings sheet and no reset in the app.
+Four keys are stored outside `AppSettingsProvider`, with the same `SharedPreferences` API and prefix. They have no UI in the settings sheet and no reset in the app.
 
 | Key | Type | Default | Read | Written |
 |---|---|---|---|---|
 | `ride_playback_show_route_map` | bool | `false` | `RidePlaybackScreen._loadPlaybackPreferences` ([ride_playback_screen.dart](../lib/features/history/ride_playback_screen.dart)) when the playback screen opens; honoured only when the consent key below is `true` | Each time the rider expands or collapses the "Route Map" card (`_toggleRouteMapVisibility`) |
 | `ride_playback_online_map_consent` | bool | `false` | Same place; while `false` the route map stays collapsed | Set to `true` once, when the rider answers **Show map** in the "Show online map?" dialog. Never set back to `false` |
 | `battery_optimization_exemption_offered` (`BackgroundRecordingService.batteryOptimizationOfferedKey`) | bool | `false` | `BackgroundRecordingService.hasOfferedBatteryOptimizationExemption`: by `shouldOfferBatteryOptimizationExemption` after a ride is saved, and by `RecordingScreen._handlePermissionAuditResult`, which then leaves the battery item out of the recommended-permissions SnackBar | Set to `true` by `markBatteryOptimizationExemptionOffered` just before the one-time "Keep recording with the screen off?" dialog opens, whatever the rider answers ([background_recording_service.dart](../lib/core/services/background_recording_service.dart)) |
+| `signed_ride_registry` (`SignedRideRegistry.prefsKey`) | String (JSON) | absent | `SignedRideRegistry.idsFor`, from `loadRideSignerContext` when Ride History loads, and only when this phone's signing key could be read ([ride_signing_service.dart](../lib/core/services/ride_signing_service.dart)) | `SignedRideRegistry.add` after a ride's final save was written signed, and `remove` after a ride is deleted in Ride History. The value is `{"keyFingerprint": <SHA-256 hex of the key's SubjectPublicKeyInfo DER>, "rideSessionIds": [...]}`; a value stored for another key reads as empty and is replaced by the next `add`. Rides deleted outside the app (retention never deletes a ride JSON with locked paths; orphan pruning can delete others) stay listed, which is harmless. See [data-formats.md](data-formats.md#who-signed-a-ride) |
 
-See [playback-and-history.md](playback-and-history.md) for the route map and [platform-integration.md](platform-integration.md) for the battery-optimization exemption. No other `SharedPreferences` use exists in `lib/`, and no Kotlin code reads these values.
+See [playback-and-history.md](playback-and-history.md) for the route map and [platform-integration.md](platform-integration.md) for the battery-optimization exemption and the ride signing key. No other `SharedPreferences` use exists in `lib/`, and no Kotlin code reads these values.
 
 ## Persistence scope
 

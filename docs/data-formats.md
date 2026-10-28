@@ -1,6 +1,6 @@
 # On-disk data formats
 
-This document describes every file MotoCam writes: where it goes, how it is named, the JSON schema of the per-ride telemetry file, and the SHA-256 integrity envelope inside it. It describes the code as it is today. Settings stored in SharedPreferences are covered in [settings.md](settings.md).
+This document describes every file MotoCam writes: where it goes, how it is named, the JSON schema of the per-ride telemetry file, and the SHA-256 integrity envelope (signed on Android since envelope version 3) inside it. It describes the code as it is today. Settings stored in SharedPreferences are covered in [settings.md](settings.md).
 
 ## Contents
 
@@ -97,13 +97,14 @@ Private segments are not passed to the media scanner. Only the pre-API-29 public
 
 1. Every file whose lower-cased path ends with `.telemetry.json` becomes a sample-less ride: from its [ride index](#ride-index-cache) entry when that entry is still valid, otherwise from `RideRecord.fromTelemetryFile(file, loadSamples: false)`. Files that are gone or return `null` are skipped.
 2. Every video file (`.mp4`, `.mov`, `.mkv`, `.avi`) that no loaded ride references as `videoPath`, segment or quarantined path is added through `RideRecord.fromVideoFile`. This shows the segments of a ride killed before its first checkpoint, or segments newer than the last checkpoint, as "VIDEO ONLY (RECOVERED)" rides with no telemetry.
-3. Rides are sorted newest first by `createdAt`.
+3. Each ride's integrity report is derived for the signer context (this phone's public key and the rides this install wrote signed), which `_loadRides` reads on the UI isolate before the load; see [Who signed a ride](#who-signed-a-ride).
+4. Rides are sorted newest first by `createdAt`.
 
 The ride list is rebuilt on every load by scanning the directories, and the telemetry JSON is the only per-ride record. The ride index only caches what was decoded from it.
 
 ## Ride telemetry JSON
 
-Each recording session produces at most one telemetry file. It is written by `TelemetryProvider` in [telemetry_provider.dart](../lib/features/telemetry/providers/telemetry_provider.dart): as sealed checkpoints while recording, and as the final file at stop. Every rule of the format lives in the ride-file codec (see [Ride-file codec](#ride-file-codec)): `encodeRidePayload` builds the payload, `sanitizeJsonValue` replaces every non-finite double (`NaN`, infinity) with `null`, and `sealRidePayload` adds the `integrity` envelope. The file is `encodeRideFileJson({...payload, "integrity": envelope})` (compact `jsonEncode`), so keys appear on disk in the order of the table below. Later, `RideRecord.setLockState` rewrites the file in place with the codec's `applyLockState`. It replaces `lockedSegmentPaths` and the envelope's `payloadHash` (and `envelopeVersion`) and passes every other key through unchanged, keeping their order. The reader is `RideRecord` in [ride_record.dart](../lib/features/history/models/ride_record.dart), which decodes the file with the codec's `decodeRideFile` and parses the samples with `decodeRideSamples`.
+Each recording session produces at most one telemetry file. It is written by `TelemetryProvider` in [telemetry_provider.dart](../lib/features/telemetry/providers/telemetry_provider.dart): as sealed checkpoints while recording, and as the final file at stop. Every rule of the format lives in the ride-file codec (see [Ride-file codec](#ride-file-codec)): `encodeRidePayload` builds the payload, `sanitizeJsonValue` replaces every non-finite double (`NaN`, infinity) with `null`, and `sealRidePayload` (checkpoints) or `sealAndSignRidePayload` (the final save, signed when it can be) adds the `integrity` envelope. The file is `encodeRideFileJson({...payload, "integrity": envelope})` (compact `jsonEncode`), so keys appear on disk in the order of the table below. Later, `RideRecord.setLockState` rewrites the file in place with the codec's `applyLockState`. It replaces `lockedSegmentPaths` and the envelope's `payloadHash`, `envelopeVersion` and `signature` (renewed for a ride this phone signed, dropped otherwise) and passes every other key through unchanged, keeping their order. The reader is `RideRecord` in [ride_record.dart](../lib/features/history/models/ride_record.dart), which decodes the file with the codec's `decodeRideFile` and parses the samples with `decodeRideSamples`.
 
 The reader accepts **no alternative key names**. Its only tolerances are absent keys, the fallbacks listed below, and the coercions in the last column. Every field is optional for the reader except that some video path must be found. In the Required column, "yes" means the reader returns `null` and the ride is not listed without the field. "Type-checked" means a value of the wrong type makes `fromTelemetryFile` throw internally, so it returns `null` and the ride is dropped from the list.
 
@@ -132,7 +133,7 @@ The reader accepts **no alternative key names**. Its only tolerances are absent 
 | `mockLocationDetected` | bool | no | `true` if any fix during the ride came from a mock location provider (`Position.isMocked`) | `RideRecord` (`mockLocationDetected`) | Same coercions as `sessionComplete`; otherwise `false`. `true` shows the "SIMULATED GPS" badge in place of "DATA UNMODIFIED" or "UNVERIFIED" ("INTEGRITY WARNING" still takes precedence) and a playback notice. |
 | `incidents` | object[] | no | Incidents detected live during the ride (see below), in detection order | `RideRecord` (`incidents`) | Key absent: `null`, and playback derives incident markers from the samples. Present but not a list: empty list. Non-object entries and entries without a usable `elapsedMs` are skipped; the rest are sorted by `elapsedMs`. |
 | `samples` | object[] | no | Telemetry samples in capture order (see below) | `RideRecord` | A non-list counts as `[]`; non-object entries ignored; a sample that fails to parse is skipped and the ride is kept; order kept, not sorted |
-| `integrity` | object | no (but see the rule for schema 3) | SHA-256 envelope (see [Integrity envelope](#integrity-envelope)) | `checkRideIntegrity` | Absent or `null`: `unknown`, or `modified` for a completed schema-3 file. Present but not an object: `modified`. |
+| `integrity` | object | no (but see the rule for schema 3) | SHA-256 envelope, signed in version 3 (see [Integrity envelope](#integrity-envelope)) | `checkRideIntegrity` | Absent or `null`: `unknown`, or `modified` for a completed schema-3 file. Present but not an object: `modified`. |
 
 If the JSON root is not an object, or the file cannot be read or decoded, `fromTelemetryFile` returns `null`.
 
@@ -254,7 +255,7 @@ This example was put together by hand from the writer code; the app did not prod
 
 ## Ride-file codec
 
-Every rule of the ride JSON lives in one module, [ride_telemetry_codec.dart](../lib/core/ride_file/ride_telemetry_codec.dart), which also exports the integrity envelope code in [ride_integrity.dart](../lib/core/ride_file/ride_integrity.dart). It depends only on `core` (`path_utils`, `integrity_utils`). `RideRecord` re-exports its model types (`RideIntegrityStatus`, `RideIntegrityReport`, `RideIncident`, `RideSegmentTimelineEntry`), so feature code keeps importing them from [ride_record.dart](../lib/features/history/models/ride_record.dart).
+Every rule of the ride JSON lives in one module, [ride_telemetry_codec.dart](../lib/core/ride_file/ride_telemetry_codec.dart), which also exports the integrity envelope code in [ride_integrity.dart](../lib/core/ride_file/ride_integrity.dart) and the signature code in [ride_signature.dart](../lib/core/ride_file/ride_signature.dart). It depends only on `core` (`path_utils`, `integrity_utils`) and the `crypto` and `pointycastle` packages. `RideRecord` re-exports its model types (`RideIntegrityStatus`, `RideIntegrityReport`, `RideIncident`, `RideSegmentTimelineEntry`), so feature code keeps importing them from [ride_record.dart](../lib/features/history/models/ride_record.dart).
 
 | Concern | Codec API | Used by |
 |---|---|---|
@@ -263,10 +264,10 @@ Every rule of the ride JSON lives in one module, [ride_telemetry_codec.dart](../
 | Samples | `decodeRideSamples(json, parse)`, kept separate so a caller that needs only the summary skips them; `RideRecord` passes `TelemetryData.fromJson` | `RideRecord.fromTelemetryFile` |
 | Segment paths | `resolveRideSegments` returns `ResolvedRideSegments` (trusted, missing and quarantined paths, `videoPath`, declared and resolved forms), using `resolveDeclaredRidePath` and `trustedRootsForTelemetryFile` | `RideRecord` |
 | Timeline and locks | `decodeRideTimeline`, `decodeLockedSegmentPaths` | `decodeRideFile` |
-| Integrity | `checkRideFileIntegrity` (`checkRideIntegrity` plus `applyQuarantineToIntegrity`) | `RideRecord` |
+| Integrity | `checkRideFileIntegrity` (`checkRideIntegrity` plus `applyQuarantineToIntegrity`); signature checks in `verifyRideSignature`; `applySignerContext` (who signed, `signature-removed`) | `RideRecord` |
 | Everything except the samples | `decodeRideFile` returns `DecodedRideFile` | `RideRecord.fromTelemetryFile` |
 | Lock-state rewrite | `applyLockState` | `RideRecord.setLockState` |
-| Writer | `resolveRideFileContent` (`RideFileInput` to `RideFileContent`, with `restrictedTo` for checkpoints), `encodeRidePayload` (`RideFileSnapshot`), `sanitizeJsonValue`, `sealRidePayload`, `encodeRideFileJson`, `rideTelemetryPathFor` | `TelemetryProvider` |
+| Writer | `resolveRideFileContent` (`RideFileInput` to `RideFileContent`, with `restrictedTo` for checkpoints), `encodeRidePayload` (`RideFileSnapshot`), `sanitizeJsonValue`, `sealRidePayload` (checkpoints), `sealAndSignRidePayload` (final save), `encodeRideFileJson`, `rideTelemetryPathFor` | `TelemetryProvider` |
 | Shared rules | `normalizeSegmentPathList`, `normalizeRideTimeline`, `normalizeTimelineSpan` | Writer, reader, playback (`orderedDeclaredSegmentPaths`, `buildEffectiveTimeline` in [playback_timeline.dart](../lib/features/history/widgets/playback_timeline.dart)), orphan pruning (`normalizeSegmentPathList` in `findOrphanTelemetryFiles`) |
 | Constants | `rideFileSchemaVersion` (3), `rideFileStoragePolicy`, `publicExportRelativePath`, `legacyPublicRecordingsDirectory`, `rideTelemetryFileSuffix`, `rideVideoFileExtensions` | Writer, reader, `CameraProvider` (gallery export path), orphan pruning (`rideTelemetryFileSuffix`, `rideVideoFileExtensions`) |
 
@@ -274,15 +275,15 @@ Each rule exists once. Where the writer, the reader and playback used to differ,
 
 - **Segment list** (`normalizeSegmentPathList`): trim each entry, drop empty entries and repeats, keep the order, and append `videoPath` when it is not listed. The writer, playback and orphan pruning apply it to the declared paths (pruning then falls back to `[videoPath]` and the legacy sibling video, see [Orphan pruning](#file-inventory)). The reader applies it in two steps, because resolution can rewrite or quarantine entries: it normalises `segmentPaths` (falling back to `[videoPath]` only when the list is empty), resolves and trust-checks each entry, runs legacy sibling recovery when no trusted entry is left, and only then appends the resolved `videoPath` when it is missing. For every file the writer produces, both orders give the same list.
 - **Timeline** (`normalizeRideTimeline`, `normalizeTimelineSpan`): keep the first entry per known segment, clamp a negative `startMs` to 0, raise `endMs` (missing: the start) to at least the start, and sort by `startMs`. `startMs` and `endMs` are read only for kept entries, and a non-number there makes the reader drop the ride. The writer and the reader call the same function. Playback adds presentation rules on top of the stored timeline that never reach the file: every entry lasts at least 1 ms, a short entry takes a probed length, segments without an entry are appended, and overlaps are pushed later (see [playback-and-history.md](playback-and-history.md)).
-- **Envelope** (`buildIntegrityEnvelope`, `resealIntegrityEnvelope`): the writer sets `segmentCount` to the number of written `segmentPaths`. A lock change keeps every stored envelope field, recomputes only `payloadHash` and sets `envelopeVersion` to 2; it never re-derives the segment list or the counts. Readers never read `segmentCount`.
+- **Envelope** (`buildIntegrityEnvelope`, `resealIntegrityEnvelope`): the writer sets `segmentCount` to the number of written `segmentPaths`. A lock change keeps every stored envelope field except `signature`, recomputes `payloadHash` and sets `envelopeVersion` to 2, or to 3 with a new signature for a ride this phone signed (see [Re-signing on lock change](#re-signing-on-lock-change)); it never re-derives the segment list or the counts. Readers never read `segmentCount`.
 - **File names**: every layer uses `path_utils.fileNameFromPath`.
 - **Legacy public folder**: `legacyPublicRecordingsDirectory` (`/storage/emulated/0/Movies/MotoCam/Recordings`, the v0.1.11 and v0.1.12 location) is the only copy of that path in the app. It is a literal on purpose and does not follow `publicExportRelativePath` (a unit test pins its value). It is reserved for trust and discovery decisions; today it is neither a trusted root nor scanned. The gallery export's `relativePath` and the written `publicExportRelativePath` both come from `publicExportRelativePath`.
 
-The format is pinned by golden tests. [ride_file_golden_test.dart](../test/features/history/models/ride_file_golden_test.dart) reads 16 fixture files in [test/fixtures/ride_files](../test/fixtures/ride_files) (a legacy file without an envelope, schema 1, envelope versions 1 and 2, checkpoints with and without an envelope, a tampered file, relocated and quarantined paths, legacy sibling recovery and rejected files) and compares their payload hashes, read results, integrity reports and lock-state rewrites with values recorded before the codec existed. [ride_telemetry_codec_test.dart](../test/core/ride_file/ride_telemetry_codec_test.dart) runs the writer path with real segment files and reads the result back with `RideRecord.fromTelemetryFile`.
+The format is pinned by golden tests. [ride_file_golden_test.dart](../test/features/history/models/ride_file_golden_test.dart) reads 16 fixture files in [test/fixtures/ride_files](../test/fixtures/ride_files) (a legacy file without an envelope, schema 1, envelope versions 1 and 2, checkpoints with and without an envelope, a tampered file, relocated and quarantined paths, legacy sibling recovery and rejected files) and compares their payload hashes, read results, integrity reports and lock-state rewrites with values recorded before the codec existed. [ride_telemetry_codec_test.dart](../test/core/ride_file/ride_telemetry_codec_test.dart) runs the writer path with real segment files and reads the result back with `RideRecord.fromTelemetryFile`. Version 3 has no fixture file (an ECDSA signature differs on every run): [ride_signature_test.dart](../test/core/ride_file/ride_signature_test.dart) and [ride_signature_history_test.dart](../test/features/history/models/ride_signature_history_test.dart) build signed rides with a pointycastle P-256 key standing in for the phone's key.
 
 ## Checkpoints and the final save
 
-The file of a ride in progress is a **checkpoint**: the same schema with `sessionComplete: false`. It is sealed with a full integrity envelope, like the final file.
+The file of a ride in progress is a **checkpoint**: the same schema with `sessionComplete: false`. It is sealed with a full integrity envelope, like the final file, but always as version 2: only the final save is signed, so no Keystore call runs while recording.
 
 - `RecordingScreen._checkpointRideIfChanged` calls `TelemetryProvider.checkpointRideSession` when `RideCheckpointTracker` sees a change in the session's segment list (its length or its newest path, so a roll at the loop limit that deletes one segment and adds one also counts) or in the number of locked segments (checked about once per second, and straight after a LOCK press or an automatic incident lock). After the first call, the provider also rewrites the checkpoint every 30 s with the latest samples, using the segment state of the last call.
 - Once the loop is at its segment limit, a roll deletes one segment and adds one, so the counts do not change and no new call is made. The periodic rewrite then drops the deleted segments (they no longer exist) but does not list the newer ones, which only reach the file at the final save.
@@ -292,37 +293,55 @@ The file of a ride in progress is a **checkpoint**: the same schema with `sessio
 At stop, `stopRideSessionAndPersist` captures the ride state before its first `await`, then:
 
 1. If any segment is already hashed, writes a checkpoint-form file (`sessionComplete: false`) with those segments, so the ride stays listed if the process dies while the remaining segments are hashed.
-2. Hashes the remaining segments on a background isolate and writes the final file with `sessionComplete: true` to the same path.
+2. Hashes the remaining segments on a background isolate and writes the final file with `sessionComplete: true` to the same path, signed when it can be (`sealAndSignRidePayload`, see [Signature (version 3)](#signature-version-3)). A signed write then adds the ride's `rideSessionId` to the signed-ride registry.
 
 If the app is killed during a ride, the last checkpoint stays on disk. The ride list shows it with the "RECOVERED (INCOMPLETE)" badge, it verifies like any sealed file, and each segment recorded after it appears as a separate "VIDEO ONLY (RECOVERED)" ride. Nothing finalises a recovered checkpoint later. How a failed save is kept for retry is described in [telemetry.md](telemetry.md#persistence).
 
 ## Integrity envelope
 
-The envelope code is in [ride_integrity.dart](../lib/core/ride_file/ride_integrity.dart), part of the ride-file codec; the generic hashing helpers (`hashJsonCanonical`, `hashFileSha256`) stay in [integrity_utils.dart](../lib/core/utils/integrity_utils.dart). The envelope is built by `buildIntegrityEnvelope`, which the codec's `sealRidePayload` runs in `Isolate.run` for every checkpoint and the final save. `resealIntegrityEnvelope` updates it when the lock state changes (through `applyLockState`), and `checkRideIntegrity` checks it.
+The envelope code is in [ride_integrity.dart](../lib/core/ride_file/ride_integrity.dart) and the signature code in [ride_signature.dart](../lib/core/ride_file/ride_signature.dart), both part of the ride-file codec; the generic hashing helpers (`hashJsonCanonical`, `hashFileSha256`) stay in [integrity_utils.dart](../lib/core/utils/integrity_utils.dart). The envelope is built by `buildIntegrityEnvelope`, which the codec's `sealRidePayload` (checkpoints) and `sealAndSignRidePayload` (final save) run in `Isolate.run`. `resealIntegrityEnvelope` updates it when the lock state changes (through `applyLockState`), and `checkRideIntegrity` checks it.
 
-The envelope is an unkeyed SHA-256 checksum. It shows that the ride data and segments are unmodified since recording, or detects accidental corruption, but anyone who can rewrite the files can also recompute it. It is not tamper-proof. Once a segment's hash is stored in the [ride index](#ride-index-cache), a later change to the segment is detected only when it also changes the file's size, modification time or change time; a change that keeps all three (silent storage corruption, for example) is found only by 'Check videos again', which re-reads every segment.
+The SHA-256 hashes alone are a checksum: they show that the ride data and segments are unmodified since recording, or detect accidental corruption, but anyone who can rewrite the files can also recompute them. A version 3 envelope adds an ECDSA signature by a non-exportable Android Keystore key of the recording phone. It shows that the files were not changed by anyone without this app's key on that phone. It does not prove the footage is genuine: a rooted phone or a modified app can sign anything. Only the recording phone and install can tell that it signed a ride (see [Who signed a ride](#who-signed-a-ride)); on any other phone, or after a reinstall, a signed ride shows only as unmodified. iOS rides are not signed. Once a segment's hash is stored in the [ride index](#ride-index-cache), a later change to the segment is detected only when it also changes the file's size, modification time or change time; a change that keeps all three (silent storage corruption, for example) is found only by 'Check videos again', which re-reads every segment.
 
 ### Envelope fields
 
 | Field | Type | Written value | Read |
 |---|---|---|---|
 | `algo` | string | `"sha256"` (`integrityAlgorithmSha256`) | Trimmed and lower-cased; must equal `sha256` |
-| `envelopeVersion` | int | `2` (`boundIntegrityEnvelopeVersion`) | Absent: version 1 (legacy). Present but not a number, or outside 1–2: an issue. Selects how `payloadHash` is computed. |
+| `envelopeVersion` | int | `3` (`signedIntegrityEnvelopeVersion`) for a signed final save; `2` (`boundIntegrityEnvelopeVersion`) for checkpoints, iOS, a final save that could not be signed, and a lock change on a ride not signed by this phone | Absent: version 1 (legacy). Present but not a number, or outside 1 to 3 (`maxIntegrityEnvelopeVersion`, the one constant for the highest accepted version): an issue. Selects how `payloadHash` is computed and whether `signature` is read. |
 | `segmentCount` | int | Number of entries in the written `segmentPaths` | Never; kept unchanged by `setLockState` |
 | `hashedSegmentCount` | int | Number of entries in `segmentHashes` | Never |
 | `segmentHashes` | object `{path: hex}` | SHA-256 of each segment file, keyed by the exact path string from `segmentPaths`. A segment that could not be read is left out. | Non-object is treated as `{}`; keys trimmed; values trimmed and lower-cased; empty keys or values skipped. For each segment the reader looks up its declared path, then its resolved path, then its plain file name. |
 | `generatedAt` | string | Sealing time, `DateTime.now().toUtc().toIso8601String()` | Never |
 | `payloadHash` | string | 64 lowercase hex characters (below) | Trimmed, lower-cased and compared |
+| `signature` | object | Version 3 only: `{alg, keyId, publicKey, sig}`, see [Signature (version 3)](#signature-version-3) | Read only when `envelopeVersion` is 3. Absent there: `missing-signature`. In a version 1 or 2 envelope it is never read (in version 2 it is covered by the payload hash like any other field). |
+
+### Signature (version 3)
+
+`integrity.signature` holds four strings:
+
+| Field | Content |
+|---|---|
+| `alg` | `ES256`: ECDSA on P-256 with SHA-256 (`rideSignatureAlgorithmEs256`) |
+| `publicKey` | Base64 (standard alphabet, padded, no line breaks) of the signer's X.509 SubjectPublicKeyInfo DER: an EC P-256 key with an uncompressed point, 91 bytes, 124 characters |
+| `keyId` | The first 16 lowercase hex characters of the SHA-256 of that DER. For display and logs only; the app never compares keyIds |
+| `sig` | Base64 of the DER ECDSA signature, `SEQUENCE { INTEGER r, INTEGER s }`, as `SHA256withECDSA` returns it |
+
+- **What is signed:** the UTF-8 bytes of the envelope's `payloadHash` string (64 lowercase hex characters). `payloadHash` covers the whole ride JSON and every envelope field except itself and `signature`, so the signature binds the ride data, `segmentHashes` (and so every segment file), the counts and `generatedAt`.
+- **Who signs:** the phone's key under the Android Keystore alias `motocam_ride_signing_v1`, through the `com.example.motocam/integrity` channel (see [platform-integration.md](platform-integration.md#commotocamintegrity)).
+- **Writing** (`sealAndSignRidePayload`, final save only): one background isolate builds both a version 2 envelope and a version 3 envelope without its signature; the UI isolate asks the phone to sign the version 3 `payloadHash` (5 s channel timeout, 6 s overall); a background isolate checks the answer with the verifier below; the file is written once. If signing is unavailable (iOS, tests), fails, times out or returns a signature that does not verify, the version 2 envelope is written, exactly as before version 3 existed. Signing never makes a save fail.
+- **Verification** (`verifyRideSignature`, pure Dart with pointycastle, so it runs in the history isolate): `alg` must be `ES256`; `publicKey` and `sig` must be canonical base64 (re-encoding gives the same string) of at most 256 characters; the key must be the exact P-256 SubjectPublicKeyInfo prefix followed by an uncompressed point whose coordinates are below the field prime and on the curve; the signature must be strict DER (short-form lengths, minimal positive integers, nothing trailing); `keyId` must match the key; and the ECDSA check must pass over the stored `payloadHash`. Both low-S and high-S signatures are accepted, because the Android Keystore does not normalise S; r and s outside 1 to n-1 fail. Malformed input is an issue, never an exception.
 
 ### What is hashed
 
+- **Payload hash, version 3** (`computeRidePayloadHash`): the whole ride JSON, with `integrity` replaced by the envelope minus `payloadHash` and `signature`, hashed with `hashJsonCanonical`. `envelopeVersion` (3) is covered, so a version 3 hash differs from the version 2 hash of the same ride.
 - **Payload hash, version 2** (`computeRidePayloadHash`): the whole ride JSON, with `integrity` replaced by the envelope minus its own `payloadHash`, hashed with `hashJsonCanonical`. Every top-level field and every other envelope field, including `segmentHashes`, `segmentCount` and `generatedAt`, is covered.
 - **Payload hash, version 1** (envelope without `envelopeVersion`): the ride JSON with the `integrity` key removed. The envelope's own fields, including `segmentHashes`, are not covered.
 - **`hashJsonCanonical`**: `sha256(utf8.encode(jsonEncode(canonicalizeJsonValue(value))))` as lowercase hex.
 - **Canonicalization** (`canonicalizeJsonValue`): map keys are turned into strings and sorted with `String.compareTo` (UTF-16 code-unit order, so `B` sorts before `a`), recursively. List order is kept. `null`, strings, numbers and booleans are unchanged. Any other value becomes `toString()`. The output is compact `jsonEncode`, so numbers hash exactly as Dart prints them (`2` and `2.0` differ). Non-finite doubles never reach it, because the writer replaces them with `null` first.
 - The writer hashes the in-memory map it is about to write. The reader hashes the map decoded from the file. Both produce the same bytes for files the app writes.
 - **Segment hashes** (`hashFileSha256`): the raw bytes of each file, streamed with `openRead()`. An empty path, a missing file or a `FileSystemException` gives no hash. The writer hashes on a background isolate and caches each hash by path, size and modification time, so checkpoints and the final save do not re-hash unchanged files.
-- No key, salt, signature or device binding is used. Keyed integrity (HMAC or a platform keystore) is not implemented.
+- The hashes use no key or salt. The device binding is the version 3 signature over `payloadHash` (above).
 
 ### Verification procedure (`checkRideIntegrity`)
 
@@ -331,14 +350,16 @@ The envelope is an unkeyed SHA-256 checksum. It shows that the ride data and seg
 1. If `integrity` is absent or `null`: when `schemaVersion` is at least 3 (`mandatoryIntegritySchemaVersion`) and `sessionComplete` is not `false`, the result is `modified` with `missing-integrity`; otherwise it is `unknown`. The remaining steps do not run.
 2. If `integrity` is not a JSON object, the result is `modified` with `invalid-integrity`. The remaining steps do not run.
 3. If `algo` is not `sha256`, add `unsupported-integrity-algorithm:<algo>`. Checking continues.
-4. If `envelopeVersion` is present but not a number, or below 1 or above 2, add `unsupported-integrity-version:<value>`.
+4. If `envelopeVersion` is present but not a number, or below 1 or above 3, add `unsupported-integrity-version:<value>`.
 5. If `payloadHash` is empty or missing, add `missing-payload-hash`. Otherwise recompute the payload hash for the envelope's version; if it differs, add `payload-hash-mismatch`.
+   - Version 3 only: without `signature`, add `missing-signature`. Otherwise check it against the stored `payloadHash` ([Signature (version 3)](#signature-version-3)): an `alg` other than `ES256` adds `unsupported-signature-alg:<alg>`, a `keyId` that does not match the key adds `signature-key-mismatch`, and anything malformed or a signature that does not verify adds `signature-invalid`. The outcome (the signer's public key and whether the signature is valid) is kept in the report as `signature`.
 6. For each trusted segment path in the ride's list:
    - no expected hash: `missing-segment-hash:<path>` if the file exists (a missing file is not an issue here);
    - only when segment verification is requested and the file exists: a file that cannot be read adds `unreadable-segment-file:<path>`, and a different hash adds `segment-hash-mismatch:<path>`.
 7. Each `segmentHashes` key that matched no segment adds `orphan-integrity-hash:<key>`.
 8. No issues gives `verified`. Any issue gives `modified`.
 9. Afterwards, `applyQuarantineToIntegrity` runs: if any path was quarantined, the result becomes `modified`, with the extra issue `quarantined-segment-paths:<count>`. This also applies to a ride with no envelope.
+10. Steps 1 to 9 depend on the file alone (the *content report*, which the ride index caches). `applySignerContext` then adds what the reading phone knows ([Who signed a ride](#who-signed-a-ride)): `signedBy`, and for a ride this install wrote signed that is now unsigned or signed by another key, `modified` with `signature-removed`.
 
 Segment files that no longer exist are not integrity issues. They are listed in `RideRecord.missingSegmentPaths`, the list shows an "INCOMPLETE" badge, and playback marks the missing footage.
 
@@ -352,8 +373,8 @@ Where each mode runs:
 | Status | Exact condition | Shown as |
 |---|---|---|
 | `unknown` | `integrity` absent, the file is not a completed schema-3 file, and nothing quarantined | List: "UNVERIFIED" badge, with "Integrity: not available (recorded by an older version)" or, for `sessionComplete: false`, "(ride was not saved completely)"; "SIMULATED GPS" replaces the badge when `mockLocationDetected` is `true`. Playback: a notice that the ride has no integrity record. |
-| `verified` | Envelope present, no issue from steps 3-7, nothing quarantined | List: "DATA UNMODIFIED" badge (payload-level checks; videos are checked when the ride is opened, and the stored result shows as "VIDEOS VERIFIED" or "VIDEO CHECK FAILED"), or "SIMULATED GPS" when `mockLocationDetected` is `true` |
-| `modified` | At least one of the 11 issue codes above | List: "INTEGRITY WARNING" badge; the unlock button is disabled. Playback: a notice that the ride data may have changed and how many segments could not be confirmed; those segments are marked purple on the seekbar. |
+| `verified` | Envelope present, no issue from steps 3-7 or 10, nothing quarantined | List: "SIGNED ON THIS PHONE" badge when `signedBy` is `thisDevice`, otherwise "DATA UNMODIFIED" (payload-level checks; videos are checked when the ride is opened, and the stored result shows as "VIDEOS VERIFIED" or "VIDEO CHECK FAILED"), or "SIMULATED GPS" when `mockLocationDetected` is `true` |
+| `modified` | At least one of the 16 issue codes above | List: "INTEGRITY WARNING" badge; the unlock button is disabled. Playback: a notice that the ride data may have changed, that its signature does not match or was removed, and how many segments could not be confirmed; those segments are marked purple on the seekbar. |
 | quarantined (not a status) | `quarantinedSegmentPaths` is non-empty; always paired with `modified` | "QUARANTINED n" badge |
 
 See [playback-and-history.md](playback-and-history.md) for the screens.
@@ -365,7 +386,7 @@ flowchart TD
   S -- no --> U[unknown]
   A -- yes --> O{"is an object?"}
   O -- no --> II["modified: invalid-integrity"]
-  O -- yes --> B["check algo, envelopeVersion, payloadHash"]
+  O -- yes --> B["check algo, envelopeVersion, payloadHash, signature (v3)"]
   B --> D["each existing segment has a hash?"]
   D --> C{"verifySegments?"}
   C -- yes --> H[hash each existing trusted segment]
@@ -381,25 +402,47 @@ flowchart TD
   II --> Q
   Q -- yes --> M2["modified + quarantined-segment-paths:n"]
   Q -- no --> R[result unchanged]
+  M2 --> SC["signer context: signedBy, signature-removed"]
+  R --> SC
 ```
+
+### Who signed a ride
+
+The verdict depends on the phone that reads the ride, so it is derived on every load from the content report and a `RideSignerContext`: this phone's public key (`thisDevicePublicKey`) and the `rideSessionId`s this install wrote signed (`signedRideIds`). `RidesListScreen._loadRides` builds it on the UI isolate with `loadRideSignerContext` (the key from `RideSigningService.sessionSigningKey`, read once per session; the registry from SharedPreferences) and passes it into the loader isolate; the rides it returns carry it to playback, whose re-read (`RideRecord.loadSamples`) applies it again.
+
+`signedBy` (`RideSignedBy`, from `resolveRideSigner`):
+
+| Value | Condition | Shown as |
+|---|---|---|
+| `none` | No signature, or one that failed its check | As before signatures existed |
+| `thisDevice` | A valid signature whose public key bytes equal this phone's key byte for byte (keyIds are never compared) | "SIGNED ON THIS PHONE" (when the status is `verified` and the GPS was not simulated) |
+| `otherKey` | A valid signature by a key known to differ: another phone, or this phone before a reinstall | "DATA UNMODIFIED", with "signed by another phone or an earlier install" in the card line |
+| `unknownSigner` | A valid signature while this phone's key could not be read (iOS, a Keystore error) | "DATA UNMODIFIED", with "signed, but this phone's key could not be read" in the card line. Never `thisDevice` and never `otherKey` |
+
+The `unknownSigner` value is a fourth state beyond none, this phone and another key: it keeps "validly signed, signer unknown" apart from "unsigned".
+
+**Downgrade check (`signature-removed`).** The signed-ride registry (SharedPreferences key `signed_ride_registry`, see [settings.md](settings.md)) lists the `rideSessionId`s this install wrote signed, stored with the SHA-256 fingerprint of the key that signed them. A ride is added only after its signed file was written and removed when it is deleted in the app. The registry is read only for this phone's current key: with another fingerprint it reads as empty, and while this phone's key is unknown it is not read at all. A registered ride that loads unsigned (envelope version 2, no envelope, or a version 3 envelope without `signature`) or validly signed by a key known to differ from this phone's key becomes `modified` with `signature-removed`. A signed ride is never flagged while this phone's key is unknown. The check works only on the recording install: a copy on another phone, or this phone after a reinstall (which also empties the registry), has no registry entry for it.
 
 ### Re-signing on lock change
 
-`RideRecord.setLockState(locked)` rewrites the file and returns whether the change was saved. It returns `false` straight away if the in-memory status is `modified`, if any path is quarantined, or if the ride has no telemetry file. Otherwise, holding `runExclusiveForPath` for the file, it:
+`RideRecord.setLockState(locked, {hashSegment, signer})` rewrites the file and returns whether the change was saved. It returns `false` straight away if the in-memory status is `modified` (including `signature-removed`), if any path is quarantined, or if the ride has no telemetry file. Otherwise, holding `runExclusiveForPath` for the file, it:
 
 1. Re-reads the file and resolves its segments. A missing or unreadable file, or any quarantined path, returns `false`.
 2. Runs the full verification, including segment hashes. A `modified` result returns `false`.
 3. Sets `lockedSegmentPaths` to every segment of the ride (in the form written in the file) when locking, or to `[]` when unlocking.
-4. For a `verified` ride, calls `resealIntegrityEnvelope`: the stored `segmentHashes` and other envelope fields are kept, `envelopeVersion` is set to 2 (so a version 1 envelope is upgraded), and `payloadHash` is recomputed. A ride without an envelope (`unknown`) is written without one, so it stays unverified.
-5. Writes the file with the atomic-write helper.
+4. For a `verified` ride with a valid signature whose signer is not known to be another key (`signedBy` `thisDevice` or `unknownSigner`): calls `resealIntegrityEnvelope` with version 3 (the old `signature` is dropped and `payloadHash` recomputed), asks `signer` (default: this phone's key through `RideSigningService`) to sign the new hash, and checks the answer on a background isolate. If the answer is `null`, throws, does not verify, or comes from another key for a ride signed by this phone, the change is refused and the file is left untouched. If the signer was unknown and the answer comes from another key, the ride was signed elsewhere and is re-sealed as version 2.
+5. For any other `verified` ride (unsigned, or signed by another key), calls `resealIntegrityEnvelope`: the stored `segmentHashes` and other envelope fields are kept, any `signature` is dropped (a foreign signature cannot be renewed and would no longer match), `envelopeVersion` is set to 2 (so a version 1 envelope is upgraded), and `payloadHash` is recomputed. A ride without an envelope (`unknown`) is written without one, so it stays unverified.
+6. Writes the file with the atomic-write helper.
 
-All exceptions return `false`. The app only ever calls `setLockState(false)`, from the ride list's unlock action after a confirmation dialog. Steps 1 to 5 run on the UI isolate; in step 2, segments with a still-valid result in the [ride index](#ride-index-cache) are not hashed again, and the others are hashed one per `Isolate.run` call.
+All exceptions return `false`. The app only ever calls `setLockState(false)`, from the ride list's unlock action after a confirmation dialog. Steps 1 to 6 run on the UI isolate (the signer uses a platform channel); in step 2, segments with a still-valid result in the [ride index](#ride-index-cache) are not hashed again, and the others are hashed one per `Isolate.run` call.
 
 ### What it does and does not protect against
 
-- **Detected when the list loads** (when the file's stamp changed, so it is decoded again; see [Ride index (cache)](#ride-index-cache)): any edit to a top-level field, or (version 2) to an envelope field such as `segmentHashes`; removal of `payloadHash`; removal of the envelope from a completed schema-3 file; an existing segment without a hash. **Detected when a ride is opened for playback**: changed, replaced or unreadable segment files, for a segment without a still-valid stored result (a change that keeps the segment's size, modification time and change time reuses the stored result; 'Check videos again' re-reads every segment).
+- **Detected when the list loads** (when the file's stamp changed, so it is decoded again; see [Ride index (cache)](#ride-index-cache)): any edit to a top-level field, or (version 2 and 3) to an envelope field such as `segmentHashes`; removal of `payloadHash`; removal of the envelope from a completed schema-3 file; an existing segment without a hash. In a version 3 file, an edit with a recomputed `payloadHash` (the signature no longer matches) and a changed or swapped signature. On the recording install, a ride it signed that was stripped back to version 2 (or of its envelope) or re-signed with another key (`signature-removed`). **Detected when a ride is opened for playback**: changed, replaced or unreadable segment files, for a segment without a still-valid stored result (a change that keeps the segment's size, modification time and change time reuses the stored result; 'Check videos again' re-reads every segment).
 - **Not detected as `modified`**:
-  - Anyone who can write the files can recompute every hash, because no secret is involved.
+  - Anyone who can write the files can recompute every hash, because the hashes use no secret. Without the signature only the recording install's registry can tell that a signed ride lost its signature.
+  - A copy of a ride on another phone, or on this phone after a reinstall: it can be stripped to version 2 (or re-signed with any key) unnoticed, since no registry entry exists there. Such phones show a signed ride only as "DATA UNMODIFIED".
+  - Anything signed on a rooted phone or by a modified app: the signature proves that the app's key on that phone signed the data, not that the footage is genuine.
   - Removing the envelope and also setting `sessionComplete` to `false` or `schemaVersion` below 3 gives `unknown` ("UNVERIFIED").
   - In a version 1 envelope, `segmentHashes` is outside the payload hash, so it can be rewritten to match changed segment files.
   - Deleting a telemetry file removes the ride; its videos then appear as "VIDEO ONLY (RECOVERED)" rides.
@@ -462,16 +505,16 @@ Notes:
 [ride_index.dart](../lib/features/history/models/ride_index.dart) keeps a cache that spares Ride History from decoding every ride file on every visit and spares playback from hashing an unchanged segment twice.
 
 - **Location**: `getApplicationSupportDirectory()/ride_index/ride_index.json`, outside the recordings directory, so discovery never sees it and backups of the recordings do not carry it. The directory is resolved with path_provider on the UI isolate (`RideIndexStore.shared`); when it cannot be resolved the app works without the cache.
-- **Lifetime**: it is only a cache. A missing or unreadable file, content that is not JSON, or a `format` other than the current `rideIndexFormatVersion` (1) gives an empty index that the next load rebuilds; a malformed entry is skipped. Nothing ever fails because of it, and it can be deleted at any time. The app never deletes it.
+- **Lifetime**: it is only a cache. A missing or unreadable file, content that is not JSON, or a `format` other than the current `rideIndexFormatVersion` (2; format 1 had no signature facts) gives an empty index that the next load rebuilds; a malformed entry is skipped. Nothing ever fails because of it, and it can be deleted at any time. The app never deletes it.
 - **One writer**: `RideIndexStore` on the UI isolate. It reads the file once (parsed in `Isolate.run`, or adopted from the history isolate's read), keeps it in memory, applies every change there and writes the whole index with `writeTelemetryAtomically` (unique temp file in the same directory, renamed over the target). Writes are queued; a queued write that finds the index already written skips. A temp file left by a killed write (`ride_index.json.<suffix>.tmp`) is deleted once it is 10 minutes old by a prune that the store's first `read` starts, whether that read parses the file or adopts the history isolate's index. Listeners of the store (it is a `ChangeNotifier`) are notified after each `update` has changed the in-memory index. The history isolate reads the file (or receives the in-memory copy) but never writes it.
 
 Content (all fields are written; readers need them all, and an entry missing one is ignored):
 
 | Field | Content |
 |---|---|
-| `format` | `1` |
+| `format` | `2` |
 | `rides` | Object keyed by the telemetry file's normalised path (`rideIndexKey`, which is `normalizePath`). Each entry: `path` (the path as listed), `size`, `modifiedUs`, `changedUs` (`FileStat.size`, `modified` and `changed` in microseconds, taken before the file was decoded) and `ride`. |
-| `rides.*.ride` | The sample-less `RideRecord`: `videoPath`, `segmentPaths`, `missingSegmentPaths`, `quarantinedSegmentPaths`, `lockedSegmentPaths`, `segmentTimeline` (`path`, `startMs`, `endMs`), `createdAtUs`, `rideSessionId`, `sessionComplete`, `distanceKm`, `maxSpeedKmh`, `averageSpeedKmh` (a non-finite value is written as `0`, since JSON cannot hold it), `sampleCount`, `lastSampleElapsedMs`, `incidents` (`null`, or entries in the ride-file `incidents[]` form), `mockLocationDetected`, `integrity` (`status`, `hasMetadata`, `issues` of the payload-level check) and `expectedSegmentHashes` (resolved segment path to the hash the envelope records). |
+| `rides.*.ride` | The sample-less `RideRecord`: `videoPath`, `segmentPaths`, `missingSegmentPaths`, `quarantinedSegmentPaths`, `lockedSegmentPaths`, `segmentTimeline` (`path`, `startMs`, `endMs`), `createdAtUs`, `rideSessionId`, `sessionComplete`, `distanceKm`, `maxSpeedKmh`, `averageSpeedKmh` (a non-finite value is written as `0`, since JSON cannot hold it), `sampleCount`, `lastSampleElapsedMs`, `incidents` (`null`, or entries in the ride-file `incidents[]` form), `mockLocationDetected`, `integrity` (`status`, `hasMetadata`, `issues` of the payload-level check from the file alone, and `signature`: `null`, or `publicKey` (the signer's base64 key, `null` when it could not be decoded) and `valid`, so ECDSA runs once per file version) and `expectedSegmentHashes` (resolved segment path to the hash the envelope records). The signer context is never stored: `signedBy` and `signature-removed` are derived again on every load, for cached and decoded rides alike. |
 | `segmentHashes` | Object keyed by the segment's normalised resolved path. Each entry: `size`, `modifiedUs`, `changedUs` of the segment file taken before it was hashed, `expectedHash` (the envelope's hash at that time) and `sha256` (the computed hash). |
 
 **Ride entry key.** An entry is used only when the telemetry file still has the same normalised path, the same listed path, size, modification time and change time, and each of the ride's segments exists exactly when the entry says it does (resolution, `missingSegmentPaths` and the integrity report depend on that). `FileStat.changed` is the inode change time on Android and Linux, which `touch` cannot set back, so restoring a modification time after an edit does not hide it. On Windows `changed` is the creation time; tests inject the stat source. A hit costs one stat of the telemetry file plus one per segment and no read of the file. Any other file is decoded in the history isolate and gets a fresh entry. Entries whose files are gone are dropped when the load result is stored, and so are `segmentHashes` entries for segments no remaining ride lists.
@@ -499,12 +542,14 @@ The reader handles every generation through the same code, so older files load w
 | a51a2b3, 2026-03-22 | legacy name | adds `segmentTimeline` |
 | 76974c1, 2026-04-05 | `ride_<id>.telemetry.json` | adds `rideSessionId`, `sessionComplete`, `storagePolicy` (`"public-folder-only"`), `storageDirectory`, `recordingSettings` |
 | cd39097, 2026-07-07 | `ride_<id>.telemetry.json` | `storagePolicy` becomes `"hybrid-private-primary"`; adds `publicExportRelativePath` and `integrity` (version 1 envelope) |
-| current code | `ride_<id>.telemetry.json` | `schemaVersion: 3`; sealed checkpoints with `sessionComplete: false`; timestamps in UTC with `Z`; adds `mockLocationDetected`, `incidents`, sample `hasFix` and `fixAgeMs`; version 2 envelope (`envelopeVersion: 2`, bound payload hash); `appliedBitrateMbps` is `null` on Android; non-finite numbers written as `null` |
+| schema 3 before signing | `ride_<id>.telemetry.json` | `schemaVersion: 3`; sealed checkpoints with `sessionComplete: false`; timestamps in UTC with `Z`; adds `mockLocationDetected`, `incidents`, sample `hasFix` and `fixAgeMs`; version 2 envelope (`envelopeVersion: 2`, bound payload hash); `appliedBitrateMbps` is `null` on Android; non-finite numbers written as `null` |
+| current code | `ride_<id>.telemetry.json` | Final saves on Android carry a version 3 envelope with `signature`; checkpoints, iOS saves and saves that could not be signed stay version 2 |
 
 Consequences:
 
 - **Pre-envelope files** (schema 1 and 2) load with status `unknown` ("UNVERIFIED"). Unlocking such a ride rewrites `lockedSegmentPaths` without adding an envelope.
 - **Version 1 envelopes** are verified with the legacy payload hash. Unlocking such a ride upgrades the envelope to version 2 after a full verification.
+- **Version 2 envelopes** verify as before; they are never flagged, except as `signature-removed` for a ride the recording install registered as signed. Readers older than version 3 report a version 3 file as `unsupported-integrity-version:3`.
 - **Schema 3 files** that are complete must carry an envelope; without one they are `modified`.
 - **Timestamps without an offset** (all files before schema 3) are read as local time. Schema 3 timestamps are UTC and shown in local time.
 - **Samples without `hasFix`** are treated as having no fix only at exactly (0, 0).
