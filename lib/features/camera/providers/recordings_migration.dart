@@ -33,6 +33,11 @@ const String recordingsMigrationStagingSuffix = '.migrating';
 /// recordings directory is writable (ignored by the migration).
 const String recordingsWriteProbeFileName = '.__motocam_write_probe.tmp';
 
+/// Ride JSONs larger than this are not decoded while planning a run: they
+/// move as they are, and their videos move as lone videos. Far above any
+/// ride file the app writes.
+const int recordingsMigrationMaxDecodedRideBytes = 64 * 1024 * 1024;
+
 /// Points in a file move where a test can simulate the process being killed
 /// (the hook throws).
 @visibleForTesting
@@ -141,6 +146,7 @@ class RecordingsMigrationSummary {
     required this.skipped,
     required this.remaining,
     required this.shouldNotify,
+    this.splitPaths = const <String>{},
   });
 
   /// How the run ended.
@@ -161,6 +167,12 @@ class RecordingsMigrationSummary {
   /// Whether the rider should see [message]: something moved, or a skip or
   /// a low-storage stop that no earlier run reported.
   final bool shouldNotify;
+
+  /// Normalised paths (source and destination) of every file of the rides
+  /// left split between a legacy root and the recordings root (a stop for
+  /// low storage, or a copy that failed, in the middle of a ride). Ride
+  /// History leaves them out; a later run finishes them.
+  final Set<String> splitPaths;
 
   /// Rider-facing summary.
   String get message {
@@ -235,17 +247,27 @@ class _PauseRequested implements Exception {
 /// the source deleted. The JSON is copied byte for byte, so its payload
 /// hash, its signature and its signed-ride registration stay valid.
 ///
-/// Before each copy, the free space of [recordingsRoot]'s volume
-/// ([freeBytes], `null` when unknown) must cover the file plus
-/// [reserveBytes]; otherwise the run stops with
+/// Before a ride is copied, the free space of [recordingsRoot]'s volume
+/// ([freeBytes], `null` when unknown) must cover the rest of the ride plus
+/// [reserveBytes]; otherwise no further file is copied in this run (rides
+/// that are only renamed still move) and the run ends with
 /// [RecordingsMigrationOutcome.lowStorage]. A destination with the same
 /// name counts as already moved only when its size (and for a JSON, its
 /// bytes) match; otherwise the whole ride stays in its legacy root.
 ///
-/// [shouldPause] is checked before each ride, before each file and between
-/// copy chunks: a copy in flight is abandoned (its staging file deleted,
-/// the source untouched) and the run returns
-/// [RecordingsMigrationOutcome.paused].
+/// The migration is one-shot. The first run records every file it plans to
+/// move (the snapshot) in the journal before moving anything; later runs
+/// move only files of that snapshot, so a file that appears in a legacy
+/// root afterwards is never moved into the private root. Once a run
+/// completes with no ride left split, the journal is marked done and every
+/// later run returns at once. A ride JSON larger than
+/// [recordingsMigrationMaxDecodedRideBytes] is not decoded: it moves as it
+/// is and its videos move as lone videos.
+///
+/// [shouldPause] is checked before each ride JSON is planned, before each
+/// ride, before each file and between copy chunks: a copy in flight is
+/// abandoned (its staging file deleted, the source untouched) and the run
+/// returns [RecordingsMigrationOutcome.paused].
 ///
 /// The journal in [workDirectory] (replaced atomically) names the ride in
 /// flight. The file system is the source of truth: every step can be
@@ -269,6 +291,8 @@ class RecordingsMigrator {
     RecordingsMigrationRename? renameFile,
     @visibleForTesting this.debugFault,
     @visibleForTesting this.copyChunkBytes = 1024 * 1024,
+    @visibleForTesting
+    this.maxDecodedRideBytes = recordingsMigrationMaxDecodedRideBytes,
   }) : legacyRoots = List<String>.unmodifiable(
          legacyRoots.where(
            (root) =>
@@ -323,9 +347,29 @@ class RecordingsMigrator {
   /// Size of each read during a copy.
   final int copyChunkBytes;
 
+  /// Ride JSONs larger than this are moved without being decoded.
+  final int maxDecodedRideBytes;
+
   /// Legacy roots where a rename failed during this run, so further files
   /// from them are copied.
   final Set<String> _copyRoots = <String>{};
+
+  /// Normalised paths of the files this migration may move, or `null`
+  /// before the first run has planned (see the class documentation).
+  Set<String>? _snapshot;
+
+  /// Whether listing a legacy root failed during this run's plan, so no
+  /// snapshot is recorded from it.
+  bool _listingFailed = false;
+
+  /// Whether a copy did not fit during this run: no further file is
+  /// copied, only renamed.
+  bool _stoppedForSpace = false;
+
+  /// The fewest bytes a ride that did not fit needed (without the
+  /// reserve), kept in the journal so a later run with no more room
+  /// returns before planning.
+  int? _lowStorageBytes;
 
   String get _sep => Platform.pathSeparator;
 
@@ -367,8 +411,21 @@ class RecordingsMigrator {
       return files;
     } catch (_) {
       // An unavailable root (for example an unmounted card) is skipped.
+      _listingFailed = true;
       return const <File>[];
     }
+  }
+
+  bool _inSnapshot(String path) {
+    final snapshot = _snapshot;
+    return snapshot == null ||
+        snapshot.contains(path_utils.normalizePath(path));
+  }
+
+  void _noteLowStorage(int bytes) {
+    _stoppedForSpace = true;
+    final known = _lowStorageBytes;
+    _lowStorageBytes = known == null || bytes < known ? bytes : known;
   }
 
   /// Runs the migration and reports progress through [onProgress].
@@ -381,14 +438,91 @@ class RecordingsMigrator {
       if (reportedSkips is List)
         for (final key in reportedSkips) key.toString(),
     };
+    if (journal['done'] == true) {
+      return const RecordingsMigrationSummary(
+        outcome: RecordingsMigrationOutcome.completed,
+        total: 0,
+        moved: 0,
+        skipped: <RecordingsMigrationSkip>[],
+        remaining: 0,
+        shouldNotify: false,
+      );
+    }
+    final snapshot = journal['snapshot'];
+    if (snapshot is List) {
+      _snapshot = <String>{
+        for (final path in snapshot) path_utils.normalizePath(path.toString()),
+      };
+    }
+    final split = journal['split'];
+    final knownSplitPaths = <String>{
+      if (split is List)
+        for (final path in split) path.toString(),
+    };
+    final neededBytes = journal['lowStorageBytes'];
+    if (_snapshot != null &&
+        neededBytes is int &&
+        !await _hasRoomFor(neededBytes)) {
+      // Still no room for the smallest ride that did not fit last time;
+      // everything else was handled then, so there is nothing to plan.
+      return RecordingsMigrationSummary(
+        outcome: RecordingsMigrationOutcome.lowStorage,
+        total: 0,
+        moved: 0,
+        skipped: const <RecordingsMigrationSkip>[],
+        remaining: 0,
+        shouldNotify: false,
+        splitPaths: Set<String>.unmodifiable(knownSplitPaths),
+      );
+    }
     await _discardStaging();
 
-    final units = await _plan(journal);
+    final List<_MigrationUnit> planned;
+    try {
+      planned = await _plan(journal);
+    } on _PauseRequested {
+      return const RecordingsMigrationSummary(
+        outcome: RecordingsMigrationOutcome.paused,
+        total: 0,
+        moved: 0,
+        skipped: <RecordingsMigrationSkip>[],
+        remaining: 0,
+        shouldNotify: false,
+      );
+    }
+    if (_snapshot == null && !_listingFailed) {
+      // Recorded before anything moves: only these files ever will.
+      _snapshot = <String>{
+        for (final unit in planned)
+          for (final path in unit.files) path_utils.normalizePath(path),
+      };
+      await _saveJournal(
+        ride: journal['ride'],
+        file: journal['file'],
+        reported: reported,
+      );
+    }
+
+    // Skips reported by an earlier run are not counted or shown again.
+    final skipped = <RecordingsMigrationSkip>[];
+    final units = <_MigrationUnit>[];
+    for (final unit in planned) {
+      final presetReason = unit.skipReason;
+      final skip = presetReason == null
+          ? null
+          : RecordingsMigrationSkip(name: unit.name, reason: presetReason);
+      if (skip != null && reported.contains(skip.reportKey)) {
+        skipped.add(skip);
+      } else {
+        units.add(unit);
+      }
+    }
     final total = units.length;
     var done = 0;
     var moved = 0;
-    final skipped = <RecordingsMigrationSkip>[];
     var outcome = RecordingsMigrationOutcome.completed;
+    final splitPaths = <String>{};
+    _lowStorageBytes = null;
     onProgress?.call(RecordingsMigrationProgress(done: 0, total: total));
 
     for (final unit in units) {
@@ -405,15 +539,23 @@ class RecordingsMigrator {
         onProgress?.call(RecordingsMigrationProgress(done: done, total: total));
         continue;
       }
+      if (_stoppedForSpace && _copyRoots.contains(unit.root)) {
+        // Left where it is; rides that are only renamed still move.
+        continue;
+      }
 
       final result = await _moveUnit(unit, reported, onProgress, done, total);
       if (result == _FileResult.paused) {
         outcome = RecordingsMigrationOutcome.paused;
         break;
       }
+      if (result != _FileResult.moved &&
+          result != _FileResult.vanished &&
+          await _isSplit(unit)) {
+        splitPaths.addAll(_unitPaths(unit));
+      }
       if (result == _FileResult.lowStorage) {
-        outcome = RecordingsMigrationOutcome.lowStorage;
-        break;
+        continue;
       }
       if (result == _FileResult.collision) {
         skipped.add(
@@ -435,6 +577,9 @@ class RecordingsMigrator {
       done++;
       onProgress?.call(RecordingsMigrationProgress(done: done, total: total));
     }
+    if (outcome == RecordingsMigrationOutcome.completed && _stoppedForSpace) {
+      outcome = RecordingsMigrationOutcome.lowStorage;
+    }
 
     if (outcome == RecordingsMigrationOutcome.completed) {
       await _removeEmptiedLegacyRoots();
@@ -447,14 +592,15 @@ class RecordingsMigrator {
     final shouldNotify =
         moved > 0 || newlyReported.difference(reported).isNotEmpty;
     // A paused run keeps the journal naming the ride in flight.
-    if (outcome != RecordingsMigrationOutcome.paused &&
-        (total > 0 || reported.isNotEmpty)) {
-      await _writeJournal(<String, dynamic>{
-        'version': 1,
-        'ride': null,
-        'file': null,
-        'reportedSkips': newlyReported.toList()..sort(),
-      });
+    if (outcome != RecordingsMigrationOutcome.paused) {
+      await _saveJournal(
+        reported: newlyReported,
+        split: splitPaths,
+        done:
+            outcome == RecordingsMigrationOutcome.completed &&
+            splitPaths.isEmpty &&
+            _snapshot != null,
+      );
     }
     return RecordingsMigrationSummary(
       outcome: outcome,
@@ -463,11 +609,37 @@ class RecordingsMigrator {
       skipped: List<RecordingsMigrationSkip>.unmodifiable(skipped),
       remaining: total - done,
       shouldNotify: shouldNotify,
+      splitPaths: Set<String>.unmodifiable(splitPaths),
     );
   }
 
+  /// Normalised source and destination paths of every file of [unit].
+  Set<String> _unitPaths(_MigrationUnit unit) => <String>{
+    for (final source in unit.files) ...<String>{
+      path_utils.normalizePath(source),
+      path_utils.normalizePath(_destinationFor(source)),
+    },
+  };
+
+  /// Whether some files of [unit] are already in the recordings root while
+  /// others are still in the legacy root.
+  Future<bool> _isSplit(_MigrationUnit unit) async {
+    var inRoot = false;
+    var inLegacyRoot = false;
+    for (final source in unit.files) {
+      if (await File(source).exists()) {
+        inLegacyRoot = true;
+      } else if (await File(_destinationFor(source)).exists()) {
+        inRoot = true;
+      }
+    }
+    return inRoot && inLegacyRoot;
+  }
+
   /// Lists the units: the journal's ride in flight first, then every ride
-  /// JSON in each legacy root, then the videos no ride references.
+  /// JSON in each legacy root, then the videos no ride references. Only
+  /// files of the snapshot are listed, once there is one. Throws
+  /// [_PauseRequested] when [shouldPause] asks for it between rides.
   Future<List<_MigrationUnit>> _plan(Map<String, dynamic> journal) async {
     final units = <_MigrationUnit>[];
     final claimed = <String>{};
@@ -481,8 +653,11 @@ class RecordingsMigrator {
       final files = await _listFiles(root);
       final rideUnits = <_MigrationUnit>[];
       for (final file in files) {
-        if (!_isRideJson(file.path)) {
+        if (!_isRideJson(file.path) || !_inSnapshot(file.path)) {
           continue;
+        }
+        if (shouldPause()) {
+          throw const _PauseRequested();
         }
         rideUnits.add(await _planRide(root, file, claimed));
       }
@@ -491,6 +666,7 @@ class RecordingsMigrator {
         final key = path_utils.normalizePath(file.path);
         if (ride_codec.isRideVideoFilePath(file.path) &&
             !isIgnoredFile(file.path) &&
+            _inSnapshot(file.path) &&
             claimed.add(key)) {
           units.add(
             _MigrationUnit(
@@ -530,9 +706,12 @@ class RecordingsMigrator {
     // recordings root (a ride interrupted half-way), or must move anyway.
     var keepsRide = false;
     try {
-      final json = await ride_codec.readRideFileJson(telemetryFile);
+      final json = await telemetryFile.length() > maxDecodedRideBytes
+          ? null
+          : await ride_codec.readRideFileJson(telemetryFile);
       if (json == null) {
-        // Unreadable JSON: moved as it is (the reader skips it either way).
+        // Unreadable or too large to decode here: moved as it is, and its
+        // videos move as lone videos.
         keepsRide = true;
       } else {
         final lockedPaths = json['lockedSegmentPaths'];
@@ -560,6 +739,7 @@ class RecordingsMigrator {
               continue;
             }
             if (!path_utils.isPathInsideDirectory(path, root) ||
+                !_inSnapshot(path) ||
                 !await File(path).exists()) {
               continue;
             }
@@ -589,7 +769,7 @@ class RecordingsMigrator {
     int total,
   ) async {
     // Collisions are checked for the whole ride before any file moves.
-    var bytesToMove = 0;
+    final sizes = <String, int>{};
     for (final source in unit.files) {
       final sourceFile = File(source);
       if (!await sourceFile.exists()) {
@@ -604,18 +784,16 @@ class RecordingsMigrator {
           )) {
         return _FileResult.collision;
       }
-      bytesToMove += await sourceFile.length();
+      sizes[source] = await sourceFile.length();
     }
-    if (_copyRoots.contains(unit.root) && !await _hasRoomFor(bytesToMove)) {
+    final bytesToMove = sizes.values.fold<int>(0, (sum, size) => sum + size);
+    if (_copyRoots.contains(unit.root) &&
+        (_stoppedForSpace || !await _hasRoomFor(bytesToMove))) {
+      _noteLowStorage(bytesToMove);
       return _FileResult.lowStorage;
     }
 
-    final inFlightPaths = <String>{
-      for (final source in unit.files) ...<String>{
-        path_utils.normalizePath(source),
-        path_utils.normalizePath(_destinationFor(source)),
-      },
-    };
+    final inFlightPaths = _unitPaths(unit);
     onProgress?.call(
       RecordingsMigrationProgress(
         done: done,
@@ -631,17 +809,16 @@ class RecordingsMigrator {
     };
 
     var anyMoved = false;
+    var bytesLeft = bytesToMove;
     for (final source in unit.files) {
       if (shouldPause()) {
         return _FileResult.paused;
       }
-      await _writeJournal(<String, dynamic>{
-        'version': 1,
-        'ride': ride,
-        'file': source,
-        'reportedSkips': reported.toList()..sort(),
-      });
-      final result = await _moveFile(unit.root, source);
+      await _saveJournal(ride: ride, file: source, reported: reported);
+      // The free-space check covers the rest of the ride, so a ride whose
+      // first rename fails is not copied half-way.
+      final result = await _moveFile(unit.root, source, bytesLeft);
+      bytesLeft -= sizes[source] ?? 0;
       switch (result) {
         case _FileResult.moved:
           anyMoved = true;
@@ -654,12 +831,7 @@ class RecordingsMigrator {
           return result;
       }
     }
-    await _writeJournal(<String, dynamic>{
-      'version': 1,
-      'ride': null,
-      'file': null,
-      'reportedSkips': reported.toList()..sort(),
-    });
+    await _saveJournal(reported: reported);
     return anyMoved || await _allInRoot(unit)
         ? _FileResult.moved
         : _FileResult.vanished;
@@ -675,8 +847,14 @@ class RecordingsMigrator {
   }
 
   /// Moves one file. Never deletes [source] unless a copy of the same size
-  /// (for a JSON, the same bytes) is in the recordings root.
-  Future<_FileResult> _moveFile(String root, String source) async {
+  /// (for a JSON, the same bytes) is in the recordings root. Before a copy,
+  /// the free space must cover [bytesLeft], the bytes the ride still has to
+  /// move from this file on.
+  Future<_FileResult> _moveFile(
+    String root,
+    String source,
+    int bytesLeft,
+  ) async {
     final sourceFile = File(source);
     final destinationPath = _destinationFor(source);
     final destination = File(destinationPath);
@@ -716,7 +894,9 @@ class RecordingsMigrator {
     } on FileSystemException {
       return _FileResult.failed;
     }
-    if (!await _hasRoomFor(size)) {
+    final needed = bytesLeft > size ? bytesLeft : size;
+    if (_stoppedForSpace || !await _hasRoomFor(needed)) {
+      _noteLowStorage(needed);
       return _FileResult.lowStorage;
     }
 
@@ -896,6 +1076,31 @@ class RecordingsMigrator {
     }
   }
 
+  /// Writes the journal: the ride and file in flight (if any), the skips
+  /// already reported, the snapshot, and after a run the split rides, the
+  /// low-storage need and whether the migration is done. Every field but
+  /// `version` is optional for readers.
+  Future<void> _saveJournal({
+    Object? ride,
+    Object? file,
+    required Iterable<String> reported,
+    Set<String> split = const <String>{},
+    bool done = false,
+  }) {
+    final snapshot = _snapshot;
+    final lowStorageBytes = _lowStorageBytes;
+    return _writeJournal(<String, dynamic>{
+      'version': 1,
+      'ride': ride,
+      'file': file,
+      'reportedSkips': reported.toList()..sort(),
+      if (snapshot != null) 'snapshot': snapshot.toList()..sort(),
+      if (split.isNotEmpty) 'split': split.toList()..sort(),
+      'lowStorageBytes': ?lowStorageBytes,
+      if (done) 'done': true,
+    });
+  }
+
   Future<void> _writeJournal(Map<String, dynamic> journal) async {
     await Directory(workDirectory).create(recursive: true);
     final pending = File('$_journalPath.new');
@@ -939,14 +1144,15 @@ class RecordingsMigrationController extends ChangeNotifier {
   RecordingsMigrationProgress? get progress => _progress;
 
   /// Normalised paths of the ride being moved while a run is running or
-  /// paused in the middle of it; empty otherwise. Ride History leaves
-  /// these files out so a half-moved ride is not shown.
+  /// paused in the middle of it, and after a finished run those of the
+  /// rides it left split ([RecordingsMigrationSummary.splitPaths]). Ride
+  /// History leaves these files out so a half-moved ride is not shown.
   Set<String> get inFlightPaths {
     final last = _lastSummary;
     if (_running == null &&
         last != null &&
         last.outcome != RecordingsMigrationOutcome.paused) {
-      return const <String>{};
+      return last.splitPaths;
     }
     return _progress?.inFlightPaths ?? const <String>{};
   }

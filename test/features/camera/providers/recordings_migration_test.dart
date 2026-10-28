@@ -326,10 +326,12 @@ void main() {
         '1 ride left in the old folder (no video files are left).',
       );
 
-      // Reported once only.
+      // Reported once only: the migration is done and does not run again.
       final again = await migrator().run();
-      expect(again.skipped, hasLength(1));
+      expect(again.total, 0);
+      expect(again.skipped, isEmpty);
       expect(again.shouldNotify, isFalse);
+      expect(await ride.exists(), isTrue);
     });
 
     test('a locked ride without videos moves', () async {
@@ -452,6 +454,207 @@ void main() {
       ).run();
       expect(summary.moved, 1);
     });
+
+    test('a ride whose first rename fails is checked as a whole before any '
+        'copy', () async {
+      // Each video fits on its own, the ride does not.
+      await writeRide(external, 'whole', videoBytes: 4096);
+      final expected = contents(external);
+
+      final summary = await migrator(freeBytes: (_) async => 6000).run();
+
+      expect(summary.outcome, RecordingsMigrationOutcome.lowStorage);
+      expect(summary.moved, 0);
+      expect(summary.splitPaths, isEmpty);
+      expect(contents(external), expected);
+      expect(namesIn(root), isEmpty);
+    });
+
+    test('a ride that does not fit leaves the other roots\' renames '
+        'running, and a later run waits for room', () async {
+      await writeRide(external, 'big', videoBytes: 4096);
+      final small = await writeRide(cache, 'small');
+      final expectedBig = contents(external);
+      var free = 5000;
+
+      final first = await migrator(
+        freeBytes: (_) async => free,
+        reserveBytes: 2000,
+      ).run();
+
+      expect(first.outcome, RecordingsMigrationOutcome.lowStorage);
+      expect(first.moved, 1);
+      expect(first.remaining, 1);
+      expect(await small.exists(), isFalse);
+      expect(await File('$root$sep${name(small.path)}').exists(), isTrue);
+      expect(contents(external), expectedBig);
+
+      // Still no room: returns before planning, and says nothing new.
+      final second = await migrator(
+        freeBytes: (_) async => free,
+        reserveBytes: 2000,
+      ).run();
+      expect(second.outcome, RecordingsMigrationOutcome.lowStorage);
+      expect(second.total, 0);
+      expect(second.shouldNotify, isFalse);
+      expect(contents(external), expectedBig);
+
+      free = 1 << 30;
+      final third = await migrator(
+        freeBytes: (_) async => free,
+        reserveBytes: 2000,
+      ).run();
+      expect(third.outcome, RecordingsMigrationOutcome.completed);
+      expect(third.moved, 1);
+      for (final entry in expectedBig.entries) {
+        expect(contents(root)[entry.key], entry.value);
+      }
+    });
+  });
+
+  group('one-shot', () {
+    Map<String, dynamic> journal() =>
+        jsonDecode(
+              File(
+                '$work$sep$recordingsMigrationJournalFileName',
+              ).readAsStringSync(),
+            )
+            as Map<String, dynamic>;
+
+    test('a file placed in a legacy root after a completed run is never '
+        'moved', () async {
+      await writeRide(documents, 'first');
+      final first = await migrator().run();
+      expect(first.moved, 1);
+      expect(journal()['done'], isTrue);
+      final before = contents(root);
+
+      await Directory(external).create(recursive: true);
+      final late = await writeRide(external, 'late');
+      await File('$external${sep}planted.mp4').writeAsString('planted');
+      final lateFiles = contents(external);
+
+      final second = await migrator().run();
+      expect(second.outcome, RecordingsMigrationOutcome.completed);
+      expect(second.total, 0);
+      expect(second.moved, 0);
+      expect(second.shouldNotify, isFalse);
+      expect(contents(root), before);
+      expect(contents(external), lateFiles);
+      expect(await late.exists(), isTrue);
+    });
+
+    test('a fresh install is done at once', () async {
+      for (final legacy in <String>[external, documents, cache]) {
+        await Directory(legacy).delete(recursive: true);
+      }
+      final first = await migrator().run();
+      expect(first.outcome, RecordingsMigrationOutcome.completed);
+      expect(journal()['done'], isTrue);
+
+      await Directory(documents).create(recursive: true);
+      await writeRide(documents, 'later');
+      final second = await migrator().run();
+      expect(second.total, 0);
+      expect(namesIn(root), isEmpty);
+    });
+
+    test('after a low-storage stop only files of the snapshot move', () async {
+      await writeRide(external, 'snap', videoBytes: 4096);
+      final expected = contents(external);
+      final stopped = await migrator(freeBytes: (_) async => 100).run();
+      expect(stopped.outcome, RecordingsMigrationOutcome.lowStorage);
+      expect(journal()['done'], isNull);
+      expect(journal()['snapshot'], hasLength(expected.length));
+
+      // Added later: a lone video and a file named like the ride's
+      // evicted segment.
+      await File('$external${sep}added.mp4').writeAsString('added');
+      await File('$external${sep}seg_snap_gone.mp4').writeAsString('planted');
+
+      final resumed = await migrator().run();
+      expect(resumed.outcome, RecordingsMigrationOutcome.completed);
+      expect(resumed.moved, 1);
+      expect(contents(root), expected);
+      expect(namesIn(external), <String>['added.mp4', 'seg_snap_gone.mp4']);
+      expect(journal()['done'], isTrue);
+    });
+
+    test('a moved ride reads the same with a file placed at its old '
+        'path', () async {
+      final original = await writeRide(external, 'old');
+      final context = signerContext(
+        <String>{'old'},
+        <String>{'seg_old_1.mp4', 'seg_old_2.mp4'},
+      );
+      await migrator().run();
+      final moved = File('$root$sep${name(original.path)}');
+      final before = await describe(moved, context);
+      expect(before['missing'], <String>['seg_old_gone.mp4']);
+      expect(before['status'], RideIntegrityStatus.verified.name);
+
+      await Directory(external).create(recursive: true);
+      await File('$external${sep}seg_old_gone.mp4').writeAsString('planted');
+      expect(await describe(moved, context), before);
+    });
+
+    test('a ride JSON too large to decode moves as it is, its videos as '
+        'lone videos', () async {
+      await writeRide(documents, 'huge');
+      final expected = contents(documents);
+      final summary = await RecordingsMigrator(
+        recordingsRoot: root,
+        legacyRoots: <String>[documents],
+        workDirectory: work,
+        freeBytes: (_) async => null,
+        reserveBytes: 0,
+        maxDecodedRideBytes: 16,
+      ).run();
+      expect(summary.outcome, RecordingsMigrationOutcome.completed);
+      expect(summary.total, 3);
+      expect(summary.moved, 3);
+      expect(contents(root), expected);
+    });
+
+    test('a ride split by a failed copy is hidden, and finished by the next '
+        'run', () async {
+      final ride = await writeRide(external, 'split');
+      final expected = contents(external);
+      final controller = RecordingsMigrationController();
+      controller.start(
+        migrator(
+          fault: (point, path) {
+            // Truncates the second video's staging copy.
+            if (point == RecordingsMigrationFault.afterCopyBeforeRename &&
+                path.contains('seg_split_2.mp4')) {
+              final file = File(path);
+              final bytes = file.readAsBytesSync();
+              file.writeAsBytesSync(bytes.sublist(0, bytes.length - 1));
+            }
+          },
+        ),
+      );
+      await controller.whenIdle();
+      final summary = controller.lastSummary!;
+      expect(
+        summary.skipped.single.reason,
+        RecordingsMigrationSkipReason.copyFailed,
+      );
+      expect(namesIn(root), <String>['seg_split_1.mp4']);
+      expect(
+        controller.inFlightPaths,
+        containsAll(<String>[
+          path_utils.normalizePath(ride.path),
+          path_utils.normalizePath('$root${sep}seg_split_1.mp4'),
+        ]),
+      );
+      expect(journal()['done'], isNull);
+
+      final next = await migrator().run();
+      expect(next.outcome, RecordingsMigrationOutcome.completed);
+      expect(contents(root), expected);
+      expect(journal()['done'], isTrue);
+    });
   });
 
   group('pause and resume', () {
@@ -501,8 +704,11 @@ void main() {
       final expected = contents(documents);
       final summary = await migrator(shouldPause: () => true).run();
       expect(summary.outcome, RecordingsMigrationOutcome.paused);
-      expect(summary.remaining, 1);
+      // Paused while planning, before any ride JSON was read.
+      expect(summary.total, 0);
       expect(contents(documents), expected);
+      final resumed = await migrator().run();
+      expect(resumed.moved, 1);
     });
   });
 
