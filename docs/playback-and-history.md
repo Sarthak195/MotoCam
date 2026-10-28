@@ -11,6 +11,7 @@ This document covers how MotoCam finds recorded rides on disk, lists them in Rid
 - [Effective timeline synthesis](#effective-timeline-synthesis)
 - [Missing segments and the seekbar track](#missing-segments-and-the-seekbar-track)
 - [Telemetry sync during playback](#telemetry-sync-during-playback)
+- [Screen structure and rebuild scope](#screen-structure-and-rebuild-scope)
 - [Route map](#route-map)
 - [Ride actions and their effect on disk](#ride-actions-and-their-effect-on-disk)
 
@@ -23,8 +24,18 @@ Key files:
 | [ride_index.dart](../lib/features/history/models/ride_index.dart) | `RideIndex`, `RideIndexEntry`, `SegmentHashEntry`, `RideFileStamp`, `RideIndexStore` |
 | [segment_verifier.dart](../lib/features/history/models/segment_verifier.dart) | `SegmentVerifier`, `SegmentCheckToken`, `orderSegmentsForCheck`, `RideVideoCheck`, `videoCheckFromIndex`, `describeVideoCheck` |
 | [ride_record.dart](../lib/features/history/models/ride_record.dart) | `RideRecord`, `RideIntegrityStatus`, `RideIntegrityReport`, `RideIncident`, `RideSegmentTimelineEntry` |
-| [ride_playback_screen.dart](../lib/features/history/ride_playback_screen.dart) | `RidePlaybackScreen` (state and playback logic are in the private `_RidePlaybackScreenState`; the speed-graph painter is the private `_SpeedGraphPainter`) |
-| [playback_timeline.dart](../lib/features/history/widgets/playback_timeline.dart) | Pure timeline functions (`buildEffectiveTimeline`, `locateSegment`, `uncoveredRanges`, marker and integrity helpers), `PlaybackRange`, `PlaybackMarker`, `SegmentSeekTarget` |
+| [ride_playback_screen.dart](../lib/features/history/ride_playback_screen.dart) | `RidePlaybackScreen` (orchestration only: the controller lifecycle, segment loading, seeking, scrubbing and the video-check wiring live in the private `_RidePlaybackScreenState`, whose `build()` is a `Scaffold` around `RidePlaybackBody`) |
+| [playback_timeline.dart](../lib/features/history/widgets/playback_timeline.dart) | Pure timeline functions (`buildEffectiveTimeline`, `locateSegment`, `uncoveredRanges`, `clampDuration`, `globalPlaybackPosition`, `timelineMarkers`, `nearestSampleIndex`, `speedGraphPageIndex`, `noPlayableVideoMessage`, marker and integrity helpers), `PlaybackRange`, `PlaybackMarker`, `PlaybackTimelineMarks`, `SegmentSeekTarget` |
+| [playback_position.dart](../lib/features/history/widgets/playback_position.dart) | `PlaybackPosition` (the immutable position and playing flag the screen publishes) and `PlaybackSampleListenable` (the telemetry sample at that position) |
+| [ride_playback_body.dart](../lib/features/history/widgets/ride_playback_body.dart) | `RidePlaybackBody`: the whole playback body, built from values, callbacks and a `ValueListenable<PlaybackPosition>` |
+| [playback_video_area.dart](../lib/features/history/widgets/playback_video_area.dart) | `PlaybackVideoSurface` (the only widget that holds the `VideoPlayerController`), `PlaybackVideoArea` (video, overlay, graph, fullscreen button) and `PlaybackErrorView` |
+| [playback_telemetry_overlay.dart](../lib/features/history/widgets/playback_telemetry_overlay.dart) | `PlaybackTelemetryOverlay` |
+| [playback_speed_graph.dart](../lib/features/history/widgets/playback_speed_graph.dart) | `PlaybackSpeedGraph` (gestures, the curve page and the cursor layer) |
+| [speed_graph_painter.dart](../lib/features/history/widgets/speed_graph_painter.dart) | `SpeedGraphPagePainter` (the curve) and `SpeedGraphCursorPainter` (the focus dot) |
+| [playback_seek_bar.dart](../lib/features/history/widgets/playback_seek_bar.dart) | `PlaybackSeekBar` (slider and time labels) |
+| [playback_legend.dart](../lib/features/history/widgets/playback_legend.dart) | `PlaybackLegend` |
+| [playback_controls.dart](../lib/features/history/widgets/playback_controls.dart) | `PlaybackControls` (transport buttons and the segment label) |
+| [route_map_panel.dart](../lib/features/history/widgets/route_map_panel.dart) | `RouteMapPanel` (the Route Map card) |
 | [playback_seekbar_track_shape.dart](../lib/features/history/widgets/playback_seekbar_track_shape.dart) | `PlaybackSeekbarTrackShape` and the seekbar colour constants |
 | [route_map_view.dart](../lib/features/history/widgets/route_map_view.dart) | `RouteMapView` |
 | [route_points.dart](../lib/features/map/route_points.dart) | `latLngFromSample`, `samplesWithGpsFix`, `routePointsFromSamples`, `downsampleRoute` |
@@ -193,8 +204,8 @@ Only one controller is active. The next segment is not preloaded.
 
 ### Position model and auto-advance
 
-- Global position: `clamp(offset[active] + controller.value.position, 0, T)`. When there is no initialized controller, `_lastKnownGlobalPosition` is used.
-- `_onControllerTick` runs on every `VideoPlayerValue` notification (the plugin updates the position every 100 ms while playing).
+- Global position: `globalPlaybackPosition`, `clamp(offset[active] + controller.value.position, 0, T)`. When there is no initialized controller, `_lastKnownGlobalPosition` is used.
+- `_onControllerTick` runs on every `VideoPlayerValue` notification (the plugin updates the position every 100 ms while playing). It first calls `_publishPosition()` (see [Screen structure and rebuild scope](#screen-structure-and-rebuild-scope)).
 - When the value reports an error (`hasError`), `_handleRuntimeError` marks the segment as failed (red on the seekbar) and shows "Segment N could not be played. Skipping to the next segment." (4 s), then advances. If no playable segment follows, it shows "Playback ended: segment N could not be played." instead. It handles each controller once.
 - When `isCompleted` is true, a next playable segment exists and no segment load is running, the position is set to the end of the active segment and `_advanceToNextSegment()` runs.
 - `_advanceToNextSegment` sets `_isSwitchingSegment`, tries `_loadSegment(autoPlay: true)` on each following segment that has not failed, and returns on the first success. Segments that fail to load are marked failed and skipped. If nothing loads, playback is paused and "Playback ended: the remaining segments could not be opened." is shown.
@@ -216,12 +227,12 @@ Segment loads are serialized. A seek requested while an auto-advance or a cross-
 
 | Input | Action |
 |---|---|
-| Slider drag | `onChangeStart` → `_beginScrub` (pauses, enters scrub mode); `onChanged` → `_updateScrubPreview`; `onChangeEnd` → `_commitSeekbarValue` → `_commitScrub` → `_seekGlobal` (resumes if it was playing) |
+| Slider drag | `onChangeStart` → `_beginScrub` (pauses, enters scrub mode); `onChanged` → `_updateScrubPreview` (publishes the preview position, no `setState`); `onChangeEnd` → `_commitSeekbarValue` → `_commitScrub` → `_seekGlobal` (resumes if it was playing) |
 | Slider release near a marker | `_commitSeekbarValue` snaps to the nearest incident or lock marker within 18 px, so a marker tap issues one seek, and shows "Jumped to incident/locked marker at HH:MM:SS" (1200 ms) |
-| Speed graph tap | On tap-up, seeks to `position + ((dx - w/2) / w) * W` (`speedGraphTapTarget`; W is the graph window, see below) |
+| Speed graph tap | On tap-up (`_seekFromGraph`), seeks to `position + ((dx - w/2) / w) * W` (`speedGraphTapTarget`; W is the graph window, see below) |
 | Speed graph horizontal drag | The position and finger x at drag start are the anchor; the target is `anchor + ((dx - startDx) / w) * W`, clamped to `[0, T]` (`speedGraphDragTarget`). Scrubs like the slider |
-| Replay 10 / Forward 10 | `_seekGlobal(position ∓ 10 s)` |
-| Play / pause | `controller.play()` / `pause()` on the active controller |
+| Replay 10 / Forward 10 | `_seekBy`: `_seekGlobal(displayed position ∓ 10 s)` |
+| Play / pause | `_togglePlay`: `controller.play()` / `pause()` on the active controller |
 | Tap on the video or the top-right button | Toggles fullscreen: only the video, the button and the hint "Tap video to show controls" remain |
 
 A scrub may start while a segment loads; the seek it commits is queued by `_seekGlobal`. Below the controls, "Segment i/n" shows the active playlist position.
@@ -262,7 +273,7 @@ Quarantined paths are not shown: they are neither in the playlist nor in the tim
 
 ## Telemetry sync during playback
 
-On each rebuild of the `ValueListenableBuilder<VideoPlayerValue>`, the screen takes `position` (the scrub preview while scrubbing, otherwise the global position) and calls `_ride.sampleForPosition(position)`:
+On every position change, `PlaybackSampleListenable` takes the published position (the scrub preview while scrubbing, otherwise the global position) and calls `_ride.sampleForPosition(position)`; the stats overlay and the route map's marker listen to it, so the sample is looked up once per change:
 
 - No samples: `TelemetryData.empty()`. Before the first or after the last sample: that sample.
 - Otherwise a binary search on `elapsedMs`, then linear interpolation of latitude, longitude, speed, bearing, accelerationG and distanceKm between the two neighbours. Bearing is interpolated along the shortest arc (`RideRecord.interpolateBearing`), so 350° to 10° passes through 0°.
@@ -273,7 +284,7 @@ The interpolated sample feeds three views, all shown only when the ride has samp
 | View | Details |
 |---|---|
 | Stats overlay | `Speed` (km/h, 1 dp), `Dist` (km, 2 dp), `G` (2 dp), `GPS` (5 dp) |
-| Speed graph | 56 px strip; window `W = max(10 000, min(T, 60 000))` ms (`speedGraphWindowMs`) centred on the current time; only samples inside the window are walked; cyan line and dots, orange focus dot on the sample nearest the centre, short orange (lock) and red (incident) ticks |
+| Speed graph | 56 px strip; window `W = max(10 000, min(T, 60 000))` ms (`speedGraphWindowMs`) centred on the current time; cyan line and dots, orange focus dot on the sample nearest the centre (`nearestSampleIndex`), short orange (lock) and red (incident) ticks. Drawn as a static curve page plus a cursor, see below |
 | Route map | Current-position marker, see [Route map](#route-map) |
 
 Timeline markers are computed at initialization:
@@ -283,7 +294,29 @@ Timeline markers are computed at initialization:
 
 The seekbar is a 34 px `Slider` whose track shape paints the ranges and markers (see [above](#missing-segments-and-the-seekbar-track)). Markers appear on the seekbar, as speed-graph ticks and in the legend row.
 
-The whole playback body is rebuilt by one `ValueListenableBuilder` on every controller notification.
+## Screen structure and rebuild scope
+
+`_RidePlaybackScreenState` is orchestration: it owns the `VideoPlayerController` lifecycle, the playlist, segment loading, seeking, scrubbing and the video-check wiring, and its `build()` is a `Scaffold` whose body is the spinner, a `PlaybackErrorView`, or a `RidePlaybackBody`. Everything on screen below that is a widget under `lib/features/history/widgets/` that takes explicit values, callbacks and a `ValueListenable<PlaybackPosition>`, never the controller or the `State`. Only `PlaybackVideoSurface` (which draws `VideoPlayer` at the controller's aspect ratio) holds the controller; the screen passes it to `RidePlaybackBody` as a ready-made `video` widget.
+
+**Publishing the position.** The screen owns a `ValueNotifier<PlaybackPosition>` (position and `isPlaying`). `_publishPosition()` sets it to the scrub preview while the rider drags and the global position otherwise, and is called from `_onControllerTick` (every plugin notification), `_beginScrub`, `_updateScrubPreview`, `_commitScrub`, after a segment load swaps the controller, and when initialization finishes. A value equal to the last one notifies nobody, so a paused video with no scrub costs nothing. The earlier `ValueListenableBuilder<VideoPlayerValue>` over the whole body, and the `setState` on every scrub move, are gone; `setState` is left for changes of structure (loading, a failed segment, new ranges, the fullscreen and map toggles, a new segment).
+
+**What listens to the position** (each in its own `ValueListenableBuilder`, with a repaint boundary where it paints):
+
+| Widget | Rebuilds per position change |
+|---|---|
+| `PlaybackSeekBar` | The `Slider` (value) and the elapsed-time label. The track shape, total time and ranges are built with the widget |
+| `PlaybackTelemetryOverlay` | The four stats (through `PlaybackSampleListenable`) |
+| `PlaybackSpeedGraph` | The cursor layer (`SpeedGraphCursorPainter`) and the offset of the curve page; the curve itself only on a page change |
+| `RouteMapView` | Only its current-position `MarkerLayer`, through `currentSampleListenable` |
+| `PlaybackControls` | The play/pause button (the `isPlaying` flag); the Back and Forward buttons and the segment label do not listen |
+
+`RidePlaybackBody`, `RouteMapPanel`, `PlaybackLegend` and `RouteMapView.build` do not rerun on a tick.
+
+**Speed graph.** The strip shows a window centred on the position, so its curve scrolls. To keep that from repainting the curve per tick, `PlaybackSpeedGraph` paints the curve once for a page three windows wide (`SpeedGraphPagePainter`, from `(i - 1) * W` for page `i = speedGraphPageIndex(position, W)`, so the window around any position in page `i` lies inside it) behind a `RepaintBoundary`, and slides it with a `Transform.translate` by `w/2 - (position - pageStart) * w / W` so the current time stays at the centre. The cached page is the same widget instance until the position enters another page, or the samples, markers, speed scale, window or strip width change. The orange focus dot is a second painter (`SpeedGraphCursorPainter`) in its own repaint boundary, so a tick repaints only that dot. The page includes one sample either side of its range so the line runs to the strip's edges, which also means the line now continues to the strip edge where it used to stop at the last sample inside the window.
+
+**Route map.** `RouteMapPanel` builds the map only while expanded (an `AnimatedSize` holding either the map or an empty box), so a collapsed map is neither built nor laid out and fetches no tiles. Its `mapBuilder` (default `RouteMapView`) is replaceable for tests.
+
+**Pure logic** stays in [playback_timeline.dart](../lib/features/history/widgets/playback_timeline.dart): the timeline, offsets, missing ranges, `locateSegment`, markers (`timelineMarkers`), the clamp and global-position rules, the no-playable-video message, the nearest-sample and speed-graph page rules. They are covered by `test/features/history/playback/playback_timeline_test.dart`. `ride_playback_body_test.dart` pumps `RidePlaybackBody` with a `ValueNotifier` position and checks the rebuild scope with test-visible paint counters (`SpeedGraphPagePainter.paintCount`, `SpeedGraphCursorPainter.paintCount`), a counting map stub and widget-instance identity.
 
 ## Route map
 
@@ -291,7 +324,7 @@ The "Route Map" card sits below the video when the ride has samples and the scre
 
 The first time the rider expands the map, a dialog "Show online map?" explains that the map downloads tiles from OpenStreetMap (`tile.openstreetmap.org`), which sends the ride's area and the device's IP address to the OpenStreetMap Foundation, and that tiles are cached on the device. "Not now" leaves the map collapsed. "Show map" stores bool `ride_playback_online_map_consent` and expands the map. A stored `ride_playback_show_route_map` is honoured only once consent is stored.
 
-The map height is `clamp(0.14 × screen height, 90, 130)`. `RouteMapView` receives `_ride.samples` and the interpolated sample as `currentSample`.
+The map height is `clamp(0.14 × screen height, 90, 130)`. `RouteMapPanel` hands `RouteMapView` the ride's samples and the sample at the playback position as a `ValueListenable` (`currentSampleListenable`).
 
 ### Tile source (`MapSourceConfig`)
 
@@ -312,16 +345,16 @@ The map height is `clamp(0.14 × screen height, 90, 130)`. `RouteMapView` receiv
 
 ### `RouteMapView`
 
-`RouteMapView` is a `StatefulWidget`. It computes the route once per `telemetryData` list, so rebuilds that only move `currentSample` stay cheap:
+`RouteMapView` is a `StatefulWidget`. It computes the route once per `telemetryData` list, and the current-position marker follows `currentSampleListenable` (or the fixed `currentSample` when none is given) through its own `ValueListenableBuilder`, so a playback tick rebuilds that one marker layer and not the map:
 
 1. `routePointsFromSamples` ([route_points.dart](../lib/features/map/route_points.dart)) keeps the samples that carry a real GPS fix: `hasFix` is true, the position is not exactly `(0, 0)`, and the coordinates are inside the WGS 84 range.
 2. `downsampleRoute` keeps every `ceil(n / 1800)`-th point above 1 800 points, always keeping the last point.
 3. With fewer than 2 points left, it returns `StaticMapViewer` instead.
 4. Otherwise it builds a `FlutterMap` (flutter_map 8.3.2) whose initial camera fits the route's bounds (`CameraFit.bounds`, 20 px padding, zoom at most 16). The camera zoom is capped at `MapSourceConfig.maxZoom` (19). No `MapController` is used, so the map does not follow the current position and has no recentre control.
 
-Layers: the OSM `TileLayer`; one `Polyline` (width 4, `lightBlueAccent`); markers for start (green, play icon), end (red, stop icon) and current position (cyan dot, hidden when the current sample has no GPS fix). Gestures: pinch zoom, drag, double-tap zoom, fling and scroll-wheel zoom; no rotation. The map background is dark grey, so missing tiles do not show as light blocks.
+Layers: the OSM `TileLayer`; one `Polyline` (width 4, `lightBlueAccent`); a marker layer for start (green, play icon) and end (red, stop icon), created once; and a second marker layer for the current position (cyan dot, hidden when the current sample has no GPS fix), which is the only layer that changes on a tick. Gestures: pinch zoom, drag, double-tap zoom, fling and scroll-wheel zoom; no rotation. The map background is dark grey, so missing tiles do not show as light blocks.
 
-The `TileLayer` and its single `NetworkTileProvider` are created once per map and reused on every rebuild; the `TileLayer` disposes the provider when the map is removed. The provider sends `MapSourceConfig.userAgent` and caches tiles through flutter_map's `BuiltInMapCachingProvider` (`fm_cache` under the platform cache directory) with a 25 MB limit. flutter_map applies that limit when the cache is first opened in the process, so the cache can grow past it while the app runs. The app does not clear the tile cache, and deleting rides does not clear it.
+The `TileLayer`, the `PolylineLayer` and the start and end marker layer are created once per map and reused on every rebuild; the `TileLayer` disposes the provider when the map is removed. The provider sends `MapSourceConfig.userAgent` and caches tiles through flutter_map's `BuiltInMapCachingProvider` (`fm_cache` under the platform cache directory) with a 25 MB limit. flutter_map applies that limit when the cache is first opened in the process, so the cache can grow past it while the app runs. The app does not clear the tile cache, and deleting rides does not clear it.
 
 Overlays: "GPS fixes: N" (fixes before downsampling) top left; "Map tiles unavailable (offline?)" bottom left once any tile fails to load (`errorTileCallback`); and the attribution bottom right. The attribution is `OsmAttribution` ([osm_attribution.dart](../lib/features/map/widgets/osm_attribution.dart)), the last child of the `FlutterMap`: flutter_map's `RichAttributionWidget` with an info button that opens a box with a `TextSourceAttribution` "© OpenStreetMap contributors" (plus the flutter_map credit, `showFlutterMapAttribution` left at its default). Tapping the OpenStreetMap line launches `copyrightUrl` in the external browser through `url_launcher` (`launchUrl`, `LaunchMode.externalApplication`); when that fails or no browser handles it, a SnackBar says "Could not open the link. Visit openstreetmap.org/copyright in a browser." The manifest has a `<queries>` entry for https `VIEW` intents so the lookup works on Android 11 and later. `StaticMapViewer` draws no tiles and needs no attribution. The licence page is reached from the recording settings sheet ("About and licences").
 

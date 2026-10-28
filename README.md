@@ -107,7 +107,7 @@ MotoCam/
 ├── android/                   Gradle project, manifest, Kotlin MainActivity and BackgroundRecordingService
 ├── ios/                       Xcode Runner project and Podfile (no native channel handlers)
 ├── lib/                       Dart source (see below)
-├── test/                      Unit and widget tests (361 tests in 27 files)
+├── test/                      Unit and widget tests (397 tests in 30 files)
 ├── docs/                      Developer documentation and audit reports
 ├── release-notes/             Per-release notes, v0.1.8.md to v0.1.13.md
 ├── scripts/                   release-security-precheck.ps1, generate-keystore.ps1
@@ -149,9 +149,19 @@ lib/
     │   ├── rides_list_screen.dart              Ride History list
     │   ├── ride_playback_screen.dart           Multi-segment playback with telemetry
     │   └── widgets/
+    │       ├── playback_controls.dart          Transport buttons and segment label
+    │       ├── playback_legend.dart            Seekbar legend
+    │       ├── playback_position.dart          Published playback position value
+    │       ├── playback_seek_bar.dart          Slider and time labels
     │       ├── playback_seekbar_track_shape.dart  Seekbar track with ranges and markers
+    │       ├── playback_speed_graph.dart       Speed graph strip (cached curve page and cursor)
+    │       ├── playback_telemetry_overlay.dart Telemetry stats over the video
     │       ├── playback_timeline.dart          Pure playback timeline logic
-    │       └── route_map_view.dart             flutter_map route on OpenStreetMap tiles
+    │       ├── playback_video_area.dart        Video surface, video area and error view
+    │       ├── ride_playback_body.dart         Playback body built from position-scoped widgets
+    │       ├── route_map_panel.dart            Collapsible Route Map card
+    │       ├── route_map_view.dart             flutter_map route on OpenStreetMap tiles
+    │       └── speed_graph_painter.dart        Speed graph curve and cursor painters
     ├── map/
     │   ├── map_licence.dart                    OpenStreetMap notice for the licence page
     │   ├── map_source_config.dart              Tile URL, attribution, user agent and zoom constants
@@ -213,7 +223,7 @@ Map tiles come from `tile.openstreetmap.org`, so the route map needs a network c
 | Debug APK | `flutter build apk --debug` |
 | Release APK | `flutter build apk --release` |
 
-- `flutter analyze` is clean, all 361 tests pass and the tree is `dart format`-clean.
+- `flutter analyze` is clean, all 397 tests pass and the tree is `dart format`-clean.
 - CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs on pushes to `main` and on pull requests with Flutter 3.41.2. It runs `flutter pub get --enforce-lockfile`, `flutter analyze`, the precheck, `flutter test --coverage`, a debug APK build and the format check, and builds the iOS app for the simulator in a second job.
 - The precheck mostly checks Android: the release signing config in `build.gradle.kts`, the manifest (no background location or all-files access, backups off, the signature-protected internal broadcast permission), that no credential or keystore files are tracked and that the Android assets folder is empty. It also checks the iOS `Info.plist` keys and the `ios/Podfile` permission macros, then runs `flutter analyze` and `flutter test` unless skipped. It fails when any step fails. It reads no signing credentials.
 - Release builds need four signing values. Gradle reads them from the environment variables `MOTOCAM_KEYSTORE_FILE`, `MOTOCAM_KEYSTORE_PASSWORD`, `MOTOCAM_KEY_ALIAS` and `MOTOCAM_KEY_PASSWORD`, or from `android/key.properties` (copied from `android/key.properties.template`). Each environment variable wins over its file value, and a relative keystore path is resolved against `android/app/`. Gradle stops with `Release signing config missing: ...` (naming the missing values) or `Release keystore not found ...` only when a task that packages or signs a release artifact is about to run. Release builds use R8 minification and resource shrinking. See [docs/release.md](docs/release.md#signing-setup-android).

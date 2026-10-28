@@ -260,7 +260,7 @@ The native handler is `getBatteryStatus` on `com.example.motocam/device_status` 
 
 ## Test coverage
 
-[telemetry_provider_test.dart](../test/features/telemetry/providers/telemetry_provider_test.dart) has 37 tests and [telemetry_data_test.dart](../test/features/telemetry/models/telemetry_data_test.dart) has 6, out of 371 tests in the project. The provider tests construct `TelemetryProvider(sampleInterval: 1 s)` directly and never call `initialize()`, so no plugin channels are involved. Fixes are injected with `updateLocationForTesting`, linear acceleration with `updateAccelerometerForTesting` and raw acceleration with `updateRawAccelerometerForTesting`; all three call the production handlers. The `createMockPosition` helper sets `speedAccuracy: 0.0`, so every test fix takes the blended (unreliable GPS speed) path.
+[telemetry_provider_test.dart](../test/features/telemetry/providers/telemetry_provider_test.dart) has 37 tests and [telemetry_data_test.dart](../test/features/telemetry/models/telemetry_data_test.dart) has 6, out of 397 tests in the project. The provider tests construct `TelemetryProvider(sampleInterval: 1 s)` directly and never call `initialize()`, so no plugin channels are involved. Fixes are injected with `updateLocationForTesting`, linear acceleration with `updateAccelerometerForTesting` and raw acceleration with `updateRawAccelerometerForTesting`; all three call the production handlers. The `createMockPosition` helper sets `speedAccuracy: 0.0`, so every test fix takes the blended (unreliable GPS speed) path.
 
 | Group | Checks |
 |---|---|
