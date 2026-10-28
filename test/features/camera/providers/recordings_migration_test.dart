@@ -512,6 +512,42 @@ void main() {
     });
   });
 
+  test('a run killed after a low-storage stop does not keep a later run '
+      'from renaming', () async {
+    await writeRide(external, 'big', videoBytes: 4096);
+    final small = await writeRide(cache, 'small');
+
+    // The external ride does not fit; the run is killed as the cache
+    // ride's first file is about to move (its journal entry written).
+    await expectLater(
+      migrator(
+        freeBytes: (_) async => 100,
+        fault: (point, path) {
+          if (point == RecordingsMigrationFault.beforeCopy &&
+              path_utils.isPathInsideDirectory(path, cache)) {
+            throw const _Killed(RecordingsMigrationFault.beforeCopy);
+          }
+        },
+      ).run(),
+      throwsA(isA<_Killed>()),
+    );
+    expect(await small.exists(), isTrue);
+    final journal =
+        jsonDecode(
+              File(
+                '$work$sep$recordingsMigrationJournalFileName',
+              ).readAsStringSync(),
+            )
+            as Map<String, dynamic>;
+    expect(journal.containsKey('lowStorageBytes'), isFalse);
+    expect((journal['ride'] as Map)['telemetry'], small.path);
+
+    final next = await migrator(freeBytes: (_) async => 100).run();
+    expect(next.outcome, RecordingsMigrationOutcome.lowStorage);
+    expect(next.moved, 1);
+    expect(await small.exists(), isFalse);
+  });
+
   group('one-shot', () {
     Map<String, dynamic> journal() =>
         jsonDecode(

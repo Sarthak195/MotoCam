@@ -503,7 +503,8 @@ class RecordingsMigrator {
       );
     }
 
-    // Skips reported by an earlier run are not counted or shown again.
+    // Skips reported by an earlier run are not counted again (they stay in
+    // the summary so the journal keeps their keys).
     final skipped = <RecordingsMigrationSkip>[];
     final units = <_MigrationUnit>[];
     for (final unit in planned) {
@@ -596,6 +597,9 @@ class RecordingsMigrator {
       await _saveJournal(
         reported: newlyReported,
         split: splitPaths,
+        // Only from a run that reached its end, so every ride that is only
+        // renamed was handled before a later run may skip planning.
+        lowStorageBytes: _lowStorageBytes,
         done:
             outcome == RecordingsMigrationOutcome.completed &&
             splitPaths.isEmpty &&
@@ -1085,10 +1089,10 @@ class RecordingsMigrator {
     Object? file,
     required Iterable<String> reported,
     Set<String> split = const <String>{},
+    int? lowStorageBytes,
     bool done = false,
   }) {
     final snapshot = _snapshot;
-    final lowStorageBytes = _lowStorageBytes;
     return _writeJournal(<String, dynamic>{
       'version': 1,
       'ride': ride,
