@@ -730,6 +730,57 @@ void main() {
       },
     );
 
+    test(
+      'a checkpoint of one segment and a final save of three verify',
+      () async {
+        final segmentA = await createSegment('segment_a.mp4', 'video-a');
+        provider.startRideSession();
+        final checkpointPath = await provider.checkpointRideSession(
+          segmentPaths: [segmentA.path],
+          lockedSegmentPaths: [segmentA.path],
+        );
+        expect(checkpointPath, isNotNull);
+
+        final segmentB = await createSegment('segment_b.mp4', 'video-b');
+        final segmentC = await createSegment('segment_c.mp4', 'video-c');
+        final finalPath = await provider.stopRideSessionAndPersist(
+          segmentC.path,
+          segmentPaths: [segmentA.path, segmentB.path, segmentC.path],
+          lockedSegmentPaths: [segmentA.path],
+        );
+        expect(finalPath, checkpointPath);
+
+        final json = await readJson(finalPath!);
+        expect(json['sessionComplete'], isTrue);
+        final integrity = json['integrity'] as Map<String, dynamic>;
+        expect(integrity['segmentCount'], 3);
+        expect((integrity['segmentHashes'] as Map).keys, [
+          segmentA.path,
+          segmentB.path,
+          segmentC.path,
+        ]);
+
+        final record = await RideRecord.fromTelemetryFile(
+          File(finalPath),
+          verifySegments: true,
+        );
+        expect(record, isNotNull);
+        expect(
+          record!.integrity.isVerified,
+          isTrue,
+          reason: record.integrity.issues.join(', '),
+        );
+        expect(record.isSessionComplete, isTrue);
+        expect(record.segmentPaths, [
+          segmentA.path,
+          segmentB.path,
+          segmentC.path,
+        ]);
+        expect(record.missingSegmentPaths, isEmpty);
+        expect(record.lockedSegmentPaths, [segmentA.path]);
+      },
+    );
+
     test('checkpoint does nothing without an active ride', () async {
       final segment1 = await createSegment('segment_1.mp4', 'video-one');
       final path = await provider.checkpointRideSession(
