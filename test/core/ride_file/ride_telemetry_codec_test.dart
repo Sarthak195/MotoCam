@@ -408,6 +408,57 @@ void main() {
       expect(segments.quarantinedSegmentPaths, isEmpty);
     });
 
+    test(
+      'a path in the legacy public folder always maps to its sibling',
+      () async {
+        // The real folder: a ride imported from v0.1.12 with a clip that was
+        // already gone counts it as missing, not quarantined.
+        const gone = '$legacyPublicRecordingsDirectory/gone.mp4';
+        final sibling = '${rideDirectory.path}${_sep}gone.mp4';
+        expect(
+          await resolveDeclaredRidePath(
+            gone,
+            telemetryDirectory: rideDirectory.path,
+          ),
+          sibling,
+        );
+
+        // With the originals still present and the clip not imported, the
+        // public copy is never used.
+        final public = await Directory(
+          '${elsewhere.path}${_sep}Movies${_sep}MotoCam${_sep}Recordings',
+        ).create(recursive: true);
+        debugLegacyPublicRecordingsDirectoryOverride = public.path;
+        addTearDown(() => debugLegacyPublicRecordingsDirectoryOverride = null);
+        final original = await touch(public, 'a.mp4');
+        final nested = await Directory('${public.path}${_sep}sub').create();
+        final nestedOriginal = await touch(nested, 'n.mp4');
+        expect(
+          await resolveDeclaredRidePath(
+            original,
+            telemetryDirectory: rideDirectory.path,
+          ),
+          '${rideDirectory.path}${_sep}a.mp4',
+        );
+        // Only the folder itself, not a subdirectory.
+        expect(
+          await resolveDeclaredRidePath(
+            nestedOriginal,
+            telemetryDirectory: rideDirectory.path,
+          ),
+          nestedOriginal,
+        );
+        // A ride read in the public folder itself keeps its own paths.
+        expect(
+          await resolveDeclaredRidePath(
+            original,
+            telemetryDirectory: public.path,
+          ),
+          original,
+        );
+      },
+    );
+
     test('a missing path in a differently named directory stays declared '
         'and is quarantined', () async {
       final gone = '${elsewhere.path}${_sep}gone.mp4';

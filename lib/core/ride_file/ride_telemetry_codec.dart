@@ -47,10 +47,12 @@ const String publicExportRelativePath = 'Movies/MotoCam/Recordings';
 /// The public folder that v0.1.11 and v0.1.12 recorded rides to on
 /// Android (primary user only).
 ///
-/// This is the only copy of that path in the app. It is meant only for
-/// deciding whether that legacy root is trusted and for discovering rides
-/// left there; today nothing reads it (the folder is neither trusted nor
-/// scanned), and a later legacy-root migration imports it from here.
+/// This is the only copy of that path in the app. The folder is neither
+/// trusted nor scanned. Its uses: the Storage Access Framework import
+/// opens its picker there (as the document id
+/// `primary:Movies/MotoCam/Recordings`, on the native side), and
+/// [resolveDeclaredRidePath] maps the declared paths of an imported ride
+/// that point into it to the ride's own directory.
 ///
 /// It is a fixed historical location, written as a literal on purpose: it
 /// must never follow [publicExportRelativePath], which may change.
@@ -663,6 +665,11 @@ Future<ResolvedRideSegments?> resolveRideSegments({
 /// * a plain file name (no separator) is resolved inside
 ///   [telemetryDirectory];
 /// * an existing path inside [telemetryDirectory] is kept;
+/// * a path directly inside [legacyPublicRecordingsDirectory] (a ride
+///   imported from the v0.1.11 or v0.1.12 public folder) always maps to the
+///   same name inside [telemetryDirectory], existing or not, so the ride
+///   reads the same whether or not the originals are still there; nothing
+///   in the public folder is read;
 /// * otherwise, when the file name exists inside [telemetryDirectory], that
 ///   sibling is used, even when the declared path also exists elsewhere (the
 ///   ride was moved or copied, for example from a legacy recordings root,
@@ -693,6 +700,11 @@ Future<String> resolveDeclaredRidePath(
     return candidatePath;
   }
   final isInside = path_utils.isPathInsideDirectory(path, telemetryDirectory);
+  if (!isInside && _isDirectlyInsideLegacyPublicFolder(path)) {
+    // An imported v0.1.11 or v0.1.12 ride: it reads the same whether or
+    // not the originals are still in the public folder.
+    return candidatePath;
+  }
   final exists = await File(path).exists();
   if (isInside && exists) {
     return path;
@@ -704,6 +716,25 @@ Future<String> resolveDeclaredRidePath(
     return candidatePath;
   }
   return path;
+}
+
+/// Replaces [legacyPublicRecordingsDirectory] in [resolveDeclaredRidePath]
+/// so tests can place a fake public folder in a temporary directory; for
+/// tests only.
+@visibleForTesting
+String? debugLegacyPublicRecordingsDirectoryOverride;
+
+/// Whether the parent directory of [path] is the legacy public folder
+/// ([legacyPublicRecordingsDirectory]). Purely lexical.
+bool _isDirectlyInsideLegacyPublicFolder(String path) {
+  final legacy = path_utils.normalizePath(
+    debugLegacyPublicRecordingsDirectoryOverride ??
+        legacyPublicRecordingsDirectory,
+  );
+  final normalized = path_utils.normalizePath(path);
+  final separatorIndex = normalized.lastIndexOf(Platform.pathSeparator);
+  return separatorIndex > 0 &&
+      normalized.substring(0, separatorIndex) == legacy;
 }
 
 /// Whether the parent directory of [path] has the same name as
