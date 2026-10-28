@@ -70,7 +70,7 @@ Git tags are the release identifiers. The GitHub repository [Sarthak195/MotoCam]
 | `v0.1.10` to `v0.1.12` | annotated | ef2dfb5, 76974c1, 055b9e1 | 2026-04-02 to 2026-04-05 |
 | `v0.1.13` | lightweight | a33a583 | 2026-07-07 |
 
-Release notes live in [release-notes/](../release-notes/) as `vX.Y.Z.md` with a lowercase `v`. Files exist only for v0.1.8 to v0.1.13.
+Release notes live in [release-notes/](../release-notes/) as `vX.Y.Z.md` with a lowercase `v`. Files exist only for v0.1.8 to v0.1.14; v0.1.14.md is marked as a draft that is not released.
 
 ### Current inconsistencies
 

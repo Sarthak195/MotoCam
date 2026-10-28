@@ -110,7 +110,7 @@ MotoCam/
 ├── lib/                       Dart source (see below)
 ├── test/                      Unit and widget tests (583 tests in 43 files)
 ├── docs/                      Developer documentation and audit reports
-├── release-notes/             Per-release notes, v0.1.8.md to v0.1.13.md
+├── release-notes/             Per-release notes, v0.1.8.md to v0.1.14.md (v0.1.14 is a draft)
 ├── scripts/                   release-security-precheck.ps1, generate-keystore.ps1
 ├── .gitattributes             Line-ending policy
 ├── analysis_options.yaml      Lints: flutter_lints plus seven stricter rules
@@ -246,7 +246,7 @@ More commands, debugging tips and troubleshooting are in [docs/development.md](d
 
 ## Release notes
 
-Release notes are in [release-notes/](release-notes/) (`v0.1.8.md` to `v0.1.13.md`; earlier releases have none). The latest is [v0.1.13](release-notes/v0.1.13.md). Release tags use a `v0.1.x` scheme, while `pubspec.yaml` is at `1.0.1+13` (Android versionName 1.0.1, versionCode 13). [docs/release.md](docs/release.md) explains the versioning, the release checklist, signing, the precheck and the changelog index.
+Release notes are in [release-notes/](release-notes/) (`v0.1.8.md` to `v0.1.14.md`; earlier releases have none). The latest released version is [v0.1.13](release-notes/v0.1.13.md); [v0.1.14](release-notes/v0.1.14.md) is a draft for the next release and is not released. Release tags use a `v0.1.x` scheme, while `pubspec.yaml` is at `1.0.1+13` (Android versionName 1.0.1, versionCode 13). [docs/release.md](docs/release.md) explains the versioning, the release checklist, signing, the precheck and the changelog index.
 
 ## Contributing
 
