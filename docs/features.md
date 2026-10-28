@@ -24,7 +24,7 @@ The home screen is [recording_screen.dart](../lib/features/recording/recording_s
 
 ### Camera unavailable
 
-When camera initialization has been attempted and failed (permission denied, no camera, recordings storage unavailable, or the camera is busy in another app), the preview area shows **Camera not available** with the hint "Allow camera access (and microphone while audio recording is on), or close other apps using the camera, then retry." and two buttons. **Retry** re-runs the permission audit and camera initialization. **Open Settings** opens the app's system settings and retries once the rider comes back. The panel does not name the specific failure. While idle, returning to the app also re-initializes the camera when the camera (and, with audio on, microphone) permission is granted.
+When camera initialization has been attempted and failed (permission denied, no camera, recordings storage unavailable, or the camera is busy in another app), the preview area names the reason (`CameraProvider.initFailure`, mapped by `cameraInitPanelFor`) instead of a spinner: **Camera permission needed** (Retry and Open Settings), **Microphone denied: grant it or turn off audio** (Retry and Open Settings), **Location permission needed** (setup stopped at the permission audit; Retry and Open Settings), **No camera found** (Retry), **Camera unavailable** (no resolution preset could be opened, usually another app holds the camera; Retry), **Recording storage unavailable** (Retry) and **Camera error** with the error text for anything else (Retry). **Retry** re-runs the permission audit and camera initialization. **Open Settings** opens the app's system settings and retries once the rider comes back. A failed initialization never shows the loading spinner: the spinner is only for an initialization that is pending or running. While idle, returning to the app also re-initializes the camera when the camera (and, with audio on, microphone) permission is granted.
 
 ### Start
 
@@ -56,7 +56,7 @@ flowchart TD
 
 ### Preflight checks
 
-Built by `_buildStartPreflightChecks` and shown by [start_preflight_sheet.dart](../lib/features/recording/widgets/start_preflight_sheet.dart). If every check is `ok`, no sheet appears. A blocking check that fails disables the sheet's Start button. Warnings never block, and any warning opens the sheet, except the battery-optimization row once its one-time exemption offer has been shown: from then on it is listed only when another row opens the sheet.
+The screen gathers the platform status in `_buildStartPreflightChecks`, [start_preflight_evaluator.dart](../lib/features/recording/start_preflight_evaluator.dart) (`StartPreflightEvaluator.evaluate`, pure) decides each row, and the result is shown by [start_preflight_sheet.dart](../lib/features/recording/widgets/start_preflight_sheet.dart). If every check is `ok`, no sheet appears. A blocking check that fails disables the sheet's Start button. Warnings never block, and any warning opens the sheet, except the battery-optimization row once its one-time exemption offer has been shown: from then on it is listed only when another row opens the sheet.
 
 | Check | Blocking | Shown when |
 |---|---|---|
@@ -100,7 +100,7 @@ Each segment's start and end, measured from the ride start, are stored in the ri
 
 ## Live HUD and telemetry strip
 
-Below the preview, `_buildTelemetryStats` shows five tiles. Values shrink to fit at large system font sizes instead of being cut off. While recording, a red `REC` pill sits on the preview; after the first lock of the ride it also shows a lock icon and `LOCKED` for the rest of the ride.
+Below the preview, `_buildTelemetryStats` shows five tiles. Values shrink to fit at large system font sizes instead of being cut off. While recording, a red `REC` pill sits on the preview; while the segment being recorded is locked (a lock is pending for it) it also shows a lock icon and `LOCKED`. The badge ends when that segment rolls or the recording stops, so a later lock is needed to show it again.
 
 | Tile | Value | Source |
 |---|---|---|
@@ -133,7 +133,7 @@ The trigger values have not been calibrated against real riding data.
 Locking (`CameraProvider.markIncident`):
 
 - **Automatic.** When `lastIncidentDetectedAt` changes while recording, `RecordingScreen._handleIncidentAutoLock` calls `markIncident(protectPastSegments: 2, protectCurrentSegment: true, reason: 'auto-crash')` at once, also while the app is hidden. Only the feedback (a haptic pulse and the notice) waits for the next frame. The notice reads `Incident detected. Locked: current clip` or `Incident detected. Locked: current clip + <n> previous`.
-- **Manual.** The **LOCK** button (enabled only while recording and not stopping) makes the same call with reason `manual-emergency`, gives a haptic pulse and shows `Locked: current clip` or `Locked: current clip + <n> previous` (`incidentLockNotice`).
+- **Manual.** The **LOCK** button (enabled only while recording and not stopping) makes the same call with reason `manual-emergency`, gives a haptic pulse (as does an automatic lock) and shows `Locked: current clip` or `Locked: current clip + <n> previous` (`incidentLockNotice`).
 - **Effect.** Up to two already-saved segments of the current ride are locked at once. Every segment not yet registered is also marked for locking: the one being recorded and, during a roll, the one still being saved. Repeated calls within one segment lock nothing extra.
 - Locked segments are never deleted automatically, in the current ride or in past rides. With gallery export turned on, they are copied to the gallery at stop (Android). Detected incidents (not manual locks) are saved in the ride JSON's `incidents` list and shown on the playback seekbar.
 

@@ -161,7 +161,7 @@ Nothing has been run on a device or an emulator, and nothing for iOS has been bu
 | [F078](#f078) | medium | release-security-precheck.ps1 never checks $LASTEXITCODE, so it prints 'passed' and exits 0 even when flutter analyze or flutter test fails | `scripts/release-security-precheck.ps1:67` | fixed |
 | [F115](#f115) | medium | The three 1.6k-2k-line files mix pure timeline/retention logic with widget and plugin code, so the riskiest logic cannot be unit-tested | `lib/features/history/ride_playback_screen.dart:1219` | partially fixed |
 | [F047](#f047) | low | Integrity verification fails open: the envelope was added without bumping or reading schemaVersion, so a ride with its 'integrity' key remo… | `lib/features/history/models/ride_record.dart:674` | fixed |
-| [F061](#f061) | low | A failed camera init shows the same endless spinner as loading, with no reason and no retry | `lib/features/recording/recording_screen.dart:1473` | partially fixed |
+| [F061](#f061) | low | A failed camera init shows the same endless spinner as loading, with no reason and no retry | `lib/features/recording/recording_screen.dart:1473` | fixed |
 | [F077](#f077) | low | generate-keystore.ps1 prints both keystore passwords, puts them on keytool's command line and re-parses them with Invoke-Expression; its de… | `scripts/generate-keystore.ps1:35` | fixed |
 | [F079](#f079) | low | CI runs twice per tagged or same-repo PR commit, pins actions to mutable major tags and declares no permissions block | `.github/workflows/ci.yml:3` | fixed |
 | [F080](#f080) | low | CI's actions/checkout@v4 targets the deprecated Node.js 20 runtime and is force-run on Node 24 | `.github/workflows/ci.yml:13` | fixed |
@@ -215,7 +215,7 @@ Nothing has been run on a device or an emulator, and nothing for iOS has been bu
 | [F129](#f129) | low | Telemetry strip values (Speed, Duration, Distance) are ellipsized at larger system font sizes | `lib/features/recording/recording_screen.dart:1663` | fixed |
 | [F130](#f130) | low | Telemetry notifications (~7-8 per second) rebuild the record controls and the PiP view, neither of which displays telemetry | `lib/features/recording/recording_screen.dart:1687` | fixed |
 | [F131](#f131) | low | While recording, the HISTORY button next to LOCK minimises the app into PiP without changing its label | `lib/features/recording/recording_screen.dart:1799` | fixed |
-| [F132](#f132) | low | LOCK feedback is a 2 s notice counting only completed locked segments, so it shows '(0)' during the first segment and running totals afterw… | `lib/features/recording/recording_screen.dart:1832` | partially fixed |
+| [F132](#f132) | low | LOCK feedback is a 2 s notice counting only completed locked segments, so it shows '(0)' during the first segment and running totals afterw… | `lib/features/recording/recording_screen.dart:1832` | fixed |
 | [F133](#f133) | low | The settings sheet FPS dropdown initializes to the saved FPS without checking it against the (possibly shrunken) supported-FPS list | `lib/features/recording/widgets/recording_settings_sheet.dart:70` | fixed |
 | [F134](#f134) | low | TelemetryData dartdoc overstates fromJson's fallback (non-numeric values throw) and the bearing range (iOS reports -1 when invalid) | `lib/features/telemetry/models/telemetry_data.dart:94` | fixed |
 | [F135](#f135) | low | The position stream has no onError/onDone and is never re-subscribed, so it stays dead after location is switched off and on | `lib/features/telemetry/providers/telemetry_provider.dart:134` | fixed |
@@ -1389,7 +1389,7 @@ Also affects: `lib/features/history/ride_playback_screen.dart:355`, `lib/feature
 - **Evidence:** Method spans from a structural outline: ride_playback build() 1219-1670, _buildEffectiveTimelineEntries 355-436, _initializePlayback 151-301. recording_screen _buildStartPreflightChecks 565-731, _openSettingsSheet 1248-1386, _buildControls 1681-1865. camera_provider initializeCamera 315-496, _enforceRecordingRetention 1180-1258. Lines hit per lcov: 2/850, 22/747 and 234/743.
 - **Verifier corrections:** There are two CustomPainters plus one SliderTrackShape, not three painters. The coverage percentages (0.2%, 2.9%, 31.5%) could not be verified from the repo.
 - **Recommendation:** Extract a pure PlaybackTimeline (entries, offsets, missing ranges, locate, markers) and a RetentionPolicy/SegmentSession (rolling-limit and lock rules), and add unit tests for each extraction. Splitting the widget build sections can follow.
-- **Fix note:** pure logic extracted (retention, timeline, recording UI); preflight evaluator and playback build() not split
+- **Fix note:** pure logic extracted (retention, timeline, recording UI, start preflight evaluator); playback build() not split
 
 ### Low (74)
 
@@ -1412,7 +1412,7 @@ Also affects: `lib/features/history/rides_list_screen.dart:196`, `lib/features/h
 
 **A failed camera init shows the same endless spinner as loading, with no reason and no retry**
 
-Severity: **low (scanner said medium)** · Category: ux-accessibility · Location: `lib/features/recording/recording_screen.dart:1473` · Verification: two-lens (code-truth + reachability/impact) → confirmed · Status: **partially fixed**
+Severity: **low (scanner said medium)** · Category: ux-accessibility · Location: `lib/features/recording/recording_screen.dart:1473` · Verification: two-lens (code-truth + reachability/impact) → confirmed · Status: **fixed**
 
 Also affects: `lib/features/camera/providers/camera_provider.dart:380-403`, `lib/features/camera/providers/camera_provider.dart:462-467`, `lib/features/camera/providers/camera_provider.dart:489-493`, `lib/features/recording/recording_screen.dart:635-649`
 
@@ -1421,7 +1421,7 @@ Also affects: `lib/features/camera/providers/camera_provider.dart:380-403`, `lib
 - **Evidence:** recording_screen.dart:1473-1477 `if (!camera.isInitialized || camera.controller == null) { return const Center(child: CircularProgressIndicator(color: Colors.white),); }`; camera_provider.dart:380-385 `if (!_isPermissionGranted(cameraStatus) || !_isPermissionGranted(microphoneStatus)) { _log('Camera or microphone permission denied'); _isInitialized = false; notifyListeners(); return; }`; :462-466 `_isInitialized = false; _log('Unable to initialize camera for any preset on this device.'); notifyListeners(); return;`; recording_screen.dart:108-110 `if (!mounted || resolvedAudit.hasBlockingIssues) { return; }`; app_settings_provider.dart:98 `bool _audioEnabled = true;`.
 - **Verifier corrections:** Missing permissions are named, once, in the bootstrap dialog and SnackBar (recording_screen.dart:129-138, 188-189), so the rider is told which permission is missing. The message is just not persistent. START re-runs the permission audit and re-initializes the camera through the preflight (569-571), so a retry path exists even though no control is labelled as one. Severity lowered to low: this is a UX polish issue with a recovery path, not a failure of a main feature. | 'No retry' is overstated. Tapping START RECORDING re-runs _initializeCamera through the preflight, and the preflight sheet shows which permission or check failed. A transient SnackBar also names the missing permissions after…
 - **Recommendation:** Add an initError field (an enum plus a message) to CameraProvider, set it on each early-return path in initializeCamera, and expose a getter. In recording_screen.dart _buildCameraPreview, when the camera is not initializing and initError is set, show the reason with Retry (calling _initializeCamera) and Open Settings buttons. On AppLifecycleState.resumed, when idle and not initialized, call _initializeCamera.
-- **Fix note:** camera-unavailable panel with Retry/Open Settings; no specific failure reason
+- **Fix note:** CameraProvider.initState and initFailure set on every init path; the preview panel names the reason (camera or microphone permission, no camera, camera unavailable, storage, unknown with the error text) with Retry and Open Settings; the resume retry is kept
 
 #### F077
 
@@ -2201,7 +2201,7 @@ Also affects: `lib/features/recording/recording_screen.dart:988-995`, `lib/featu
 
 **LOCK feedback is a 2 s notice counting only completed locked segments, so it shows '(0)' during the first segment and running totals afterwards**
 
-Severity: **low** · Category: ux-accessibility · Location: `lib/features/recording/recording_screen.dart:1832` · Verification: single → confirmed · Status: **partially fixed**
+Severity: **low** · Category: ux-accessibility · Location: `lib/features/recording/recording_screen.dart:1832` · Verification: single → confirmed · Status: **fixed**
 
 Also affects: `lib/features/camera/providers/camera_provider.dart:1300-1322`, `lib/features/camera/providers/camera_provider.dart:1111-1115`, `lib/features/recording/recording_screen.dart:432-452`
 
@@ -2209,7 +2209,7 @@ Also affects: `lib/features/camera/providers/camera_provider.dart:1300-1322`, `l
 - **Failure scenario:** Two minutes into a ride, the rider witnesses a crash and taps LOCK. The screen briefly shows 'Emergency lock enabled (0)', which reads as 'nothing was locked', so they press again, which also locks the next segment.
 - **Evidence:** recording_screen.dart:1826-1833 `camera.markIncident(protectPastSegments: 2, protectCurrentSegment: true, reason: 'manual-emergency',); _showInAppNotice('Emergency lock enabled (${camera.lockedSegmentCount})',);`; camera_provider.dart:131 `int get lockedSegmentCount => _lockedSegmentPaths.length;`; :1315-1317 `if (protectCurrentSegment && isRecording) { _pendingIncidentSegmentLocks++; }`; app_settings_provider.dart:100 `int _segmentDurationSeconds = 300;`; recording_screen.dart:434 default `Duration duration = const Duration(seconds: 2)`.
 - **Recommendation:** Change the notice to describe what was protected (e.g. 'Locked: current clip + N previous'), counting pending locks. Show a persistent LOCKED badge while _pendingIncidentSegmentLocks > 0, and add HapticFeedback.heavyImpact(). Optionally cap pending locks so repeated presses do not queue more than one.
-- **Fix note:** lock feedback names what was locked + LOCKED badge; badge not tied to the pending segment
+- **Fix note:** lock feedback names what was locked; the LOCKED badge follows the pending lock of the segment being recorded (isActiveSegmentLocked) and ends at the roll or the stop, for manual and automatic locks; haptic on both
 
 #### F133
 

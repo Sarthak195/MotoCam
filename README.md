@@ -134,8 +134,9 @@ lib/
 │       └── path_utils.dart                     Path normalization and containment checks
 └── features/
     ├── camera/providers/
+    │   ├── camera_init_status.dart             Camera init state and failure reasons
     │   ├── camera_provider.dart                Camera lifecycle, segments, locks, retention, gallery export
-    │   └── recording_retention.dart            Pure loop-retention and orphan-sidecar rules
+    │   └── recording_retention.dart            Pure loop-retention, LOCKED badge and orphan-sidecar rules
     ├── history/
     │   ├── models/
     │   │   ├── ride_history_loader.dart        Loads rides (and video-only rides) off the UI isolate
@@ -155,7 +156,8 @@ lib/
     │       └── static_map_viewer.dart          Tile-free CustomPaint route fallback
     ├── recording/
     │   ├── recording_screen.dart               Home screen and session coordinator
-    │   ├── recording_screen_logic.dart         Pure helpers: stall and checkpoint trackers, lock notices, button colours
+    │   ├── recording_screen_logic.dart         Pure helpers: stall and checkpoint trackers, lock notices, camera failure panel, button colours
+    │   ├── start_preflight_evaluator.dart      Pure start checklist rows
     │   └── widgets/
     │       ├── recording_settings_sheet.dart   Settings form
     │       └── start_preflight_sheet.dart      Start checklist sheet
