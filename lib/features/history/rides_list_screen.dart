@@ -3,10 +3,12 @@ import 'dart:io';
 import 'dart:isolate';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 
 import '../../core/providers/app_settings_provider.dart';
+import '../../core/services/legacy_recordings_access.dart';
 import '../../core/services/ride_signing_service.dart';
 import '../../core/utils/format_utils.dart';
 import '../../core/utils/path_utils.dart' as path_utils;
@@ -17,6 +19,7 @@ import 'models/ride_index.dart';
 import 'models/ride_record.dart';
 import 'models/segment_verifier.dart';
 import 'ride_playback_screen.dart';
+import 'services/legacy_ride_import.dart';
 import 'services/ride_deletion.dart';
 import 'widgets/playback_timeline.dart';
 import 'widgets/recordings_migration_banner.dart';
@@ -62,6 +65,9 @@ class _RidesListScreenState extends State<RidesListScreen> {
   RecordingsMigrationController? _migration;
   bool _wasMigrating = false;
 
+  /// The import from the old public folder (Android), for its banner.
+  LegacyRideImportController? _legacyImport;
+
   Widget _buildStatusBadge({required String label, required Color color}) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
@@ -91,6 +97,7 @@ class _RidesListScreenState extends State<RidesListScreen> {
       _migration = migration;
       _wasMigrating = migration.isRunning;
       migration.addListener(_onMigrationChanged);
+      _legacyImport = context.read<CameraProvider>().legacyRideImport;
       _ridesFuture = _loadRides();
     }
   }
@@ -125,6 +132,10 @@ class _RidesListScreenState extends State<RidesListScreen> {
       message =
           'Rides are being moved to private storage. Try again when the '
           'move finishes.';
+    } else if (_legacyImport?.isRunning ?? false) {
+      message =
+          'Rides are being imported from the old folder. Try again when the '
+          'import finishes.';
     } else if (context.read<CameraProvider>().isStorageBudgetRunning) {
       message =
           'Old rides are being deleted for the storage budget. Try again in '
@@ -148,9 +159,12 @@ class _RidesListScreenState extends State<RidesListScreen> {
   Future<List<RideRecord>> _loadRides() async {
     final cameraProvider = context.read<CameraProvider>();
     final recordings = await cameraProvider.getRecordings();
-    // A ride the migration is moving (or paused in the middle of) is left
-    // out until it is whole in one root.
-    final inFlight = cameraProvider.recordingsMigration.inFlightPaths;
+    // A ride the migration is moving (or paused in the middle of), or the
+    // import is copying, is left out until it is whole in one root.
+    final inFlight = <String>{
+      ...cameraProvider.recordingsMigration.inFlightPaths,
+      ...cameraProvider.legacyRideImport.inFlightPaths,
+    };
     final recordingPaths = recordings
         .whereType<File>()
         .map((file) => file.path)
@@ -439,6 +453,141 @@ class _RidesListScreenState extends State<RidesListScreen> {
     );
   }
 
+  /// Imports the rides that v0.1.11 and v0.1.12 left in the public folder
+  /// Movies/MotoCam/Recordings (Android): explains the folder, opens the
+  /// system folder picker there, imports through [CameraProvider], shows
+  /// the summary and then offers to delete the imported originals.
+  Future<void> _importFromOlderVersion() async {
+    final camera = context.read<CameraProvider>();
+    final messenger = ScaffoldMessenger.of(context);
+    void show(String text) => messenger.showSnackBar(
+      SnackBar(content: Text(text), duration: const Duration(seconds: 6)),
+    );
+
+    final blocked = camera.legacyImportBlockedReason;
+    if (blocked != null) {
+      show(blocked);
+      return;
+    }
+    final proceed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Import rides from an older version'),
+        content: const Text(
+          'MotoCam 0.1.11 and 0.1.12 saved rides in Movies/MotoCam/Recordings. '
+          'Other apps can read the files there, including each ride\'s GPS '
+          'route, and they stay on the phone after MotoCam is uninstalled.\n\n'
+          'On the next screen, open that folder (it usually opens there), tap '
+          '"Use this folder" and allow access. MotoCam copies the rides into '
+          'its private storage and changes nothing in the folder.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('Choose folder'),
+          ),
+        ],
+      ),
+    );
+    if (proceed != true || !mounted) {
+      return;
+    }
+
+    String? treeUri;
+    try {
+      treeUri = await LegacyRecordingsAccess.pickRecordingsTree();
+    } on PlatformException {
+      show('Could not open the folder picker on this phone.');
+      return;
+    } on MissingPluginException {
+      show('Importing rides is not available on this phone.');
+      return;
+    }
+    if (treeUri == null || !mounted) {
+      return;
+    }
+
+    final source = LegacyRecordingsAccess(treeUri);
+    final summary = await camera.importLegacyRides(source);
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _ridesFuture = _loadRides();
+    });
+    if (summary == null) {
+      show(camera.legacyImportBlockedReason ?? 'The import could not start.');
+      return;
+    }
+    show(summary.message);
+    if (summary.outcome == LegacyImportOutcome.completed &&
+        summary.importedDocuments.isNotEmpty) {
+      await _offerToDeleteOriginals(source, summary.importedDocuments);
+    }
+  }
+
+  /// Asks (default: keep) whether to delete the originals of an import
+  /// from the public folder, then deletes only [documents] (files with a
+  /// verified copy in private storage) and reports what could not be
+  /// deleted.
+  Future<void> _offerToDeleteOriginals(
+    LegacyRideDocumentSource source,
+    List<LegacyRideDocument> documents,
+  ) async {
+    final count = documents.length;
+    final delete = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Delete the originals?'),
+        content: Text(
+          'The imported rides are now in MotoCam\'s private storage. Their '
+          '$count original file${count == 1 ? '' : 's'} in '
+          'Movies/MotoCam/Recordings can still be read by other apps, '
+          'including the GPS routes, and stay on the phone after MotoCam is '
+          'uninstalled.\n\nDelete them from that folder? Files that were not '
+          'imported are left alone.',
+        ),
+        actions: [
+          TextButton(
+            autofocus: true,
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('Keep originals'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('Delete originals'),
+          ),
+        ],
+      ),
+    );
+    if (delete != true || !mounted) {
+      return;
+    }
+    final messenger = ScaffoldMessenger.of(context);
+    final failed = await deleteImportedOriginals(source, documents);
+    if (!mounted) {
+      return;
+    }
+    final deleted = count - failed.length;
+    messenger.showSnackBar(
+      SnackBar(
+        content: Text(
+          failed.isEmpty
+              ? 'Deleted $count original file${count == 1 ? '' : 's'} from '
+                    'Movies/MotoCam/Recordings.'
+              : 'Deleted $deleted of $count original files. '
+                    '${failed.length} could not be deleted (for example '
+                    '${failed.first.name}); remove them with a file manager.',
+        ),
+        duration: const Duration(seconds: 8),
+      ),
+    );
+  }
+
   /// How much of the ride's duration has video, when loop recording
   /// overwrote part of it (for example the start of a long ride); `null`
   /// when the video covers the whole ride or no timeline is stored.
@@ -463,11 +612,52 @@ class _RidesListScreenState extends State<RidesListScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Ride History')),
+      appBar: AppBar(
+        title: const Text('Ride History'),
+        actions: [
+          if (Platform.isAndroid)
+            PopupMenuButton<String>(
+              tooltip: 'More',
+              onSelected: (_) => _importFromOlderVersion(),
+              itemBuilder: (_) => const [
+                PopupMenuItem<String>(
+                  value: 'import',
+                  child: Text('Import rides from an older version'),
+                ),
+              ],
+            ),
+        ],
+      ),
       body: Column(
         children: [
           if (_migration != null)
             RecordingsMigrationBanner(migration: _migration!),
+          if (_legacyImport != null)
+            ListenableBuilder(
+              listenable: _legacyImport!,
+              builder: (context, _) {
+                final text = _legacyImport!.bannerText;
+                if (text == null) {
+                  return const SizedBox.shrink();
+                }
+                final progress = _legacyImport!.progress;
+                return Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(text),
+                      const SizedBox(height: 4),
+                      LinearProgressIndicator(
+                        value: progress == null || progress.total == 0
+                            ? null
+                            : progress.done / progress.total,
+                      ),
+                    ],
+                  ),
+                );
+              },
+            ),
           Expanded(child: _buildRideList()),
         ],
       ),
