@@ -52,7 +52,7 @@ The Dart side of each channel lives in a small service class:
 | [pip_service.dart](../lib/core/services/pip_service.dart) | `PipService` (singleton, `instance`) | `pip` |
 | [camera_provider.dart](../lib/features/camera/providers/camera_provider.dart) | `CameraProvider.platform` (public static constant) | `media` |
 | [ride_signing_service.dart](../lib/core/services/ride_signing_service.dart) | `RideSigningService` (`instance`); the same file holds `SignedRideRegistry` and `loadRideSignerContext` | `integrity` |
-| [legacy_recordings_access.dart](../lib/core/services/legacy_recordings_access.dart) | `LegacyRecordingsAccess` (static `pickRecordingsTree`; an instance per picked tree implements `LegacyRideDocumentSource`) | `legacy_recordings` |
+| [legacy_recordings_access.dart](../lib/core/services/legacy_recordings_access.dart) | `LegacyRecordingsAccess` (static `pickRecordingsTree`, and the pure `isRecordingsFolder` and `describeTree` checks of a picked tree URI; an instance per picked tree implements `LegacyRideDocumentSource`) | `legacy_recordings` |
 | [gallery_copies.dart](../lib/core/services/gallery_copies.dart) | `GalleryCopies` (static methods) | `gallery` |
 | [app_permission_service.dart](../lib/core/services/app_permission_service.dart) | `AppPermissionService` | none (uses `permission_handler`, `BackgroundRecordingService` and a `DeviceStatusService`, an optional const-constructor parameter that defaults to `const DeviceStatusService()`) |
 
