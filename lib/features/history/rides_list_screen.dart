@@ -16,6 +16,7 @@ import 'models/ride_index.dart';
 import 'models/ride_record.dart';
 import 'models/segment_verifier.dart';
 import 'ride_playback_screen.dart';
+import 'services/ride_deletion.dart';
 import 'widgets/playback_timeline.dart';
 import 'widgets/recordings_migration_banner.dart';
 
@@ -351,19 +352,6 @@ class _RidesListScreenState extends State<RidesListScreen> {
     );
   }
 
-  /// Files that make up [ride] on disk: its trusted segment files, its main
-  /// video and its ride JSON. Quarantined paths (outside the recordings
-  /// directory) are never included.
-  static List<String> _filesOfRide(RideRecord ride) {
-    final paths = <String>{
-      ...ride.segmentPaths,
-      ride.videoPath,
-      if (ride.telemetryPath != null) ride.telemetryPath!,
-    };
-    paths.removeAll(ride.quarantinedSegmentPaths);
-    return paths.where((path) => path.trim().isNotEmpty).toList();
-  }
-
   Future<void> _confirmAndDelete(RideRecord ride) async {
     final key = _lockKeyFor(ride);
     if (_deletesInFlight.contains(key) || _refuseWhileMigrating()) {
@@ -386,7 +374,6 @@ class _RidesListScreenState extends State<RidesListScreen> {
       return;
     }
 
-    final files = _filesOfRide(ride);
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (dialogContext) => AlertDialog(
@@ -416,30 +403,11 @@ class _RidesListScreenState extends State<RidesListScreen> {
     setState(() {
       _deletesInFlight.add(key);
     });
-    var failed = 0;
-    for (final path in files) {
-      try {
-        final file = File(path);
-        if (await file.exists()) {
-          await file.delete();
-        }
-      } catch (_) {
-        failed++;
-      }
-    }
-    final rideSessionId = ride.rideSessionId;
-    final telemetryPath = ride.telemetryPath;
-    if (rideSessionId != null &&
-        telemetryPath != null &&
-        !await File(telemetryPath).exists()) {
-      // The ride is gone, so it no longer counts as written signed here.
-      // Only its own file name unregisters the id: deleting a copy that
-      // carries the id of another ride leaves that ride registered.
-      await SignedRideRegistry.instance.remove(
-        rideSessionId,
-        telemetryFileName: path_utils.fileNameFromPath(telemetryPath),
-      );
-    }
+    final result = await deleteRideFiles(
+      ride,
+      indexStore: await RideIndexStore.shared(),
+    );
+    final failed = result.failed;
     if (!mounted) {
       return;
     }
