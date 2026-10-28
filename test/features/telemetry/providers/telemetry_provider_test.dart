@@ -5,8 +5,12 @@ import 'package:crypto/crypto.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:motocam/core/ride_file/ride_telemetry_codec.dart' as ride_codec;
+import 'package:motocam/core/services/ride_signing_service.dart';
 import 'package:motocam/features/history/models/ride_record.dart';
 import 'package:motocam/features/telemetry/providers/telemetry_provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+import '../../../support/test_signing_key.dart';
 
 final String _sep = Platform.pathSeparator;
 
@@ -780,6 +784,81 @@ void main() {
         expect(record.lockedSegmentPaths, [segmentA.path]);
       },
     );
+
+    test(
+      'the final save is signed and registered; checkpoints are not',
+      () async {
+        SharedPreferences.setMockInitialValues(<String, Object>{});
+        final phone = TestSigningKey.generate(1);
+        final signedHashes = <String>[];
+        final registry = SignedRideRegistry();
+        final signing = TelemetryProvider(
+          rideSigner: (payloadHash) async {
+            signedHashes.add(payloadHash);
+            return phone.sign(payloadHash);
+          },
+          signedRideRegistry: registry,
+        );
+        addTearDown(signing.dispose);
+
+        final segmentA = await createSegment('signed_a.mp4', 'video-a');
+        signing.startRideSession();
+        final checkpointPath = await signing.checkpointRideSession(
+          segmentPaths: [segmentA.path],
+          lockedSegmentPaths: const [],
+        );
+        final checkpoint = await readJson(checkpointPath!);
+        expect((checkpoint['integrity'] as Map)['envelopeVersion'], 2);
+        expect(signedHashes, isEmpty);
+
+        final path = await signing.stopRideSessionAndPersist(
+          segmentA.path,
+          segmentPaths: [segmentA.path],
+        );
+        final json = await readJson(path!);
+        final integrity = json['integrity'] as Map<String, dynamic>;
+        expect(integrity['envelopeVersion'], 3);
+        expect(signedHashes, [integrity['payloadHash']]);
+        expect(
+          (integrity['signature'] as Map)['publicKey'],
+          phone.publicKeyBase64,
+        );
+
+        final record = await RideRecord.fromTelemetryFile(
+          File(path),
+          verifySegments: true,
+        );
+        expect(record!.integrity.isVerified, isTrue);
+        expect(await registry.idsFor(phone.publicKeyBase64), {
+          json['rideSessionId'],
+        });
+      },
+    );
+
+    test('a failed signature saves the ride as version 2', () async {
+      SharedPreferences.setMockInitialValues(<String, Object>{});
+      final registry = SignedRideRegistry();
+      final signing = TelemetryProvider(
+        rideSigner: (_) async => throw StateError('keystore'),
+        signedRideRegistry: registry,
+      );
+      addTearDown(signing.dispose);
+
+      final segment = await createSegment('unsigned_a.mp4', 'video-a');
+      signing.startRideSession();
+      final path = await signing.stopRideSessionAndPersist(
+        segment.path,
+        segmentPaths: [segment.path],
+      );
+      expect(path, isNotNull);
+      expect(signing.lastPersistError, isNull);
+      final json = await readJson(path!);
+      final integrity = json['integrity'] as Map<String, dynamic>;
+      expect(integrity['envelopeVersion'], 2);
+      expect(integrity.containsKey('signature'), isFalse);
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getString(SignedRideRegistry.prefsKey), isNull);
+    });
 
     test('checkpoint does nothing without an active ride', () async {
       final segment1 = await createSegment('segment_1.mp4', 'video-one');

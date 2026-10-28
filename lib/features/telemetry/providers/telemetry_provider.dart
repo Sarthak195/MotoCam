@@ -5,6 +5,7 @@ import 'package:flutter/widgets.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:sensors_plus/sensors_plus.dart';
 import '../../../core/ride_file/ride_telemetry_codec.dart' as ride_codec;
+import '../../../core/services/ride_signing_service.dart';
 import '../../../core/utils/integrity_utils.dart' as integrity_utils;
 import '../models/telemetry_data.dart';
 import 'dart:async';
@@ -22,13 +23,28 @@ import 'dart:math' as math;
 /// A ride's JSON file is written as a checkpoint (`sessionComplete: false`)
 /// whenever [checkpointRideSession] is called and periodically afterwards,
 /// and completed by [stopRideSessionAndPersist]. Every write is sealed with
-/// a bound integrity envelope over the segments hashed so far.
+/// a bound integrity envelope over the segments hashed so far; the final
+/// save is also signed with this phone's key when it can be (envelope
+/// version 3, see `ride_signature.dart`).
 class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
   /// Creates a provider that captures one ride sample every [sampleInterval].
-  TelemetryProvider({this.sampleInterval = const Duration(seconds: 1)});
+  ///
+  /// [rideSigner] signs the final save (default: this phone's Keystore key
+  /// through [RideSigningService.instance]; `null` from it means the ride
+  /// is saved unsigned), and [signedRideRegistry] records each ride saved
+  /// signed (default: [SignedRideRegistry.instance]).
+  TelemetryProvider({
+    this.sampleInterval = const Duration(seconds: 1),
+    ride_codec.RidePayloadSigner? rideSigner,
+    SignedRideRegistry? signedRideRegistry,
+  }) : _rideSigner = rideSigner ?? RideSigningService.instance.signPayloadHash,
+       _signedRideRegistry = signedRideRegistry ?? SignedRideRegistry.instance;
 
   /// Interval between persisted ride samples.
   final Duration sampleInterval;
+
+  final ride_codec.RidePayloadSigner _rideSigner;
+  final SignedRideRegistry _signedRideRegistry;
 
   /// Version of the ride JSON written by this provider. Every version-3 file,
   /// checkpoints included, carries a bound integrity envelope
@@ -1150,16 +1166,22 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
       );
     }
 
+    // Only this final save is signed (checkpoints stay version 2, so no
+    // Keystore call runs while recording). Signing never fails the save: a
+    // ride that cannot be signed is written as version 2.
     final segmentHashes = await _hashSegments(files.segmentPaths);
-    await _enqueueWrite(
-      telemetryPath,
-      await ride_codec.sealRidePayload(
-        _encodePayload(ride: ride, files: files, sessionComplete: true),
-        segmentHashes: segmentHashes,
-        segmentCount: files.segmentPaths.length,
-        generatedAt: DateTime.now().toUtc(),
-      ),
+    final sealed = await ride_codec.sealAndSignRidePayload(
+      _encodePayload(ride: ride, files: files, sessionComplete: true),
+      segmentHashes: segmentHashes,
+      segmentCount: files.segmentPaths.length,
+      generatedAt: DateTime.now().toUtc(),
+      signer: _rideSigner,
     );
+    await _enqueueWrite(telemetryPath, sealed.json);
+    final signature = sealed.signature;
+    if (signature != null) {
+      await _signedRideRegistry.add(signature.publicKey, ride.sessionId);
+    }
     for (final path in files.segmentPaths) {
       _segmentHashCache.remove(path);
     }
