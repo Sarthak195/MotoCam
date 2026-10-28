@@ -9,6 +9,15 @@ import 'package:motocam/features/history/models/ride_record.dart';
 final String _sep = Platform.pathSeparator;
 
 void main() {
+  test('the legacy public folder is a fixed literal', () {
+    // The v0.1.11 and v0.1.12 location; it must not follow the gallery
+    // export path.
+    expect(
+      legacyPublicRecordingsDirectory,
+      '/storage/emulated/0/Movies/MotoCam/Recordings',
+    );
+  });
+
   group('segment-list and timeline rules', () {
     test('normalizeSegmentPathList trims, de-duplicates and appends', () {
       expect(

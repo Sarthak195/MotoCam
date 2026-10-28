@@ -49,8 +49,11 @@ const String publicExportRelativePath = 'Movies/MotoCam/Recordings';
 /// deciding whether that legacy root is trusted and for discovering rides
 /// left there; today nothing reads it (the folder is neither trusted nor
 /// scanned), and a later legacy-root migration imports it from here.
+///
+/// It is a fixed historical location, written as a literal on purpose: it
+/// must never follow [publicExportRelativePath], which may change.
 const String legacyPublicRecordingsDirectory =
-    '/storage/emulated/0/$publicExportRelativePath';
+    '/storage/emulated/0/Movies/MotoCam/Recordings';
 
 /// Suffix of every ride telemetry file name (current and legacy names).
 const String rideTelemetryFileSuffix = '.telemetry.json';
