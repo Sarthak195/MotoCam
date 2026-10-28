@@ -221,7 +221,7 @@ This example was put together by hand from the writer code; the app did not prod
   "sessionComplete": true,
   "storagePolicy": "hybrid-private-primary",
   "publicExportRelativePath": "Movies/MotoCam/Recordings",
-  "storageDirectory": "/storage/emulated/0/Android/data/com.example.motocam/files/MotoCam Recordings",
+  "storageDirectory": "/data/user/0/com.example.motocam/files/MotoCam Recordings",
   "sampleRateMs": 1000,
   "videoPath": "…/MotoCam Recordings/REC222.mp4",
   "videoFileName": "REC222.mp4",
