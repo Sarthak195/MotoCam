@@ -3,11 +3,13 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:camera/camera.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
 import '../../core/providers/app_settings_provider.dart';
 import '../../core/services/app_permission_service.dart';
@@ -39,6 +41,11 @@ class _RecordingScreenState extends State<RecordingScreen>
     with WidgetsBindingObserver {
   DateTime? _lastHandledIncidentAt;
   final BackgroundStallTracker _stallTracker = BackgroundStallTracker();
+  // Watches the in-progress clip file while the app is in the background
+  // (Android), so a resume can skip the stall restart when capture
+  // demonstrably continued.
+  late final BackgroundCaptureMonitor _captureMonitor =
+      BackgroundCaptureMonitor(probe: _probeNewestRecordingFile);
   final BackgroundRecordingService _backgroundRecordingService =
       BackgroundRecordingService.instance;
   final PipService _pipService = PipService.instance;
@@ -471,13 +478,26 @@ class _RecordingScreenState extends State<RecordingScreen>
       unawaited(_exitBlackoutMode(camera: camera));
     }
 
+    final wasBackgrounded = _stallTracker.backgroundedAt != null;
     final backgroundDuration = _stallTracker.onLifecycleChanged(
       state,
       isRecording: camera.isRecording,
       now: DateTime.now(),
     );
+    final backgroundedAt = _stallTracker.backgroundedAt;
+    if (!wasBackgrounded &&
+        backgroundedAt != null &&
+        defaultTargetPlatform == TargetPlatform.android) {
+      unawaited(_captureMonitor.start(backgroundedAt));
+    }
     if (state != AppLifecycleState.resumed) {
       return;
+    }
+    if (backgroundDuration == null ||
+        !camera.isRecording ||
+        _resumeWaiter != null) {
+      // No recovery decision follows this resume.
+      _captureMonitor.reset();
     }
 
     final resumeWaiter = _resumeWaiter;
@@ -510,6 +530,7 @@ class _RecordingScreenState extends State<RecordingScreen>
     required Duration backgroundDuration,
   }) async {
     if (_isRecoveringFromStall || !mounted) {
+      _captureMonitor.reset();
       return;
     }
 
@@ -518,6 +539,22 @@ class _RecordingScreenState extends State<RecordingScreen>
     final camera = context.read<CameraProvider>();
 
     try {
+      // Restart unless the clip file shows that capture went on in the
+      // background (Android only; anything uncertain means restart).
+      final continued = await _captureMonitor.finish(DateTime.now());
+      if (!mounted) {
+        return;
+      }
+      if (continued) {
+        messenger.showSnackBar(
+          const SnackBar(
+            content: Text('Recording continued in the background.'),
+            duration: Duration(seconds: 3),
+          ),
+        );
+        return;
+      }
+
       final recovered = await camera.recoverRecordingPipeline(
         reason: 'resume-after-background-${backgroundDuration.inSeconds}s',
       );
@@ -547,6 +584,12 @@ class _RecordingScreenState extends State<RecordingScreen>
     } finally {
       _isRecoveringFromStall = false;
     }
+  }
+
+  /// Newest in-progress clip file written by the camera plugin, for
+  /// [_captureMonitor].
+  Future<RecordingFileSample?> _probeNewestRecordingFile() async {
+    return newestRecordingFileIn(await getTemporaryDirectory());
   }
 
   Future<void> _initializePipBridge() async {
@@ -734,6 +777,10 @@ class _RecordingScreenState extends State<RecordingScreen>
         // Segment registration does not notify listeners, so new segments
         // and locks are picked up here, about once per second.
         _checkpointRideIfChanged(camera);
+        // Also runs in the background, under the service's wake lock.
+        if (_captureMonitor.isObserving) {
+          unawaited(_captureMonitor.sample(DateTime.now()));
+        }
       });
     }
 

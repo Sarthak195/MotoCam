@@ -3,6 +3,7 @@
 // Pure helpers used by RecordingScreen, kept free of widgets and plugins so
 // they can be unit-tested.
 
+import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:flutter/widgets.dart';
@@ -105,6 +106,278 @@ class BackgroundStallTracker {
   /// Forgets any pending background period.
   void reset() {
     _backgroundedAt = null;
+  }
+}
+
+/// Minimum growth, in bytes per second spent in the background, that
+/// counts as evidence that capture continued. Far below any video bitrate
+/// the camera uses, so a file that kept recording always passes.
+const int backgroundCaptureMinBytesPerSecond = 16 * 1024;
+
+/// Extra growth the in-progress file must show on top of
+/// [backgroundCaptureMinBytesPerSecond], for the encoder output still
+/// written just after the app left the foreground when capture stopped
+/// there.
+const int backgroundCaptureStallAllowanceBytes = 256 * 1024;
+
+/// Shortest observation of a file that appeared while the app was in the
+/// background (a segment roll) that can count as evidence.
+const Duration backgroundCaptureMinNewFileWindow = Duration(seconds: 2);
+
+/// One probe of the newest in-progress recording file.
+@immutable
+class RecordingFileSample {
+  /// Creates a sample of the file at [path].
+  const RecordingFileSample({
+    required this.path,
+    required this.sizeBytes,
+    required this.modified,
+  });
+
+  /// Absolute path of the file.
+  final String path;
+
+  /// Size in bytes when probed.
+  final int sizeBytes;
+
+  /// Last modification time when probed.
+  final DateTime modified;
+}
+
+/// Returns the newest (by modification time) `REC*.mp4` file directly in
+/// [directory], or `null` when there is none.
+///
+/// camera_android_camerax writes the clip being recorded to a `REC*.mp4`
+/// temporary file in the app's cache directory, which is what
+/// `getTemporaryDirectory()` returns on Android. Throws when the directory
+/// cannot be listed.
+Future<RecordingFileSample?> newestRecordingFileIn(Directory directory) async {
+  RecordingFileSample? newest;
+  await for (final entity in directory.list(followLinks: false)) {
+    if (entity is! File) {
+      continue;
+    }
+    final name = entity.uri.pathSegments.last;
+    if (!name.startsWith('REC') || !name.toLowerCase().endsWith('.mp4')) {
+      continue;
+    }
+    final stat = await entity.stat();
+    if (stat.type != FileSystemEntityType.file) {
+      continue;
+    }
+    if (newest == null || stat.modified.isAfter(newest.modified)) {
+      newest = RecordingFileSample(
+        path: entity.path,
+        sizeBytes: stat.size,
+        modified: stat.modified,
+      );
+    }
+  }
+  return newest;
+}
+
+/// How one in-progress recording file grew while it was observed.
+@immutable
+class RecordingFileObservation {
+  /// Creates an observation of [path] that started with [firstSizeBytes] at
+  /// [firstSeenAt] and was last seen with [latestSizeBytes] at
+  /// [latestSeenAt].
+  const RecordingFileObservation({
+    required this.path,
+    required this.firstSizeBytes,
+    required this.firstSeenAt,
+    required this.latestSizeBytes,
+    required this.latestSeenAt,
+  });
+
+  /// Starts an observation from a single sample taken at [at].
+  factory RecordingFileObservation.first(
+    RecordingFileSample sample,
+    DateTime at,
+  ) {
+    return RecordingFileObservation(
+      path: sample.path,
+      firstSizeBytes: sample.sizeBytes,
+      firstSeenAt: at,
+      latestSizeBytes: sample.sizeBytes,
+      latestSeenAt: at,
+    );
+  }
+
+  /// Absolute path of the file.
+  final String path;
+
+  /// Size when the file was first seen.
+  final int firstSizeBytes;
+
+  /// When the file was first seen.
+  final DateTime firstSeenAt;
+
+  /// Size at the latest probe.
+  final int latestSizeBytes;
+
+  /// When the latest probe was taken.
+  final DateTime latestSeenAt;
+
+  /// This observation extended by [sample] taken at [at]; a sample of
+  /// another file starts a new observation.
+  RecordingFileObservation extendedWith(
+    RecordingFileSample sample,
+    DateTime at,
+  ) {
+    if (sample.path != path) {
+      return RecordingFileObservation.first(sample, at);
+    }
+    return RecordingFileObservation(
+      path: path,
+      firstSizeBytes: firstSizeBytes,
+      firstSeenAt: firstSeenAt,
+      latestSizeBytes: sample.sizeBytes,
+      latestSeenAt: at,
+    );
+  }
+}
+
+/// Whether there is positive evidence that video capture continued while
+/// the app was in the background.
+///
+/// [initial] is the newest in-progress recording file when the app left the
+/// foreground and [latest] the newest one at the return, each with the
+/// growth seen while it was observed. The answer is `true` only when:
+/// - [latest] is the same file as [initial] and it grew by at least
+///   [minBytesPerSecond] per second observed plus [stallAllowanceBytes], or
+/// - [latest] is a newer file (a segment roll in the background) that was
+///   observed for at least [minNewFileWindow] and grew by at least
+///   [minBytesPerSecond] per second in that time.
+///
+/// Anything else (no file, a probe that failed, too little growth) returns
+/// `false`, and the caller keeps the default stall recovery.
+bool backgroundCaptureContinued({
+  required RecordingFileObservation? initial,
+  required RecordingFileObservation? latest,
+  int minBytesPerSecond = backgroundCaptureMinBytesPerSecond,
+  int stallAllowanceBytes = backgroundCaptureStallAllowanceBytes,
+  Duration minNewFileWindow = backgroundCaptureMinNewFileWindow,
+}) {
+  if (initial == null || latest == null) {
+    return false;
+  }
+  int requiredBytes(Duration window) =>
+      (minBytesPerSecond * window.inMilliseconds) ~/ 1000;
+
+  if (latest.path == initial.path) {
+    final window = latest.latestSeenAt.difference(initial.firstSeenAt);
+    if (window <= Duration.zero) {
+      return false;
+    }
+    final growth = latest.latestSizeBytes - initial.firstSizeBytes;
+    return growth >= requiredBytes(window) + stallAllowanceBytes;
+  }
+
+  final window = latest.latestSeenAt.difference(latest.firstSeenAt);
+  if (window < minNewFileWindow) {
+    return false;
+  }
+  final growth = latest.latestSizeBytes - latest.firstSizeBytes;
+  return growth >= requiredBytes(window);
+}
+
+/// Watches the in-progress recording file while the app is in the
+/// background, to tell on return whether capture continued (see
+/// [backgroundCaptureContinued]).
+///
+/// [probe] returns the newest in-progress recording file; it is injected so
+/// tests need no camera. Probes run one at a time, in call order. A probe
+/// that throws or finds no file makes the result `false` (unknown).
+class BackgroundCaptureMonitor {
+  /// Creates a monitor that samples files with [probe].
+  BackgroundCaptureMonitor({required this.probe});
+
+  /// Returns the newest in-progress recording file, or `null`.
+  final Future<RecordingFileSample?> Function() probe;
+
+  RecordingFileObservation? _initial;
+  RecordingFileObservation? _latest;
+  bool _failed = false;
+  bool _observing = false;
+  int _generation = 0;
+  Future<void> _queue = Future<void>.value();
+
+  /// Whether a background period is being observed.
+  bool get isObserving => _observing;
+
+  /// Starts observing a background period that began at [now] and takes
+  /// the first sample. Any earlier observation is dropped.
+  Future<void> start(DateTime now) {
+    reset();
+    _observing = true;
+    return _enqueueSample(now, isInitial: true);
+  }
+
+  /// Takes one more sample at [now] while observing; otherwise does
+  /// nothing.
+  Future<void> sample(DateTime now) {
+    if (!_observing) {
+      return Future<void>.value();
+    }
+    return _enqueueSample(now);
+  }
+
+  /// Takes the final sample at [now], ends the observation and returns
+  /// whether capture continued. `false` when nothing was being observed.
+  Future<bool> finish(DateTime now) async {
+    if (!_observing) {
+      return false;
+    }
+    final generation = _generation;
+    await _enqueueSample(now);
+    if (generation != _generation) {
+      return false;
+    }
+    final continued =
+        !_failed &&
+        backgroundCaptureContinued(initial: _initial, latest: _latest);
+    reset();
+    return continued;
+  }
+
+  /// Ends any observation; samples still running are ignored.
+  void reset() {
+    _generation++;
+    _observing = false;
+    _initial = null;
+    _latest = null;
+    _failed = false;
+  }
+
+  Future<void> _enqueueSample(DateTime now, {bool isInitial = false}) {
+    final generation = _generation;
+    final next = _queue.then((_) => _takeSample(generation, now, isInitial));
+    _queue = next;
+    return next;
+  }
+
+  Future<void> _takeSample(int generation, DateTime now, bool isInitial) async {
+    RecordingFileSample? sample;
+    try {
+      sample = await probe();
+    } catch (_) {
+      sample = null;
+    }
+    if (generation != _generation) {
+      return;
+    }
+    if (sample == null) {
+      _failed = true;
+      return;
+    }
+    final latest = _latest;
+    _latest = latest == null
+        ? RecordingFileObservation.first(sample, now)
+        : latest.extendedWith(sample, now);
+    if (isInitial) {
+      _initial = _latest;
+    }
   }
 }
 

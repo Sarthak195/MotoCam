@@ -1,3 +1,6 @@
+import 'dart:async';
+import 'dart:io';
+
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:motocam/features/recording/recording_screen_logic.dart';
@@ -286,6 +289,312 @@ void main() {
         ]),
         isTrue,
       );
+    });
+  });
+
+  group('backgroundCaptureContinued', () {
+    final t0 = DateTime(2026, 1, 1, 12);
+    const rate = backgroundCaptureMinBytesPerSecond;
+    const allowance = backgroundCaptureStallAllowanceBytes;
+
+    RecordingFileObservation obs(
+      String path,
+      int firstSize,
+      int firstSecond,
+      int latestSize,
+      int latestSecond,
+    ) {
+      return RecordingFileObservation(
+        path: path,
+        firstSizeBytes: firstSize,
+        firstSeenAt: t0.add(Duration(seconds: firstSecond)),
+        latestSizeBytes: latestSize,
+        latestSeenAt: t0.add(Duration(seconds: latestSecond)),
+      );
+    }
+
+    test('same file that kept growing counts as alive', () {
+      final initial = obs('/c/REC1.mp4', 1000, 0, 1000, 0);
+      // 60 s at about 1 MB/s.
+      final latest = obs('/c/REC1.mp4', 1000, 0, 60 * 1000 * 1000, 60);
+      expect(
+        backgroundCaptureContinued(initial: initial, latest: latest),
+        isTrue,
+      );
+    });
+
+    test('same file that stalled is not alive', () {
+      final initial = obs('/c/REC1.mp4', 5000000, 0, 5000000, 0);
+      // Only an encoder flush landed after the app left.
+      final latest = obs('/c/REC1.mp4', 5000000, 0, 5000000 + 200000, 60);
+      expect(
+        backgroundCaptureContinued(initial: initial, latest: latest),
+        isFalse,
+      );
+    });
+
+    test('the floor scales with the time in the background', () {
+      final initial = obs('/c/REC1.mp4', 0, 0, 0, 0);
+      final justEnough = obs('/c/REC1.mp4', 0, 0, rate * 30 + allowance, 30);
+      final tooLittle = obs('/c/REC1.mp4', 0, 0, rate * 30 + allowance - 1, 30);
+      expect(
+        backgroundCaptureContinued(initial: initial, latest: justEnough),
+        isTrue,
+      );
+      expect(
+        backgroundCaptureContinued(initial: initial, latest: tooLittle),
+        isFalse,
+      );
+    });
+
+    test('a roll in the background: a newer file that grows is alive', () {
+      final initial = obs('/c/REC1.mp4', 1000, 0, 30000000, 40);
+      final latest = obs('/c/REC2.mp4', 500000, 41, 20000000, 60);
+      expect(
+        backgroundCaptureContinued(initial: initial, latest: latest),
+        isTrue,
+      );
+    });
+
+    test('a roll in the background: a newer file that stays empty is not '
+        'alive', () {
+      final initial = obs('/c/REC1.mp4', 1000, 0, 1000, 40);
+      final latest = obs('/c/REC2.mp4', 0, 41, 0, 60);
+      expect(
+        backgroundCaptureContinued(initial: initial, latest: latest),
+        isFalse,
+      );
+    });
+
+    test('a newer file seen too briefly is not evidence', () {
+      final initial = obs('/c/REC1.mp4', 1000, 0, 30000000, 59);
+      final latest = obs('/c/REC2.mp4', 0, 59, 900000, 60);
+      expect(
+        backgroundCaptureContinued(initial: initial, latest: latest),
+        isFalse,
+      );
+    });
+
+    test('a missing observation is unknown', () {
+      final some = obs('/c/REC1.mp4', 0, 0, 90000000, 60);
+      expect(backgroundCaptureContinued(initial: null, latest: some), isFalse);
+      expect(backgroundCaptureContinued(initial: some, latest: null), isFalse);
+    });
+  });
+
+  group('BackgroundCaptureMonitor', () {
+    final t0 = DateTime(2026, 1, 1, 12);
+    final modified = DateTime(2026, 1, 1, 12);
+
+    RecordingFileSample sample(String path, int size) =>
+        RecordingFileSample(path: path, sizeBytes: size, modified: modified);
+
+    /// A probe that returns (or throws) the queued results in order, then
+    /// repeats the last one.
+    Future<RecordingFileSample?> Function() probeOf(List<Object?> results) {
+      var index = 0;
+      return () async {
+        final result =
+            results[index < results.length ? index : results.length - 1];
+        index++;
+        if (result is Exception) {
+          throw result;
+        }
+        return result as RecordingFileSample?;
+      };
+    }
+
+    test('alive: the same file grew through the background period', () async {
+      final monitor = BackgroundCaptureMonitor(
+        probe: probeOf([
+          sample('/c/REC1.mp4', 1000),
+          sample('/c/REC1.mp4', 30000000),
+          sample('/c/REC1.mp4', 60000000),
+        ]),
+      );
+      await monitor.start(t0);
+      expect(monitor.isObserving, isTrue);
+      await monitor.sample(t0.add(const Duration(seconds: 30)));
+      final continued = await monitor.finish(
+        t0.add(const Duration(seconds: 60)),
+      );
+      expect(continued, isTrue);
+      expect(monitor.isObserving, isFalse);
+    });
+
+    test('stalled: the file stopped growing', () async {
+      final monitor = BackgroundCaptureMonitor(
+        probe: probeOf([
+          sample('/c/REC1.mp4', 5000000),
+          sample('/c/REC1.mp4', 5100000),
+          sample('/c/REC1.mp4', 5100000),
+        ]),
+      );
+      await monitor.start(t0);
+      await monitor.sample(t0.add(const Duration(seconds: 30)));
+      expect(
+        await monitor.finish(t0.add(const Duration(seconds: 60))),
+        isFalse,
+      );
+    });
+
+    test('roll during the background: the new file is judged on its own '
+        'growth', () async {
+      final alive = BackgroundCaptureMonitor(
+        probe: probeOf([
+          sample('/c/REC1.mp4', 1000),
+          sample('/c/REC2.mp4', 100000),
+          sample('/c/REC2.mp4', 25000000),
+        ]),
+      );
+      await alive.start(t0);
+      await alive.sample(t0.add(const Duration(seconds: 35)));
+      expect(await alive.finish(t0.add(const Duration(seconds: 60))), isTrue);
+
+      final stalled = BackgroundCaptureMonitor(
+        probe: probeOf([
+          sample('/c/REC1.mp4', 1000),
+          sample('/c/REC2.mp4', 0),
+          sample('/c/REC2.mp4', 0),
+        ]),
+      );
+      await stalled.start(t0);
+      await stalled.sample(t0.add(const Duration(seconds: 35)));
+      expect(
+        await stalled.finish(t0.add(const Duration(seconds: 60))),
+        isFalse,
+      );
+    });
+
+    test('a roll first seen at the return is not evidence', () async {
+      final monitor = BackgroundCaptureMonitor(
+        probe: probeOf([
+          sample('/c/REC1.mp4', 1000),
+          sample('/c/REC2.mp4', 900000),
+        ]),
+      );
+      await monitor.start(t0);
+      expect(
+        await monitor.finish(t0.add(const Duration(seconds: 60))),
+        isFalse,
+      );
+    });
+
+    test('probe failure makes the result unknown', () async {
+      final throwsAtEnd = BackgroundCaptureMonitor(
+        probe: probeOf([
+          sample('/c/REC1.mp4', 1000),
+          Exception('cache dir unreadable'),
+        ]),
+      );
+      await throwsAtEnd.start(t0);
+      expect(
+        await throwsAtEnd.finish(t0.add(const Duration(seconds: 60))),
+        isFalse,
+      );
+
+      final failsMidway = BackgroundCaptureMonitor(
+        probe: probeOf([
+          sample('/c/REC1.mp4', 1000),
+          Exception('transient'),
+          sample('/c/REC1.mp4', 90000000),
+        ]),
+      );
+      await failsMidway.start(t0);
+      await failsMidway.sample(t0.add(const Duration(seconds: 30)));
+      expect(
+        await failsMidway.finish(t0.add(const Duration(seconds: 60))),
+        isFalse,
+      );
+    });
+
+    test('no file is unknown', () async {
+      final monitor = BackgroundCaptureMonitor(probe: probeOf([null]));
+      await monitor.start(t0);
+      expect(
+        await monitor.finish(t0.add(const Duration(seconds: 60))),
+        isFalse,
+      );
+    });
+
+    test('finish without start, and after reset, is unknown', () async {
+      final monitor = BackgroundCaptureMonitor(
+        probe: probeOf([
+          sample('/c/REC1.mp4', 0),
+          sample('/c/REC1.mp4', 90000000),
+        ]),
+      );
+      expect(await monitor.finish(t0), isFalse);
+
+      await monitor.start(t0);
+      monitor.reset();
+      expect(monitor.isObserving, isFalse);
+      expect(
+        await monitor.finish(t0.add(const Duration(seconds: 60))),
+        isFalse,
+      );
+    });
+
+    test('a slow first probe still completes before the final one', () async {
+      final gate = Completer<void>();
+      var calls = 0;
+      final monitor = BackgroundCaptureMonitor(
+        probe: () async {
+          calls++;
+          if (calls == 1) {
+            await gate.future;
+            return sample('/c/REC1.mp4', 0);
+          }
+          return sample('/c/REC1.mp4', 90000000);
+        },
+      );
+      unawaited(monitor.start(t0));
+      final result = monitor.finish(t0.add(const Duration(seconds: 60)));
+      gate.complete();
+      expect(await result, isTrue);
+    });
+  });
+
+  group('newestRecordingFileIn', () {
+    late Directory dir;
+
+    setUp(() {
+      dir = Directory.systemTemp.createTempSync('motocam_rec_probe');
+    });
+
+    tearDown(() {
+      dir.deleteSync(recursive: true);
+    });
+
+    test('returns the newest REC*.mp4 and ignores other files', () async {
+      final older = File('${dir.path}/REC111.mp4')..writeAsBytesSync([1, 2]);
+      older.setLastModifiedSync(DateTime(2026, 1, 1, 10));
+      final newer = File('${dir.path}/REC222.mp4')
+        ..writeAsBytesSync([1, 2, 3, 4]);
+      newer.setLastModifiedSync(DateTime(2026, 1, 1, 11));
+      File('${dir.path}/other.mp4')
+        ..writeAsBytesSync([1])
+        ..setLastModifiedSync(DateTime(2026, 1, 1, 12));
+      File('${dir.path}/REC333.tmp')
+        ..writeAsBytesSync([1])
+        ..setLastModifiedSync(DateTime(2026, 1, 1, 12));
+      Directory('${dir.path}/REC444.mp4').createSync();
+
+      final result = await newestRecordingFileIn(dir);
+
+      expect(result, isNotNull);
+      expect(File(result!.path).uri, newer.uri);
+      expect(result.sizeBytes, 4);
+    });
+
+    test('returns null when there is no recording file', () async {
+      File('${dir.path}/notes.txt').writeAsStringSync('x');
+      expect(await newestRecordingFileIn(dir), isNull);
+    });
+
+    test('throws when the directory is missing', () async {
+      final missing = Directory('${dir.path}/missing');
+      await expectLater(newestRecordingFileIn(missing), throwsA(anything));
     });
   });
 }
