@@ -17,7 +17,7 @@ The *Status* column reflects the working tree after the fix phase (2026-10-21) a
 | Check | Result |
 |---|---|
 | `flutter analyze` | No issues, with 7 stricter lint rules added |
-| `flutter test` | 583 of 583 passed (11 before) |
+| `flutter test` | 591 of 591 passed (11 before) |
 | `dart format --set-exit-if-changed lib test` | Clean |
 | `scripts/release-security-precheck.ps1 -SkipTests -SkipAnalyze` | Passed |
 | `flutter build apk --debug` | Succeeded (6 min 43 s in the fix phase; AGP 8.11.1, Kotlin Gradle plugin 2.2.20, camera_android_camerax 0.7.2 with CameraX 1.6.0). One warning: the `jni` plugin, new through path_provider_android 2.3.1, builds with NDK 28.2.13676358 while the app pins 28.1.13356709; it is harmless; the app now pins NDK 28.2.13676358 and the warning is gone |
