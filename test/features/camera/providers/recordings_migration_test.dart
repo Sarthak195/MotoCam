@@ -616,6 +616,47 @@ void main() {
       expect(journal()['done'], isTrue);
     });
 
+    test('after a low-storage stop, a snapshot file whose content changed '
+        'or that already moved is never moved (F036)', () async {
+      // B (locked) and A move by rename; C does not fit.
+      await writeRide(documents, 'b');
+      final a = await writeRide(documents, 'a', locked: false);
+      final aBytes = a.readAsBytesSync();
+      final c = await writeRide(external, 'c', videoBytes: 4096);
+      final stopped = await migrator(freeBytes: (_) async => 100).run();
+      expect(stopped.outcome, RecordingsMigrationOutcome.lowStorage);
+      expect(namesIn(root), contains('seg_b_1.mp4'));
+
+      // The rider deletes ride A; its JSON is put back under its old name
+      // with the same bytes.
+      for (final file in Directory(root).listSync().whereType<File>()) {
+        if (name(file.path).contains('_a')) {
+          file.deleteSync();
+        }
+      }
+      File(a.path).writeAsBytesSync(aBytes);
+      // C's JSON is replaced in place: unlocked, naming B's segments.
+      c.writeAsStringSync(
+        jsonEncode(<String, Object?>{
+          'schemaVersion': 1,
+          'rideSessionId': 'c',
+          'videoPath': 'seg_b_2.mp4',
+          'segmentPaths': <String>['seg_b_1.mp4', 'seg_b_2.mp4'],
+          'lockedSegmentPaths': <String>[],
+        }),
+      );
+      final rootBefore = contents(root);
+      final externalBefore = contents(external);
+
+      final resumed = await migrator().run();
+      expect(resumed.outcome, RecordingsMigrationOutcome.completed);
+      expect(resumed.moved, 0);
+      expect(contents(root), rootBefore);
+      // C's JSON and the videos pinned to it stay together.
+      expect(contents(external), externalBefore);
+      expect(File(a.path).existsSync(), isTrue);
+    });
+
     test('a moved ride reads the same with a file placed at its old '
         'path', () async {
       final original = await writeRide(external, 'old');

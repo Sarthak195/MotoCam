@@ -12,6 +12,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 
 import '../../../core/ride_file/ride_telemetry_codec.dart' as ride_codec;
@@ -234,6 +235,36 @@ class _MigrationUnit {
   RecordingsMigrationSkipReason? skipReason;
 }
 
+/// What the first run recorded about a snapshot file, so a later run moves
+/// only that content: its size, a ride JSON's SHA-256, and for a video
+/// the ride JSON it moved with (`null` for a lone video).
+class _SnapshotPin {
+  const _SnapshotPin({required this.size, this.sha256, this.ride});
+
+  final int size;
+  final String? sha256;
+  final String? ride;
+
+  Map<String, Object?> toJson() => <String, Object?>{
+    'size': size,
+    'sha256': ?sha256,
+    'ride': ?ride,
+  };
+
+  static _SnapshotPin? fromJson(Object? json) {
+    if (json is! Map || json['size'] is! int) {
+      return null;
+    }
+    final sha256 = json['sha256'];
+    final ride = json['ride'];
+    return _SnapshotPin(
+      size: json['size'] as int,
+      sha256: sha256 is String ? sha256 : null,
+      ride: ride is String ? ride : null,
+    );
+  }
+}
+
 enum _FileResult { moved, vanished, collision, paused, lowStorage, failed }
 
 /// Thrown inside a copy when the run must pause.
@@ -263,9 +294,12 @@ class _PauseRequested implements Exception {
 /// bytes) match; otherwise the whole ride stays in its legacy root.
 ///
 /// The migration is one-shot. The first run records every file it plans to
-/// move (the snapshot) in the journal before moving anything; later runs
-/// move only files of that snapshot, so a file that appears in a legacy
-/// root afterwards is never moved into the private root. Once a run
+/// move (the snapshot) in the journal before moving anything, pinned to its
+/// content then (size, a ride JSON's SHA-256, and the ride JSON a video
+/// moves with); later runs move only files of that snapshot whose content
+/// still matches, and a run that reaches its end drops the files that have
+/// moved, so a file that appears or changes in a legacy root afterwards is
+/// never moved into the private root. Once a run
 /// completes with no ride left split, the journal is marked done and every
 /// later run returns at once. A ride JSON larger than
 /// [recordingsMigrationMaxDecodedRideBytes] is not decoded: it moves as it
@@ -364,6 +398,10 @@ class RecordingsMigrator {
   /// Normalised paths of the files this migration may move, or `null`
   /// before the first run has planned (see the class documentation).
   Set<String>? _snapshot;
+
+  /// Pins of the snapshot files by normalised path (see [_SnapshotPin]);
+  /// empty for a journal written before pins existed.
+  Map<String, _SnapshotPin> _pins = <String, _SnapshotPin>{};
 
   /// Whether listing a legacy root failed during this run's plan, so no
   /// snapshot is recorded from it.
@@ -486,6 +524,75 @@ class RecordingsMigrator {
         snapshot.contains(path_utils.normalizePath(path));
   }
 
+  /// Whether [path] may move: it is in the snapshot and still has the
+  /// content the first run pinned (size, a ride JSON's bytes), and a video
+  /// moves with the ride JSON [owner] it moved with then (`null`: as a
+  /// lone video). Anything else stays where it is.
+  Future<bool> _matchesSnapshot(String path, {String? owner}) async {
+    if (!_inSnapshot(path)) {
+      return false;
+    }
+    final pin = _pins[path_utils.normalizePath(path)];
+    if (_snapshot == null || pin == null) {
+      return true;
+    }
+    if (pin.ride != (owner == null ? null : path_utils.normalizePath(owner))) {
+      return false;
+    }
+    try {
+      if (await File(path).length() != pin.size) {
+        return false;
+      }
+      return pin.sha256 == null || await _sha256Of(path) == pin.sha256;
+    } on FileSystemException {
+      return false;
+    }
+  }
+
+  Future<String> _sha256Of(String path) async =>
+      (await sha256.bind(File(path).openRead()).first).toString();
+
+  /// Pins every file of [planned] (see [_SnapshotPin]).
+  Future<void> _pinSnapshot(List<_MigrationUnit> planned) async {
+    final pins = <String, _SnapshotPin>{};
+    for (final unit in planned) {
+      final json = unit.files.isNotEmpty && _isRideJson(unit.files.last)
+          ? path_utils.normalizePath(unit.files.last)
+          : null;
+      for (final path in unit.files) {
+        final key = path_utils.normalizePath(path);
+        try {
+          final size = await File(path).length();
+          pins[key] = key == json
+              ? _SnapshotPin(size: size, sha256: await _sha256Of(path))
+              : _SnapshotPin(size: size, ride: json);
+        } on FileSystemException {
+          // Unpinned: moves on its name alone, as before pins.
+        }
+      }
+    }
+    _pins = pins;
+  }
+
+  /// Drops from the snapshot every file that has moved (gone from its
+  /// legacy root, present in the recordings root), so a file later
+  /// created under its name is never moved.
+  Future<void> _pruneSnapshot() async {
+    final snapshot = _snapshot;
+    if (snapshot == null) {
+      return;
+    }
+    final moved = <String>{};
+    for (final path in snapshot) {
+      if (!await File(path).exists() &&
+          await File(_destinationFor(path)).exists()) {
+        moved.add(path);
+      }
+    }
+    _snapshot = snapshot.difference(moved);
+    _pins.removeWhere((path, _) => moved.contains(path));
+  }
+
   void _noteLowStorage(int bytes) {
     _stoppedForSpace = true;
     final known = _lowStorageBytes;
@@ -517,6 +624,15 @@ class RecordingsMigrator {
       _snapshot = <String>{
         for (final path in snapshot) path_utils.normalizePath(path.toString()),
       };
+      final pins = journal['snapshotPins'];
+      if (pins is Map) {
+        for (final entry in pins.entries) {
+          final pin = _SnapshotPin.fromJson(entry.value);
+          if (pin != null) {
+            _pins[path_utils.normalizePath(entry.key.toString())] = pin;
+          }
+        }
+      }
     }
     final split = journal['split'];
     final knownSplitPaths = <String>{
@@ -561,6 +677,7 @@ class RecordingsMigrator {
         for (final unit in planned)
           for (final path in unit.files) path_utils.normalizePath(path),
       };
+      await _pinSnapshot(planned);
       await _saveJournal(
         ride: journal['ride'],
         file: journal['file'],
@@ -668,6 +785,7 @@ class RecordingsMigrator {
     final allSplitPaths = <String>{...splitPaths, ..._carriedSplitPaths};
     // A paused run keeps the journal naming the ride in flight.
     if (outcome != RecordingsMigrationOutcome.paused) {
+      await _pruneSnapshot();
       await _saveJournal(
         reported: newlyReported,
         split: allSplitPaths,
@@ -749,7 +867,9 @@ class RecordingsMigrator {
       final files = await _listFiles(root);
       final rideUnits = <_MigrationUnit>[];
       for (final file in files) {
-        if (!_isRideJson(file.path) || !_inSnapshot(file.path)) {
+        // A ride JSON whose content changed since the first run stays,
+        // and so do the videos pinned to it.
+        if (!_isRideJson(file.path) || !await _matchesSnapshot(file.path)) {
           continue;
         }
         if (shouldPause()) {
@@ -762,7 +882,8 @@ class RecordingsMigrator {
         final key = path_utils.normalizePath(file.path);
         if (ride_codec.isRideVideoFilePath(file.path) &&
             !isIgnoredFile(file.path) &&
-            _inSnapshot(file.path) &&
+            !claimed.contains(key) &&
+            await _matchesSnapshot(file.path) &&
             claimed.add(key)) {
           units.add(
             _MigrationUnit(
@@ -839,8 +960,8 @@ class RecordingsMigrator {
               continue;
             }
             if (!path_utils.isPathInsideDirectory(path, root) ||
-                !_inSnapshot(path) ||
-                !await File(path).exists()) {
+                !await File(path).exists() ||
+                !await _matchesSnapshot(path, owner: telemetryFile.path)) {
               continue;
             }
             keepsRide = true;
@@ -1199,6 +1320,10 @@ class RecordingsMigrator {
       'file': file,
       'reportedSkips': reported.toList()..sort(),
       if (snapshot != null) 'snapshot': snapshot.toList()..sort(),
+      if (snapshot != null && _pins.isNotEmpty)
+        'snapshotPins': <String, Object?>{
+          for (final entry in _pins.entries) entry.key: entry.value.toJson(),
+        },
       if (split.isNotEmpty) 'split': split.toList()..sort(),
       'lowStorageBytes': ?lowStorageBytes,
       if (done) 'done': true,
