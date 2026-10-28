@@ -187,6 +187,24 @@ void main() {
     expect(galleryRemovalSummary(result), contains('storage permission'));
   });
 
+  test('Android 9: a URI that now names another file deletes nothing and '
+      'is forgotten (F101)', () async {
+    final result = await removeGalleryCopies(
+      links,
+      store: store,
+      delete: answer(<String, GalleryCopyStatus>{
+        'a': GalleryCopyStatus.changed,
+        'b': GalleryCopyStatus.deleted,
+        'c': GalleryCopyStatus.failed,
+      }),
+      requestDelete: (uris) async => fail('no prompt below Android 10'),
+    );
+    expect(result.removed.map((l) => l.fileName), <String>['b']);
+    expect(result.notRemoved.map((l) => l.fileName), <String>['a', 'c']);
+    expect((await store.read()).links.keys, <String>['r1|c']);
+    expect(galleryRemovalSummary(result), contains('could not be removed'));
+  });
+
   test('a newer copy of the same segment is not forgotten', () async {
     final newer = GalleryLink(
       rideSessionId: 'r1',

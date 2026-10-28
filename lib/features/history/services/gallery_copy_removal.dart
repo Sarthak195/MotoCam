@@ -23,7 +23,9 @@ class GalleryRemovalResult {
   /// Links whose copy is gone (deleted now, or already missing).
   final List<GalleryLink> removed;
 
-  /// Links whose copy is still in the gallery; they stay in the store.
+  /// Links whose copy is still in the gallery, or no longer identified by
+  /// its URI ([GalleryCopyStatus.changed]); only the first stay in the
+  /// store.
   final List<GalleryLink> notRemoved;
 
   /// Whether the rider declined the system prompt for at least one copy.
@@ -45,7 +47,10 @@ class GalleryRemovalResult {
 /// are tried once more after [requestStoragePermission] grants it. Copies
 /// MediaStore refuses on API 29+ go to [requestDelete], which shows the
 /// system prompt (one for all of them on API 30+). Links of copies that are
-/// still there stay in [store], so the removal can be tried again.
+/// still there stay in [store], so the removal can be tried again. A link
+/// whose URI no longer names the copy ([GalleryCopyStatus.changed], Android
+/// 9 and lower) is dropped without deleting anything, and counts as not
+/// removed.
 ///
 /// [rideKeys] (the ride's `galleryKeysOfRide` keys) first drops the ride's
 /// queued exports from [store], so no new copy appears after the removal,
@@ -109,14 +114,18 @@ Future<GalleryRemovalResult> removeGalleryCopies(
 
   final removed = <GalleryLink>[];
   final notRemoved = <GalleryLink>[];
+  final forgotten = <GalleryLink>[];
   for (final link in links) {
     final status = statuses[link.contentUri] ?? GalleryCopyStatus.failed;
     (status.isRemoved ? removed : notRemoved).add(link);
+    if (status.isRemoved || status == GalleryCopyStatus.changed) {
+      forgotten.add(link);
+    }
   }
 
-  if (store != null && removed.isNotEmpty) {
+  if (store != null && forgotten.isNotEmpty) {
     await store.update((data) {
-      for (final link in removed) {
+      for (final link in forgotten) {
         // Only the link that was removed, not a newer copy of the segment.
         if (data.links[link.key]?.contentUri == link.contentUri) {
           data.links.remove(link.key);

@@ -19,17 +19,27 @@ void main() {
         'u1': 'deleted',
         'u2': 'needsConsent',
         'u3': 'something new',
+        'u4': 'changed',
       };
     });
-    final statuses = await GalleryCopies.delete(<String>['u1', 'u2', 'u3']);
+    final statuses = await GalleryCopies.delete(<String>[
+      'u1',
+      'u2',
+      'u3',
+      'u4',
+    ]);
     expect(calls.single.method, 'deleteGalleryItems');
+    // The gallery folder goes along, so Android 9 and lower deletes only a
+    // row whose file is in it (F101).
     expect(calls.single.arguments, <String, Object?>{
-      'uris': <String>['u1', 'u2', 'u3'],
+      'uris': <String>['u1', 'u2', 'u3', 'u4'],
+      'relativePath': 'Movies/MotoCam/Recordings',
     });
     expect(statuses, <String, GalleryCopyStatus>{
       'u1': GalleryCopyStatus.deleted,
       'u2': GalleryCopyStatus.needsConsent,
       'u3': GalleryCopyStatus.failed,
+      'u4': GalleryCopyStatus.changed,
     });
   });
 
@@ -53,6 +63,10 @@ void main() {
   test('existingUris returns the URIs the native side still finds', () async {
     messenger.setMockMethodCallHandler(GalleryCopies.channel, (call) async {
       expect(call.method, 'galleryItemsExist');
+      expect(
+        (call.arguments as Map)['relativePath'],
+        'Movies/MotoCam/Recordings',
+      );
       return <String>['u2'];
     });
     expect(await GalleryCopies.existingUris(<String>['u1', 'u2']), <String>{
@@ -69,6 +83,7 @@ void main() {
       GalleryCopyStatus.needsPermission,
       GalleryCopyStatus.denied,
       GalleryCopyStatus.failed,
+      GalleryCopyStatus.changed,
     ]) {
       expect(status.isRemoved, isFalse);
     }

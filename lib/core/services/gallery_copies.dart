@@ -1,5 +1,7 @@
 import 'package:flutter/services.dart';
 
+import '../ride_file/ride_telemetry_codec.dart' as ride_codec;
+
 /// What happened to one gallery copy in a [GalleryCopies.delete] or
 /// [GalleryCopies.requestDelete] call.
 enum GalleryCopyStatus {
@@ -9,6 +11,12 @@ enum GalleryCopyStatus {
   /// The copy no longer exists (for example deleted in a gallery app);
   /// it counts as removed.
   missing,
+
+  /// Android 9 and lower: the URI now names a file outside the gallery
+  /// folder (for example after the media database was rebuilt, its ID
+  /// names another video). Nothing was deleted, and the URI no longer
+  /// identifies the copy.
+  changed,
 
   /// MediaStore refused the delete (API 29+); [GalleryCopies.requestDelete]
   /// asks the rider through a system prompt.
@@ -55,14 +63,19 @@ class GalleryCopies {
   );
 
   /// Which of [uris] still exist, or `null` when that cannot be checked.
-  static Future<Set<String>?> existingUris(List<String> uris) async {
+  /// On Android 9 and lower a URI counts only while its file is directly in
+  /// [relativePath], the gallery folder the copies were written to.
+  static Future<Set<String>?> existingUris(
+    List<String> uris, {
+    String relativePath = ride_codec.publicExportRelativePath,
+  }) async {
     if (uris.isEmpty) {
       return <String>{};
     }
     try {
       final result = await channel.invokeListMethod<String>(
         'galleryItemsExist',
-        <String, Object?>{'uris': uris},
+        <String, Object?>{'uris': uris, 'relativePath': relativePath},
       );
       return result?.toSet();
     } catch (_) {
@@ -74,9 +87,13 @@ class GalleryCopies {
   /// prompt. Copies MotoCam inserted are its own, so this normally deletes
   /// them; a refused one is reported as [GalleryCopyStatus.needsConsent]
   /// (API 29+) or [GalleryCopyStatus.needsPermission] (Android 9 and
-  /// lower).
-  static Future<Map<String, GalleryCopyStatus>> delete(List<String> uris) =>
-      _statuses('deleteGalleryItems', uris);
+  /// lower). On Android 9 and lower, where nothing else stops a delete, a
+  /// URI whose file is not directly in [relativePath] is never deleted
+  /// ([GalleryCopyStatus.changed]).
+  static Future<Map<String, GalleryCopyStatus>> delete(
+    List<String> uris, {
+    String relativePath = ride_codec.publicExportRelativePath,
+  }) => _statuses('deleteGalleryItems', uris, relativePath: relativePath);
 
   /// Asks the rider to allow deleting [uris]: one system prompt for all of
   /// them on API 30+ (`MediaStore.createDeleteRequest`), one prompt per
@@ -90,8 +107,9 @@ class GalleryCopies {
 
   static Future<Map<String, GalleryCopyStatus>> _statuses(
     String method,
-    List<String> uris,
-  ) async {
+    List<String> uris, {
+    String? relativePath,
+  }) async {
     if (uris.isEmpty) {
       return <String, GalleryCopyStatus>{};
     }
@@ -99,7 +117,7 @@ class GalleryCopies {
     try {
       result = await channel.invokeMapMethod<String, Object?>(
         method,
-        <String, Object?>{'uris': uris},
+        <String, Object?>{'uris': uris, 'relativePath': ?relativePath},
       );
     } catch (_) {
       result = null;

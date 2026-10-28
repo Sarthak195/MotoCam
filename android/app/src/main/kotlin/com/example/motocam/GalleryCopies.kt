@@ -7,6 +7,7 @@ import android.content.IntentSender
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
+import android.os.Environment
 import android.os.Handler
 import android.os.Looper
 import android.provider.MediaStore
@@ -14,6 +15,7 @@ import android.util.Log
 import io.flutter.plugin.common.BinaryMessenger
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
+import java.io.File
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
@@ -22,14 +24,20 @@ import java.util.concurrent.Executors
  * `com.example.motocam/gallery`, F045): checking that they exist and
  * removing them.
  *
- * Methods (every one takes `uris`, a list of content URIs):
- * - `galleryItemsExist` returns the URIs that still have a MediaStore row.
+ * Methods (every one takes `uris`, a list of content URIs, and an optional
+ * `relativePath`, the gallery folder under shared storage, default
+ * `Movies/MotoCam/Recordings`):
+ * - `galleryItemsExist` returns the URIs that still have a MediaStore row
+ *   (on API 24-28 only a row whose file is directly in `relativePath`).
  * - `deleteGalleryItems` deletes each URI with `ContentResolver.delete`,
  *   without any prompt (the app owns the media it inserted), and returns
  *   `{uri: status}`: `deleted`; `missing` (the copy is already gone);
- *   `needsConsent` (a `SecurityException` on API 29+, for
- *   `requestDeleteGalleryItems`); `needsPermission` (API 24-28 without
- *   `WRITE_EXTERNAL_STORAGE`, or a `SecurityException` there); `failed`.
+ *   `changed` (API 24-28: the row's file is not directly in
+ *   `relativePath`, for example after the media database was rebuilt and
+ *   the ID now names another video; nothing is deleted); `needsConsent` (a
+ *   `SecurityException` on API 29+, for `requestDeleteGalleryItems`);
+ *   `needsPermission` (API 24-28 without `WRITE_EXTERNAL_STORAGE`, or a
+ *   `SecurityException` there); `failed`.
  * - `requestDeleteGalleryItems` asks the rider: on API 30+ one
  *   `MediaStore.createDeleteRequest` prompt for all URIs; on API 29 the
  *   `RecoverableSecurityException` action of each URI in turn, deleting it
@@ -53,6 +61,8 @@ class GalleryCopies(private val activity: Activity) : MethodChannel.MethodCallHa
         private const val TAG = "MotoCam"
         private const val DELETED = "deleted"
         private const val MISSING = "missing"
+        private const val CHANGED = "changed"
+        private const val DEFAULT_RELATIVE_PATH = "Movies/MotoCam/Recordings"
         private const val NEEDS_CONSENT = "needsConsent"
         private const val NEEDS_PERMISSION = "needsPermission"
         private const val DENIED = "denied"
@@ -80,12 +90,14 @@ class GalleryCopies(private val activity: Activity) : MethodChannel.MethodCallHa
 
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
         val uris = call.argument<List<String>>("uris") ?: emptyList()
+        val relativePath = call.argument<String>("relativePath")
+            ?.takeIf { it.isNotBlank() } ?: DEFAULT_RELATIVE_PATH
         when (call.method) {
             "galleryItemsExist" -> runInBackground(result, "QUERY_FAILED") {
-                uris.filter { exists(it) }
+                uris.filter { exists(it, relativePath) }
             }
             "deleteGalleryItems" -> runInBackground(result, "DELETE_FAILED") {
-                uris.associateWith { deleteQuietly(it) }
+                uris.associateWith { deleteQuietly(it, relativePath) }
             }
             "requestDeleteGalleryItems" -> requestDelete(uris, result)
             else -> result.notImplemented()
@@ -95,9 +107,52 @@ class GalleryCopies(private val activity: Activity) : MethodChannel.MethodCallHa
     private fun parse(uri: String): Uri? =
         Uri.parse(uri).takeIf { it.scheme == "content" }
 
-    /** Whether [uri] still has a MediaStore row this app can see. */
-    private fun exists(uri: String): Boolean {
+    /** Where the row of a content URI points, below API 29. */
+    private enum class LegacyRow { IN_FOLDER, ELSEWHERE, NONE }
+
+    /**
+     * API 24-28: whether the row of [parsed] names a file directly in
+     * [relativePath] under shared storage (where the export wrote the
+     * copy). There the stored URI is the only identity of a copy, and
+     * after the media database is rebuilt its ID can name any other video,
+     * which a delete would remove with no prompt. Throws when the row
+     * cannot be read.
+     */
+    @Suppress("DEPRECATION")
+    private fun legacyRow(parsed: Uri, relativePath: String): LegacyRow {
+        val cursor = activity.contentResolver
+            .query(parsed, arrayOf(MediaStore.MediaColumns.DATA), null, null, null)
+            ?: return LegacyRow.ELSEWHERE
+        val path = cursor.use {
+            if (!it.moveToFirst()) {
+                return LegacyRow.NONE
+            }
+            it.getString(0)
+        } ?: return LegacyRow.ELSEWHERE
+        val folder = File(Environment.getExternalStorageDirectory(), relativePath)
+        val parent = File(path).parentFile ?: return LegacyRow.ELSEWHERE
+        return if (parent.canonicalFile == folder.canonicalFile) {
+            LegacyRow.IN_FOLDER
+        } else {
+            LegacyRow.ELSEWHERE
+        }
+    }
+
+    /**
+     * Whether [uri] still has a MediaStore row this app can see (below
+     * API 29, one whose file is directly in [relativePath]).
+     */
+    private fun exists(uri: String, relativePath: String = DEFAULT_RELATIVE_PATH): Boolean {
         val parsed = parse(uri) ?: return false
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            return try {
+                legacyRow(parsed, relativePath) == LegacyRow.IN_FOLDER
+            } catch (e: Exception) {
+                // Treated as present, as below.
+                Log.w(TAG, "gallery item query failed", e)
+                true
+            }
+        }
         return try {
             activity.contentResolver
                 .query(parsed, arrayOf(MediaStore.MediaColumns._ID), null, null, null)
@@ -115,23 +170,40 @@ class GalleryCopies(private val activity: Activity) : MethodChannel.MethodCallHa
             PackageManager.PERMISSION_GRANTED
 
     /** Deletes [uri] without a prompt; see the class comment for statuses. */
-    private fun deleteQuietly(uri: String): String {
+    private fun deleteQuietly(
+        uri: String,
+        relativePath: String = DEFAULT_RELATIVE_PATH,
+    ): String {
         val parsed = parse(uri) ?: return FAILED
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q && !hasLegacyWritePermission()) {
-            return NEEDS_PERMISSION
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            if (!hasLegacyWritePermission()) {
+                return NEEDS_PERMISSION
+            }
+            // No ownership check or prompt protects another file here:
+            // delete only a row that still names a file in the folder.
+            try {
+                when (legacyRow(parsed, relativePath)) {
+                    LegacyRow.NONE -> return MISSING
+                    LegacyRow.ELSEWHERE -> return CHANGED
+                    LegacyRow.IN_FOLDER -> {}
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "gallery item query failed", e)
+                return FAILED
+            }
         }
         return try {
             val rows = activity.contentResolver.delete(parsed, null, null)
             when {
                 rows > 0 -> DELETED
-                !exists(uri) -> MISSING
+                !exists(uri, relativePath) -> MISSING
                 else -> FAILED
             }
         } catch (e: SecurityException) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) NEEDS_CONSENT else NEEDS_PERMISSION
         } catch (e: Exception) {
             Log.w(TAG, "gallery item delete failed", e)
-            if (!exists(uri)) MISSING else FAILED
+            if (!exists(uri, relativePath)) MISSING else FAILED
         }
     }
 
