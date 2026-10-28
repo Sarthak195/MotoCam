@@ -199,7 +199,7 @@ Consequences:
 - A **Locked Clips** section lists rides with any locked segment; **All Rides** lists the rest.
 - Each card is titled with the ride's date and time, with the video file name under it. Badges, as shown in the UI:
   - `VIDEO ONLY (RECOVERED)`: a video with no ride JSON.
-  - One of `INTEGRITY WARNING`, `SIMULATED GPS`, `DATA UNMODIFIED` or `UNVERIFIED`; see [Integrity statuses](#integrity-statuses).
+  - One of `INTEGRITY WARNING`, `SIMULATED GPS`, `SIGNED ON THIS PHONE`, `DATA UNMODIFIED` or `UNVERIFIED`; see [Integrity statuses](#integrity-statuses).
   - `VIDEOS VERIFIED` or `VIDEO CHECK FAILED`: the result of the segment checks stored when the ride was opened or unlocked. Nothing is hashed in the list.
   - `QUARANTINED n`: segment paths outside the recordings folder.
   - `INCOMPLETE`: some listed segment files are missing.
