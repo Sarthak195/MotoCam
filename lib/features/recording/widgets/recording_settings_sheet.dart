@@ -35,6 +35,7 @@ class RecordingSettingsFormResult {
     required this.loopSegmentCount,
     required this.incidentSensitivity,
     this.exportLockedClipsToGallery = false,
+    this.keepScreenOnWhileRecording = true,
   });
 
   /// Requested vertical resolution in pixels (e.g. 1080).
@@ -67,6 +68,9 @@ class RecordingSettingsFormResult {
   /// Whether locked clips are copied to the shared gallery when a ride
   /// stops (Android).
   final bool exportLockedClipsToGallery;
+
+  /// Whether the screen is kept on while a recording is active (Android).
+  final bool keepScreenOnWhileRecording;
 }
 
 /// Modal form for the recording, camera and telemetry settings.
@@ -104,6 +108,7 @@ class _RecordingSettingsSheetState extends State<RecordingSettingsSheet> {
   late QualityPresetTier selectedPresetTier;
   late bool audioEnabled;
   late bool exportLockedClipsToGallery;
+  late bool keepScreenOnWhileRecording;
   late int speedRefreshMs;
   late int segmentDurationSeconds;
   late int loopSegmentCount;
@@ -128,6 +133,7 @@ class _RecordingSettingsSheetState extends State<RecordingSettingsSheet> {
         QualityPresetTier.balanced;
     audioEnabled = settings.audioEnabled;
     exportLockedClipsToGallery = settings.exportLockedClipsToGallery;
+    keepScreenOnWhileRecording = settings.keepScreenOnWhileRecording;
     speedRefreshMs = settings.speedRefreshMs;
     segmentDurationSeconds = settings.segmentDurationSeconds;
     loopSegmentCount = settings.loopSegmentCount;
@@ -611,6 +617,27 @@ class _RecordingSettingsSheetState extends State<RecordingSettingsSheet> {
                       setState(() => exportLockedClipsToGallery = value);
                     },
                   ),
+                if (defaultTargetPlatform == TargetPlatform.android)
+                  SwitchListTile.adaptive(
+                    contentPadding: EdgeInsets.zero,
+                    activeThumbColor: Colors.blue,
+                    activeTrackColor: Colors.blue.withValues(alpha: 0.35),
+                    value: keepScreenOnWhileRecording,
+                    title: const Text(
+                      'Keep screen on while recording',
+                      style: TextStyle(color: Colors.white),
+                    ),
+                    subtitle: const Text(
+                      'Recording is designed to continue with the screen off, '
+                      'but this is not yet confirmed on every phone. Keeping '
+                      'the screen on is the safe fallback; it uses more '
+                      'battery.',
+                      style: TextStyle(color: Colors.white70),
+                    ),
+                    onChanged: (value) {
+                      setState(() => keepScreenOnWhileRecording = value);
+                    },
+                  ),
                 const SizedBox(height: 8),
                 SizedBox(
                   width: double.infinity,
@@ -629,6 +656,8 @@ class _RecordingSettingsSheetState extends State<RecordingSettingsSheet> {
                           incidentSensitivity: incidentSensitivity,
                           exportLockedClipsToGallery:
                               exportLockedClipsToGallery,
+                          keepScreenOnWhileRecording:
+                              keepScreenOnWhileRecording,
                         ),
                       );
                     },

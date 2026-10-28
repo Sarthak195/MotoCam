@@ -29,6 +29,29 @@ void main() {
       expect(settings.incidentSensitivity, IncidentSensitivity.medium);
       expect(settings.selectedCameraName, '');
       expect(settings.exportLockedClipsToGallery, isFalse);
+      expect(settings.keepScreenOnWhileRecording, isTrue);
+    });
+
+    test('persists the keep-screen-on setting', () async {
+      final settings = await _loadWith({});
+      var notified = 0;
+      settings.addListener(() => notified++);
+
+      await settings.updateKeepScreenOnWhileRecording(false);
+      expect(settings.keepScreenOnWhileRecording, isFalse);
+      expect(notified, 1);
+
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getBool('keep_screen_on_while_recording'), isFalse);
+
+      final reloaded = AppSettingsProvider();
+      await reloaded.load();
+      expect(reloaded.keepScreenOnWhileRecording, isFalse);
+
+      await reloaded.updateKeepScreenOnWhileRecording(true);
+      final again = AppSettingsProvider();
+      await again.load();
+      expect(again.keepScreenOnWhileRecording, isTrue);
     });
 
     test('persists the gallery export opt-in', () async {

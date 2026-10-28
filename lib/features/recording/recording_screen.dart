@@ -709,6 +709,19 @@ class _RecordingScreenState extends State<RecordingScreen>
         backgroundProtected = false;
         debugPrint('Starting the foreground recording service failed: $e');
       }
+      if (!mounted) {
+        // dispose() already asked to stop the service, possibly before the
+        // start above reached the native side; stop again so neither the
+        // service nor the camera lifecycle hold outlives this screen.
+        await _stopForegroundServiceSafely();
+        return;
+      }
+      // Applied whatever the service result: keeping the screen on is the
+      // fallback when screen-off capture is unavailable. The native side
+      // clears it at stopForegroundRecording.
+      await _backgroundRecordingService.setKeepScreenOn(
+        enabled: settings.keepScreenOnWhileRecording,
+      );
       await _recordingTimerSubscription?.cancel();
       _recordingTimerSubscription = camera.timerStream.listen((elapsed) {
         unawaited(
@@ -1971,9 +1984,23 @@ class _RecordingScreenState extends State<RecordingScreen>
       await settings.updateExportLockedClipsToGallery(
         result.exportLockedClipsToGallery,
       );
+      await settings.updateKeepScreenOnWhileRecording(
+        result.keepScreenOnWhileRecording,
+      );
 
       if (!mounted) {
         return;
+      }
+
+      // Takes effect at once for a recording in progress; the native side
+      // ignores it while nothing is recording.
+      if (cameraProvider.isRecording) {
+        await _backgroundRecordingService.setKeepScreenOn(
+          enabled: result.keepScreenOnWhileRecording,
+        );
+        if (!mounted) {
+          return;
+        }
       }
 
       final telemetry = context.read<TelemetryProvider>();

@@ -169,7 +169,31 @@ class BackgroundRecordingService {
     }
   }
 
-  /// Stops the foreground service and removes its notification.
+  /// Asks the activity to keep the screen on while a recording is active.
+  ///
+  /// The native side applies the window flag only between
+  /// [startForegroundRecording] and [stopForegroundRecording] (the flag is
+  /// cleared there and when the activity is destroyed), so call this after
+  /// the start. Best effort: platform errors are logged, not thrown. A
+  /// no-op off Android.
+  Future<void> setKeepScreenOn({required bool enabled}) async {
+    if (!_isAndroid) {
+      return;
+    }
+    try {
+      await _channel.invokeMethod<void>('setKeepScreenOn', {
+        'enabled': enabled,
+      });
+    } on PlatformException catch (error) {
+      debugPrint('[MotoCam] setKeepScreenOn failed: $error');
+    } on MissingPluginException catch (error) {
+      debugPrint('[MotoCam] setKeepScreenOn unavailable: $error');
+    }
+  }
+
+  /// Stops the foreground service and removes its notification. On
+  /// Android this also clears the keep-screen-on flag and releases the
+  /// activity's camera lifecycle hold.
   Future<void> stopForegroundRecording() async {
     if (!_isAndroid) {
       return;

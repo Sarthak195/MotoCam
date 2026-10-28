@@ -68,6 +68,7 @@ class AppSettingsProvider extends ChangeNotifier {
   static const _videoBitrateMbpsKey = 'video_bitrate_mbps';
   static const _audioEnabledKey = 'recording_audio_enabled';
   static const _exportLockedClipsKey = 'export_locked_clips_to_gallery';
+  static const _keepScreenOnKey = 'keep_screen_on_while_recording';
   static const _speedRefreshMsKey = 'speed_refresh_ms';
   static const _segmentDurationSecondsKey = 'dashcam_segment_duration_seconds';
   static const _segmentMinutesKey = 'dashcam_segment_minutes';
@@ -138,6 +139,7 @@ class AppSettingsProvider extends ChangeNotifier {
   String _qualityProfileId = '1080p_30_8';
   bool _audioEnabled = true;
   bool _exportLockedClipsToGallery = false;
+  bool _keepScreenOnWhileRecording = true;
   int _speedRefreshMs = 100;
   int _segmentDurationSeconds = 300;
   int _loopSegmentCount = 24;
@@ -166,6 +168,11 @@ class AppSettingsProvider extends ChangeNotifier {
   /// default: gallery copies are visible to every gallery app and MotoCam
   /// never removes them.
   bool get exportLockedClipsToGallery => _exportLockedClipsToGallery;
+
+  /// Whether the screen is kept on while a recording is active (Android).
+  /// On by default: it is the fallback in case capture does not continue
+  /// with the screen off on a given phone.
+  bool get keepScreenOnWhileRecording => _keepScreenOnWhileRecording;
 
   /// Telemetry UI refresh interval in milliseconds, clamped to 100-1000.
   int get speedRefreshMs => _speedRefreshMs;
@@ -307,6 +314,7 @@ class AppSettingsProvider extends ChangeNotifier {
     );
     _audioEnabled = prefs.getBool(_audioEnabledKey) ?? true;
     _exportLockedClipsToGallery = prefs.getBool(_exportLockedClipsKey) ?? false;
+    _keepScreenOnWhileRecording = prefs.getBool(_keepScreenOnKey) ?? true;
     _speedRefreshMs = _clampSpeedRefreshMs(
       prefs.getInt(_speedRefreshMsKey) ?? 100,
     );
@@ -430,6 +438,17 @@ class AppSettingsProvider extends ChangeNotifier {
     notifyListeners();
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool(_exportLockedClipsKey, enabled);
+  }
+
+  /// Sets and persists [keepScreenOnWhileRecording].
+  Future<void> updateKeepScreenOnWhileRecording(bool enabled) async {
+    if (_keepScreenOnWhileRecording == enabled) {
+      return;
+    }
+    _keepScreenOnWhileRecording = enabled;
+    notifyListeners();
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_keepScreenOnKey, enabled);
   }
 
   /// Sets and persists the telemetry refresh interval, clamped to 100-1000 ms.

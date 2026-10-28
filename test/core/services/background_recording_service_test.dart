@@ -107,6 +107,41 @@ void main() {
       );
     });
 
+    test('setKeepScreenOn sends the enabled flag', () async {
+      final arguments = <Object?>[];
+      messenger().setMockMethodCallHandler(_channel, (call) async {
+        calls.add(call.method);
+        arguments.add(call.arguments);
+        return null;
+      });
+
+      await service.setKeepScreenOn(enabled: true);
+      await service.setKeepScreenOn(enabled: false);
+
+      expect(calls, ['setKeepScreenOn', 'setKeepScreenOn']);
+      expect(arguments, [
+        {'enabled': true},
+        {'enabled': false},
+      ]);
+    });
+
+    test('setKeepScreenOn swallows platform errors', () async {
+      messenger().setMockMethodCallHandler(_channel, (call) async {
+        throw PlatformException(code: 'ERROR');
+      });
+      await expectLater(service.setKeepScreenOn(enabled: true), completes);
+
+      // An older native side without the method.
+      messenger().setMockMethodCallHandler(_channel, null);
+      await expectLater(service.setKeepScreenOn(enabled: true), completes);
+    });
+
+    test('setKeepScreenOn is a no-op off Android', () async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      await service.setKeepScreenOn(enabled: true);
+      expect(calls, isEmpty);
+    });
+
     test('a failing notification update does not throw', () async {
       throwOnUpdate = true;
       await expectLater(
