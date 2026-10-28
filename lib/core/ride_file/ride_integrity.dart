@@ -2,9 +2,11 @@
 /// key: building it for the writer, re-sealing it after a lock change, and
 /// checking it when a ride is read.
 ///
-/// The envelope is an unkeyed SHA-256 checksum: it shows that a ride is
-/// unmodified since it was recorded (or accidentally corrupted), but anyone
-/// who can rewrite the files can also recompute it. It is not tamper-proof.
+/// The envelope is a SHA-256 checksum: it shows that a ride is unmodified
+/// since it was recorded (or accidentally corrupted), but anyone who can
+/// rewrite the files can also recompute it. A version 3 envelope adds a
+/// signature by the recording phone's Keystore key (`ride_signature.dart`),
+/// which only the app on that phone and install can produce.
 ///
 /// Part of the ride-file codec; import it through
 /// `ride_telemetry_codec.dart`.
@@ -16,6 +18,7 @@ import 'package:flutter/foundation.dart';
 
 import '../utils/integrity_utils.dart' as integrity_utils;
 import '../utils/path_utils.dart' as path_utils;
+import 'ride_signature.dart';
 
 /// Value of the envelope's `algo` field.
 const String integrityAlgorithmSha256 = 'sha256';
@@ -27,6 +30,16 @@ const String integrityAlgorithmSha256 = 'sha256';
 /// Envelopes without an `envelopeVersion` field are legacy (version 1):
 /// their `payloadHash` covers only the ride JSON minus `integrity`.
 const int boundIntegrityEnvelopeVersion = 2;
+
+/// Envelope format that adds `signature` (see `ride_signature.dart`). Its
+/// `payloadHash` covers the ride JSON and every envelope field except
+/// `payloadHash` and `signature`; the signature covers the `payloadHash`
+/// string.
+const int signedIntegrityEnvelopeVersion = 3;
+
+/// The highest `envelopeVersion` readers accept; anything above it is
+/// reported as `unsupported-integrity-version`.
+const int maxIntegrityEnvelopeVersion = signedIntegrityEnvelopeVersion;
 
 /// First ride-JSON `schemaVersion` for which the integrity envelope is
 /// mandatory on completed rides (`sessionComplete` not `false`). Readers
@@ -55,34 +68,54 @@ enum RideIntegrityStatus {
 
 /// Result of an integrity check: a [status] plus machine-readable [issues]
 /// such as `payload-hash-mismatch` or `segment-hash-mismatch:<path>`.
+///
+/// A report from the file alone (a *content* report, as the ride index
+/// caches it) carries the [signature] facts; [applySignerContext] adds what
+/// the reading phone knows ([signedBy], and the `signature-removed` issue)
+/// and keeps the content report in [contentReport].
 class RideIntegrityReport {
   const RideIntegrityReport._({
     required this.status,
     required this.hasMetadata,
     required this.issues,
-  });
+    this.signature,
+    RideSignedBy? signedBy,
+    this.signerContext,
+    RideIntegrityReport? content,
+  }) : _signedBy = signedBy,
+       _content = content;
 
   /// Report for a ride without an integrity envelope.
   const RideIntegrityReport.unknown()
     : status = RideIntegrityStatus.unknown,
       hasMetadata = false,
-      issues = const <String>[];
+      issues = const <String>[],
+      signature = null,
+      _signedBy = null,
+      signerContext = null,
+      _content = null;
 
-  /// Report for a ride whose checks all passed.
-  const RideIntegrityReport.verified()
+  /// Report for a ride whose checks all passed; [signature] holds the facts
+  /// of a version 3 envelope's signature.
+  const RideIntegrityReport.verified({this.signature})
     : status = RideIntegrityStatus.verified,
       hasMetadata = true,
-      issues = const <String>[];
+      issues = const <String>[],
+      _signedBy = null,
+      signerContext = null,
+      _content = null;
 
   /// Report for a ride with at least one failed check listed in [issues].
   factory RideIntegrityReport.modified(
     List<String> issues, {
     bool hasMetadata = true,
+    RideSignatureFacts? signature,
   }) {
     return RideIntegrityReport._(
       status: RideIntegrityStatus.modified,
       hasMetadata: hasMetadata,
       issues: List<String>.unmodifiable(issues),
+      signature: signature,
     );
   }
 
@@ -94,6 +127,29 @@ class RideIntegrityReport {
 
   /// Failed checks; empty unless [status] is [RideIntegrityStatus.modified].
   final List<String> issues;
+
+  /// Facts of the envelope's signature (version 3 envelopes), or `null`
+  /// when the file carries none.
+  final RideSignatureFacts? signature;
+
+  final RideSignedBy? _signedBy;
+
+  /// Who signed the ride. Without a signer context a valid signature gives
+  /// [RideSignedBy.unknownSigner]; see [applySignerContext].
+  RideSignedBy get signedBy =>
+      _signedBy ??
+      (signature?.valid == true
+          ? RideSignedBy.unknownSigner
+          : RideSignedBy.none);
+
+  /// The context [applySignerContext] used, or `null` for a content report.
+  final RideSignerContext? signerContext;
+
+  final RideIntegrityReport? _content;
+
+  /// The report from the file alone, before [applySignerContext]: what the
+  /// ride index stores.
+  RideIntegrityReport get contentReport => _content ?? this;
 
   /// Whether [status] is [RideIntegrityStatus.verified]. Only tests read it.
   @visibleForTesting
@@ -147,25 +203,35 @@ int integrityEnvelopeVersionOf(Map<dynamic, dynamic> envelope) {
 /// Computes the `payloadHash` for a ride JSON map ([rideJson] may or may not
 /// contain its `integrity` envelope).
 ///
-/// * Bound envelopes (`envelopeVersion` >= [boundIntegrityEnvelopeVersion]):
-///   hashes the whole ride JSON with the envelope's `payloadHash` removed.
+/// * Signed envelopes (`envelopeVersion` >=
+///   [signedIntegrityEnvelopeVersion]): hashes the whole ride JSON with the
+///   envelope's `payloadHash` and `signature` removed.
+/// * Bound envelopes (`envelopeVersion` 2): hashes the whole ride JSON with
+///   the envelope's `payloadHash` removed.
 /// * Legacy envelopes, or no envelope: hashes the ride JSON minus
 ///   `integrity`, which is how files written before version 2 were sealed.
 String computeRidePayloadHash(Map<String, dynamic> rideJson) {
   final hashed = Map<String, dynamic>.from(rideJson);
   final rawIntegrity = hashed['integrity'];
-  if (rawIntegrity is Map &&
-      integrityEnvelopeVersionOf(rawIntegrity) >=
-          boundIntegrityEnvelopeVersion) {
-    hashed['integrity'] = Map<dynamic, dynamic>.from(rawIntegrity)
+  final version = rawIntegrity is Map
+      ? integrityEnvelopeVersionOf(rawIntegrity)
+      : 1;
+  if (rawIntegrity is Map && version >= boundIntegrityEnvelopeVersion) {
+    final envelope = Map<dynamic, dynamic>.from(rawIntegrity)
       ..remove('payloadHash');
+    if (version >= signedIntegrityEnvelopeVersion) {
+      envelope.remove('signature');
+    }
+    hashed['integrity'] = envelope;
   } else {
     hashed.remove('integrity');
   }
   return integrity_utils.hashJsonCanonical(hashed);
 }
 
-/// Builds a bound (version 2) integrity envelope for [payload].
+/// Builds a bound integrity envelope for [payload]: version 2 by default,
+/// or, with [envelopeVersion] [signedIntegrityEnvelopeVersion], a version
+/// 3 envelope still without its `signature` (see [withRideSignature]).
 ///
 /// [payload] is the ride JSON without its `integrity` key. [segmentHashes]
 /// maps each declared segment path to its SHA-256 digest, and
@@ -176,10 +242,16 @@ Map<String, dynamic> buildIntegrityEnvelope({
   required Map<String, String> segmentHashes,
   required int segmentCount,
   DateTime? generatedAt,
+  int envelopeVersion = boundIntegrityEnvelopeVersion,
 }) {
+  assert(
+    envelopeVersion == boundIntegrityEnvelopeVersion ||
+        envelopeVersion == signedIntegrityEnvelopeVersion,
+    'Only version 2 and 3 envelopes are written.',
+  );
   final envelope = <String, dynamic>{
     'algo': integrityAlgorithmSha256,
-    'envelopeVersion': boundIntegrityEnvelopeVersion,
+    'envelopeVersion': envelopeVersion,
     'segmentCount': segmentCount,
     'hashedSegmentCount': segmentHashes.length,
     'segmentHashes': Map<String, String>.from(segmentHashes),
@@ -192,12 +264,19 @@ Map<String, dynamic> buildIntegrityEnvelope({
 
 /// Recomputes the `payloadHash` of the envelope already stored in
 /// [rideJson] after other fields changed, keeping its `segmentHashes` and
-/// other fields as they are and upgrading it to the bound format.
+/// other fields as they are and setting `envelopeVersion` to
+/// [envelopeVersion] (2, the bound format, by default). Any `signature` is
+/// dropped: it signed the old hash. For version 3 the caller then adds a
+/// new signature with [withRideSignature].
 ///
 /// Callers must verify the ride (including its segment hashes) before
 /// re-sealing, otherwise this would seal unverified data. Throws a
-/// [StateError] when [rideJson] has no envelope map.
-void resealIntegrityEnvelope(Map<String, dynamic> rideJson) {
+/// [StateError] when [rideJson] has no envelope map. Returns the new
+/// `payloadHash`.
+String resealIntegrityEnvelope(
+  Map<String, dynamic> rideJson, {
+  int envelopeVersion = boundIntegrityEnvelopeVersion,
+}) {
   final rawIntegrity = rideJson['integrity'];
   if (rawIntegrity is! Map) {
     throw StateError('Ride JSON has no integrity envelope to re-seal.');
@@ -206,9 +285,28 @@ void resealIntegrityEnvelope(Map<String, dynamic> rideJson) {
   final envelope =
       rawIntegrity.map((key, value) => MapEntry(key.toString(), value))
         ..remove('payloadHash')
-        ..['envelopeVersion'] = boundIntegrityEnvelopeVersion;
+        ..remove('signature')
+        ..['envelopeVersion'] = envelopeVersion;
   rideJson['integrity'] = envelope;
-  envelope['payloadHash'] = computeRidePayloadHash(rideJson);
+  final payloadHash = computeRidePayloadHash(rideJson);
+  envelope['payloadHash'] = payloadHash;
+  return payloadHash;
+}
+
+/// Returns a copy of the version 3 ride JSON [rideJson] whose envelope
+/// carries [signature] (stored under `integrity.signature`). The payload
+/// hash does not cover the signature, so it stays valid.
+Map<String, dynamic> withRideSignature(
+  Map<String, dynamic> rideJson,
+  RideSignatureData signature,
+) {
+  final envelope = Map<String, dynamic>.from(rideJson['integrity'] as Map);
+  assert(
+    integrityEnvelopeVersionOf(envelope) >= signedIntegrityEnvelopeVersion,
+    'Only a version 3 envelope carries a signature.',
+  );
+  envelope['signature'] = signature.toJson();
+  return <String, dynamic>{...rideJson, 'integrity': envelope};
 }
 
 /// Checks the integrity envelope of [json] against the ride's trusted
@@ -262,7 +360,7 @@ Future<RideIntegrityReport> checkRideIntegrity({
   if (rawEnvelopeVersion != null &&
       (rawEnvelopeVersion is! num ||
           envelopeVersion < 1 ||
-          envelopeVersion > boundIntegrityEnvelopeVersion)) {
+          envelopeVersion > maxIntegrityEnvelopeVersion)) {
     issues.add('unsupported-integrity-version:$rawEnvelopeVersion');
   }
 
@@ -274,6 +372,21 @@ Future<RideIntegrityReport> checkRideIntegrity({
     final actualPayloadHash = computeRidePayloadHash(json);
     if (actualPayloadHash != expectedPayloadHash) {
       issues.add('payload-hash-mismatch');
+    }
+  }
+
+  // Only version 3 envelopes are signed; a `signature` in an older one is
+  // covered by its payload hash but never read.
+  RideSignatureFacts? signature;
+  if (envelopeVersion >= signedIntegrityEnvelopeVersion &&
+      envelopeVersion <= maxIntegrityEnvelopeVersion) {
+    final rawSignature = integrity['signature'];
+    if (rawSignature == null) {
+      issues.add('missing-signature');
+    } else {
+      final check = verifyRideSignature(rawSignature, expectedPayloadHash);
+      signature = check.facts;
+      issues.addAll(check.issues);
     }
   }
 
@@ -319,9 +432,9 @@ Future<RideIntegrityReport> checkRideIntegrity({
   }
 
   if (issues.isEmpty) {
-    return const RideIntegrityReport.verified();
+    return RideIntegrityReport.verified(signature: signature);
   }
-  return RideIntegrityReport.modified(issues);
+  return RideIntegrityReport.modified(issues, signature: signature);
 }
 
 /// Returns [integrity] downgraded to modified, with the extra issue
@@ -342,6 +455,47 @@ RideIntegrityReport applyQuarantineToIntegrity(
   return RideIntegrityReport.modified(
     issues,
     hasMetadata: integrity.hasMetadata,
+    signature: integrity.signature,
+  );
+}
+
+/// Returns [report] (its [RideIntegrityReport.contentReport] is used, so a
+/// report that already had a context is re-derived) with what [context]
+/// knows: [RideIntegrityReport.signedBy], and, for a ride this install
+/// wrote signed ([RideSignerContext.signedRideIds]) that is now unsigned or
+/// signed by a key known to differ, the status `modified` with the issue
+/// `signature-removed` (see [resolveRideSigner]). With no [context] the
+/// content report is returned.
+RideIntegrityReport applySignerContext(
+  RideIntegrityReport report, {
+  required String? rideSessionId,
+  required RideSignerContext? context,
+}) {
+  final content = report.contentReport;
+  if (context == null) {
+    return content;
+  }
+  final signer = resolveRideSigner(
+    facts: content.signature,
+    rideSessionId: rideSessionId,
+    context: context,
+  );
+  final issues = signer.signatureRemoved
+      ? List<String>.unmodifiable(<String>[
+          ...content.issues,
+          'signature-removed',
+        ])
+      : content.issues;
+  return RideIntegrityReport._(
+    status: signer.signatureRemoved
+        ? RideIntegrityStatus.modified
+        : content.status,
+    hasMetadata: content.hasMetadata,
+    issues: issues,
+    signature: content.signature,
+    signedBy: signer.signedBy,
+    signerContext: context,
+    content: content,
   );
 }
 

@@ -28,8 +28,10 @@ import 'package:flutter/foundation.dart';
 
 import '../utils/path_utils.dart' as path_utils;
 import 'ride_integrity.dart';
+import 'ride_signature.dart';
 
 export 'ride_integrity.dart';
+export 'ride_signature.dart';
 
 /// `schemaVersion` written by the current writer.
 const int rideFileSchemaVersion = 3;
@@ -865,20 +867,23 @@ Future<DecodedRideFile?> decodeRideFile({
 /// Sets `lockedSegmentPaths` of [json] in place: every segment of the ride
 /// in the form written in the file when [locked], or `[]` otherwise. Every
 /// other key keeps its value and position. With [reseal] the envelope gets
-/// a new payload hash ([resealIntegrityEnvelope]); callers pass it only for
-/// a fully verified ride.
-void applyLockState(
+/// a new payload hash ([resealIntegrityEnvelope]) for [envelopeVersion]
+/// (any `signature` is dropped), which is returned; callers pass it only
+/// for a fully verified ride, and sign a version 3 result themselves.
+String? applyLockState(
   Map<String, dynamic> json, {
   required ResolvedRideSegments segments,
   required bool locked,
   required bool reseal,
+  int envelopeVersion = boundIntegrityEnvelopeVersion,
 }) {
   json['lockedSegmentPaths'] = locked
       ? segments.segmentPaths.map(segments.declaredPathFor).toList()
       : <String>[];
   if (reseal) {
-    resealIntegrityEnvelope(json);
+    return resealIntegrityEnvelope(json, envelopeVersion: envelopeVersion);
   }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -1157,6 +1162,84 @@ Future<Map<String, dynamic>> sealRidePayload(
     ),
   );
   return <String, dynamic>{...payload, 'integrity': envelope};
+}
+
+/// The final save's ride JSON from [sealAndSignRidePayload] and the
+/// signature it carries (`null` when it was sealed as version 2).
+typedef SealedRidePayload = ({
+  Map<String, dynamic> json,
+  RideSignatureData? signature,
+});
+
+/// Seals [payload] like [sealRidePayload] and signs it with [signer] when
+/// it can: the final save of a ride.
+///
+/// One background isolate builds both a version 2 envelope and a version 3
+/// envelope without its signature. [signer] (which may use a platform
+/// channel, so this runs on the UI isolate) signs the version 3
+/// `payloadHash`, and a background isolate checks the answer. The result
+/// is the version 3 JSON with the signature, or, when [signer] is `null`,
+/// returns `null`, throws, takes longer than [signerTimeout] or answers
+/// with a signature that does not verify, the version 2 JSON exactly as
+/// [sealRidePayload] builds it. Signing never makes the save fail.
+Future<SealedRidePayload> sealAndSignRidePayload(
+  Map<String, dynamic> payload, {
+  required Map<String, String> segmentHashes,
+  required int segmentCount,
+  required DateTime generatedAt,
+  required RidePayloadSigner? signer,
+  Duration signerTimeout = const Duration(seconds: 6),
+}) async {
+  final envelopes = await Isolate.run(
+    () => (
+      bound: buildIntegrityEnvelope(
+        payload: payload,
+        segmentHashes: segmentHashes,
+        segmentCount: segmentCount,
+        generatedAt: generatedAt,
+      ),
+      signed: buildIntegrityEnvelope(
+        payload: payload,
+        segmentHashes: segmentHashes,
+        segmentCount: segmentCount,
+        generatedAt: generatedAt,
+        envelopeVersion: signedIntegrityEnvelopeVersion,
+      ),
+    ),
+  );
+  final unsigned = <String, dynamic>{...payload, 'integrity': envelopes.bound};
+  if (signer == null) {
+    return (json: unsigned, signature: null);
+  }
+
+  final payloadHash = envelopes.signed['payloadHash'] as String;
+  RideSignatureData? signature;
+  try {
+    signature = await signer(payloadHash).timeout(signerTimeout);
+    if (signature != null) {
+      final candidate = signature;
+      final valid = await Isolate.run(
+        () => isValidRideSignature(candidate, payloadHash),
+      );
+      if (!valid) {
+        debugPrint('Ride signing: the phone returned an invalid signature.');
+        signature = null;
+      }
+    }
+  } catch (error) {
+    debugPrint('Ride signing failed: $error');
+    signature = null;
+  }
+  if (signature == null) {
+    return (json: unsigned, signature: null);
+  }
+  return (
+    json: withRideSignature(<String, dynamic>{
+      ...payload,
+      'integrity': envelopes.signed,
+    }, signature),
+    signature: signature,
+  );
 }
 
 /// The file content of a ride JSON map: compact `jsonEncode`.
