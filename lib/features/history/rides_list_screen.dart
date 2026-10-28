@@ -450,7 +450,7 @@ class _RidesListScreenState extends State<RidesListScreen> {
                   ? 'Segments: $segmentCount'
                   : 'Segments: $availableSegmentCount of $segmentCount available',
             ),
-            Text('Samples: ${ride.samples.length}'),
+            Text('Samples: ${ride.sampleCount}'),
             Text(_integrityLine(ride)),
             if (ride.hasQuarantinedSegments)
               Text(

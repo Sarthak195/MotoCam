@@ -40,7 +40,18 @@ class TelemetryData {
   /// Wall-clock time when this sample was captured.
   ///
   /// Serialised as UTC ISO-8601; [TelemetryData.fromJson] returns local time.
-  final DateTime timestamp;
+  /// A sample read from JSON parses its timestamp on first access, because
+  /// playback rarely reads it and parsing it for every sample of a long ride
+  /// is expensive.
+  DateTime get timestamp =>
+      _timestamp ??= _parseTimestamp(_rawTimestamp) ?? DateTime.now();
+
+  /// The parsed timestamp, or `null` until a sample read from JSON is first
+  /// asked for it.
+  DateTime? _timestamp;
+
+  /// The `timestamp` string of a sample read from JSON, parsed lazily.
+  final String? _rawTimestamp;
 
   /// Whether a recent GPS fix backed this sample.
   ///
@@ -63,10 +74,25 @@ class TelemetryData {
     required this.accelerationG,
     required this.elapsedMs,
     required this.distanceKm,
-    required this.timestamp,
+    required DateTime timestamp,
     this.hasFix = true,
     this.fixAgeMs,
-  });
+  }) : _timestamp = timestamp,
+       _rawTimestamp = null;
+
+  TelemetryData._fromJsonFields({
+    required this.latitude,
+    required this.longitude,
+    required this.speed,
+    required this.bearing,
+    required this.accelerationG,
+    required this.elapsedMs,
+    required this.distanceKm,
+    required String rawTimestamp,
+    required this.hasFix,
+    required this.fixAgeMs,
+  }) : _timestamp = null,
+       _rawTimestamp = rawTimestamp;
 
   /// Creates a zero-value sample anchored to the current time, with no fix.
   factory TelemetryData.empty() {
@@ -134,15 +160,16 @@ class TelemetryData {
   ///
   /// Missing, `null` or unparseable numeric fields (numbers and numeric
   /// strings are accepted) fall back to `0`, and a missing or invalid
-  /// timestamp falls back to `DateTime.now()`. Timestamps are returned in
-  /// local time. When `hasFix` is absent (files written before it existed),
-  /// a sample at exactly (0, 0) is treated as having no fix.
+  /// timestamp falls back to `DateTime.now()` (evaluated when [timestamp]
+  /// is first read). Timestamps are returned in local time and parsed on
+  /// first access. When `hasFix` is absent (files written before it
+  /// existed), a sample at exactly (0, 0) is treated as having no fix.
   factory TelemetryData.fromJson(Map<String, dynamic> json) {
     final latitude = _readDouble(json['latitude']);
     final longitude = _readDouble(json['longitude']);
     final rawHasFix = json['hasFix'];
     final fixAge = _readNullableDouble(json['fixAgeMs']);
-    return TelemetryData(
+    return TelemetryData._fromJsonFields(
       latitude: latitude,
       longitude: longitude,
       speed: _readDouble(json['speed']),
@@ -150,15 +177,16 @@ class TelemetryData {
       accelerationG: _readDouble(json['accelerationG']),
       elapsedMs: _readDouble(json['elapsedMs']).toInt(),
       distanceKm: _readDouble(json['distanceKm']),
-      timestamp:
-          DateTime.tryParse(json['timestamp']?.toString() ?? '')?.toLocal() ??
-          DateTime.now(),
+      rawTimestamp: json['timestamp']?.toString() ?? '',
       hasFix: rawHasFix is bool
           ? rawHasFix
           : !(latitude == 0.0 && longitude == 0.0),
       fixAgeMs: fixAge?.toInt(),
     );
   }
+
+  static DateTime? _parseTimestamp(String? raw) =>
+      raw == null ? null : DateTime.tryParse(raw)?.toLocal();
 
   static double _readDouble(Object? value) => _readNullableDouble(value) ?? 0.0;
 

@@ -27,6 +27,10 @@ export '../../../core/ride_file/ride_telemetry_codec.dart'
 /// It is the primary data model consumed by the ride history and playback
 /// screens.
 ///
+/// Ride History works with sample-less records ([samplesLoaded] `false`):
+/// they carry [sampleCount] and [duration] but an empty [samples] list.
+/// Playback needs the samples and loads them with [loadSamples].
+///
 /// Segment paths are resolved against the directory that holds the
 /// telemetry file: a declared absolute path that no longer exists (for
 /// example after the iOS data-container path changed) is replaced by the
@@ -52,7 +56,18 @@ class RideRecord {
     this.missingSegmentPaths = const <String>[],
     this.incidents,
     this.mockLocationDetected = false,
-  });
+    this.expectedSegmentHashes = const <String, String>{},
+    this.samplesLoaded = true,
+    int? sampleCount,
+    int? lastSampleElapsedMs,
+  }) : assert(
+         samplesLoaded || samples.isEmpty,
+         'A sample-less ride must not carry samples.',
+       ),
+       sampleCount = sampleCount ?? samples.length,
+       lastSampleElapsedMs =
+           lastSampleElapsedMs ??
+           (samples.isEmpty ? 0 : samples.last.elapsedMs);
 
   /// Lower-case file extensions treated as ride video files.
   static const List<String> videoFileExtensions =
@@ -100,8 +115,22 @@ class RideRecord {
   final List<RideSegmentTimelineEntry> segmentTimeline;
 
   /// Telemetry samples in file order (the recorder writes them by elapsed
-  /// time); malformed entries are skipped.
+  /// time); malformed entries are skipped. Empty when [samplesLoaded] is
+  /// `false`.
   final List<TelemetryData> samples;
+
+  /// Whether [samples] holds the ride's samples. Records built for Ride
+  /// History (from the ride index or with `loadSamples: false`) do not;
+  /// use [loadSamples] before reading samples.
+  final bool samplesLoaded;
+
+  /// Number of samples in the ride file, known even when [samplesLoaded] is
+  /// `false`.
+  final int sampleCount;
+
+  /// `elapsedMs` of the last sample (0 when there is none), known even when
+  /// [samplesLoaded] is `false`.
+  final int lastSampleElapsedMs;
 
   /// Result of the most recent integrity check.
   final RideIntegrityReport integrity;
@@ -123,6 +152,11 @@ class RideRecord {
   /// the ride (optional top-level `mockLocationDetected`, default `false`).
   final bool mockLocationDetected;
 
+  /// The SHA-256 recorded in the integrity envelope for each trusted
+  /// segment, keyed by its resolved path. Segments without a recorded hash
+  /// are absent.
+  final Map<String, String> expectedSegmentHashes;
+
   /// File name of [videoPath].
   String get fileName => path_utils.fileNameFromPath(videoPath);
 
@@ -141,10 +175,10 @@ class RideRecord {
 
   /// Ride duration taken from the last sample's elapsed time.
   Duration get duration {
-    if (samples.isEmpty) {
+    if (sampleCount == 0) {
       return Duration.zero;
     }
-    return Duration(milliseconds: samples.last.elapsedMs);
+    return Duration(milliseconds: lastSampleElapsedMs);
   }
 
   /// Returns the telemetry at [position], linearly interpolated between the
@@ -156,6 +190,7 @@ class RideRecord {
   /// returned when neither has a fix). Bearing is interpolated along the
   /// shortest arc (see [interpolateBearing]).
   TelemetryData sampleForPosition(Duration position) {
+    assert(samplesLoaded, 'Load the samples (loadSamples) before playback.');
     if (samples.isEmpty) {
       return TelemetryData.empty();
     }
@@ -310,10 +345,13 @@ class RideRecord {
   /// is missing, unreadable, malformed or names no video.
   ///
   /// The payload hash is always checked. Segment files are hashed only when
-  /// [verifySegments] is `true` (see [verifySegmentIntegrity]).
+  /// [verifySegments] is `true` (see [verifySegmentIntegrity]). With
+  /// [loadSamples] `false` the record is sample-less ([samplesLoaded]
+  /// `false`): only the sample count and the last `elapsedMs` are read.
   static Future<RideRecord?> fromTelemetryFile(
     File telemetryFile, {
     bool verifySegments = false,
+    bool loadSamples = true,
   }) async {
     if (!await telemetryFile.exists()) {
       return null;
@@ -336,6 +374,10 @@ class RideRecord {
 
       final summary = decoded.summary;
       final segments = decoded.segments;
+      final samples = loadSamples
+          ? ride_codec.decodeRideSamples(json, TelemetryData.fromJson)
+          : const <TelemetryData>[];
+      final stats = loadSamples ? null : _sampleStats(json);
       return RideRecord(
         videoPath: segments.videoPath,
         segmentPaths: segments.segmentPaths,
@@ -348,16 +390,63 @@ class RideRecord {
         maxSpeedKmh: summary.maxSpeedKmh,
         averageSpeedKmh: summary.averageSpeedKmh,
         segmentTimeline: decoded.segmentTimeline,
-        samples: ride_codec.decodeRideSamples(json, TelemetryData.fromJson),
+        samples: samples,
+        samplesLoaded: loadSamples,
+        sampleCount: stats?.count,
+        lastSampleElapsedMs: stats?.lastElapsedMs,
         integrity: decoded.integrity,
         quarantinedSegmentPaths: segments.quarantinedSegmentPaths,
         missingSegmentPaths: segments.missingSegmentPaths,
         incidents: summary.incidents,
         mockLocationDetected: summary.mockLocationDetected,
+        expectedSegmentHashes: ride_codec.expectedSegmentHashesFor(
+          json,
+          segments: segments,
+        ),
       );
     } catch (_) {
       return null;
     }
+  }
+
+  /// Sample count and last `elapsedMs` of [json] without parsing every
+  /// sample. It counts the entries `decodeRideSamples` keeps:
+  /// [TelemetryData.fromJson] accepts every object entry.
+  static ({int count, int lastElapsedMs}) _sampleStats(
+    Map<String, dynamic> json,
+  ) {
+    final raw = json['samples'];
+    if (raw is! List) {
+      return (count: 0, lastElapsedMs: 0);
+    }
+    var count = 0;
+    Map<dynamic, dynamic>? last;
+    for (final entry in raw) {
+      if (entry is Map) {
+        count++;
+        last = entry;
+      }
+    }
+    if (last == null) {
+      return (count: 0, lastElapsedMs: 0);
+    }
+    final sample = TelemetryData.fromJson(
+      last.map((key, value) => MapEntry(key.toString(), value)),
+    );
+    return (count: count, lastElapsedMs: sample.elapsedMs);
+  }
+
+  /// Returns this ride with its samples: this record when [samplesLoaded]
+  /// is already `true`, otherwise the ride re-read from [telemetryPath]
+  /// (this record when that fails or there is no telemetry file).
+  ///
+  /// Parsing a long ride takes a while; run it off the UI isolate.
+  Future<RideRecord> loadSamples() async {
+    final path = telemetryPath;
+    if (samplesLoaded || path == null) {
+      return this;
+    }
+    return await fromTelemetryFile(File(path)) ?? this;
   }
 
   /// Locks ([locked] `true`) or unlocks every segment of this ride in its
@@ -473,11 +562,15 @@ class RideRecord {
         averageSpeedKmh: averageSpeedKmh,
         segmentTimeline: segmentTimeline,
         samples: samples,
+        samplesLoaded: samplesLoaded,
+        sampleCount: sampleCount,
+        lastSampleElapsedMs: lastSampleElapsedMs,
         integrity: integrity,
         quarantinedSegmentPaths: segments.quarantinedSegmentPaths,
         missingSegmentPaths: segments.missingSegmentPaths,
         incidents: incidents,
         mockLocationDetected: mockLocationDetected,
+        expectedSegmentHashes: expectedSegmentHashes,
       );
     } catch (_) {
       return this;

@@ -1,3 +1,5 @@
+import 'dart:isolate';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:motocam/features/telemetry/models/telemetry_data.dart';
 
@@ -90,6 +92,26 @@ void main() {
         ).hasFix,
         isTrue,
       );
+    });
+
+    test('a sample read from JSON parses its timestamp on first access, '
+        'also after crossing an isolate', () async {
+      final decoded = await Isolate.run(
+        () => TelemetryData.fromJson({
+          'elapsedMs': 5,
+          'timestamp': '2026-10-20T17:24:01.000Z',
+        }),
+      );
+      expect(
+        decoded.timestamp,
+        DateTime.utc(2026, 10, 20, 17, 24, 1).toLocal(),
+      );
+      expect(decoded.timestamp.isUtc, isFalse);
+
+      final before = DateTime.now();
+      final invalid = TelemetryData.fromJson({'timestamp': 'not a time'});
+      expect(invalid.timestamp.isBefore(before), isFalse);
+      expect(identical(invalid.timestamp, invalid.timestamp), isTrue);
     });
   });
 }

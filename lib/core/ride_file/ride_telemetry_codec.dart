@@ -782,6 +782,13 @@ Future<RideIntegrityReport> checkRideFileIntegrity({
   );
 }
 
+/// The SHA-256 recorded in the envelope of [json] for each trusted segment
+/// of [segments], keyed by resolved path ([expectedSegmentHashesOf]).
+Map<String, String> expectedSegmentHashesFor(
+  Map<String, dynamic> json, {
+  required ResolvedRideSegments segments,
+}) => expectedSegmentHashesOf(json, segments.integritySegments);
+
 /// Everything a ride JSON says except its samples.
 class DecodedRideFile {
   /// Creates a decoded ride. Prefer [decodeRideFile].

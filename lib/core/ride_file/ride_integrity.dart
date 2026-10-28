@@ -330,6 +330,36 @@ RideIntegrityReport applyQuarantineToIntegrity(
   );
 }
 
+/// The SHA-256 the envelope of [json] records for each of [segments], keyed
+/// by resolved path, found the way [checkRideIntegrity] finds it (declared
+/// path, then resolved path, then plain file name). Segments without a
+/// recorded hash, and every segment of a ride without an envelope map, are
+/// absent.
+Map<String, String> expectedSegmentHashesOf(
+  Map<String, dynamic> json,
+  List<RideIntegritySegment> segments,
+) {
+  final rawIntegrity = json['integrity'];
+  if (rawIntegrity is! Map) {
+    return const <String, String>{};
+  }
+  final expected = _readExpectedSegmentHashes(
+    rawIntegrity.map((key, value) => MapEntry(key.toString(), value)),
+  );
+  final result = <String, String>{};
+  for (final segment in segments) {
+    final hashKey = _segmentHashKey(
+      expected,
+      declaredPath: segment.declaredPath,
+      resolvedPath: segment.resolvedPath,
+    );
+    if (hashKey != null) {
+      result[segment.resolvedPath] = expected[hashKey]!;
+    }
+  }
+  return Map<String, String>.unmodifiable(result);
+}
+
 /// Finds the `segmentHashes` key for a segment: its declared path, its
 /// resolved path, or its plain file name (for writers that store names
 /// relative to the recordings directory).

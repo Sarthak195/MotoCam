@@ -37,6 +37,46 @@ void main() {
     File telemetryFileNamed(String name) =>
         File('${storageDirectory.path}$_sep$name.telemetry.json');
 
+    test('fromTelemetryFile with loadSamples false is sample-less but keeps '
+        'the count, the duration and the expected segment hashes', () async {
+      final segmentFile = await createSegment('segment_01.mp4', 'data');
+      final telemetryFile = telemetryFileNamed('segment_01');
+      final payload = _ridePayload(segmentPaths: <String>[segmentFile.path])
+        ..['samples'] = <Object?>[
+          _sample(elapsedMs: 0),
+          'not a sample',
+          _sample(elapsedMs: 1000),
+          _sample(elapsedMs: 2500),
+        ];
+      await _writeRide(
+        telemetryFile: telemetryFile,
+        payload: payload,
+        envelope: _Envelope.bound,
+      );
+
+      final full = await RideRecord.fromTelemetryFile(telemetryFile);
+      final lazy = await RideRecord.fromTelemetryFile(
+        telemetryFile,
+        loadSamples: false,
+      );
+      expect(full!.samplesLoaded, isTrue);
+      expect(full.sampleCount, 3);
+      expect(lazy!.samplesLoaded, isFalse);
+      expect(lazy.samples, isEmpty);
+      expect(lazy.sampleCount, full.sampleCount);
+      expect(lazy.duration, full.duration);
+      expect(lazy.duration, const Duration(milliseconds: 2500));
+      expect(lazy.integrity.status, full.integrity.status);
+      expect(lazy.expectedSegmentHashes, <String, String>{
+        segmentFile.path: (await hashFileSha256(segmentFile.path))!,
+      });
+
+      final loaded = await lazy.loadSamples();
+      expect(loaded.samplesLoaded, isTrue);
+      expect(loaded.samples, hasLength(3));
+      expect(identical(await full.loadSamples(), full), isTrue);
+    });
+
     test(
       'fromTelemetryFile returns verified ride when integrity matches',
       () async {
