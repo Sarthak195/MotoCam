@@ -1,4 +1,4 @@
-## Key properties template — DO NOT COMMIT
+## Key properties template (DO NOT COMMIT)
 # Copy this file to android/key.properties and fill with real values.
 
 # Path to the keystore file, relative to android/app/ or absolute.

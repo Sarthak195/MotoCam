@@ -106,7 +106,7 @@ Dart: `PipService` (static `enterPipMode`; instance `initialize`, `pipModeStream
 | Method | Dir | Arguments | Return | Errors | Dart caller | Kotlin handler behaviour | iOS |
 |---|---|---|---|---|---|---|---|
 | `enterPipMode` | D→N | none | `bool`: the result of `enterPictureInPictureMode`; `false` when PiP is not supported or the call throws | Dart: any exception → `false` | `RecordingScreen._handleBackPressWhileRecording` (system back and the MINIMISE button while recording) | If `isPipSupported()`, builds `PictureInPictureParams` with aspect ratio 9:16 and calls `enterPictureInPictureMode` inside try/catch | `MissingPluginException` → `false` |
-| `onPipModeChanged` | N→D | `bool` | Dart handler returns `null` | — | Handler registered by `PipService.initialize` on every platform; sets `isInPipMode` (`arguments == true`) and adds to `pipModeStream` | Invoked from `onPictureInPictureModeChanged` | Handler registered but never called |
+| `onPipModeChanged` | N→D | `bool` | Dart handler returns `null` | n/a | Handler registered by `PipService.initialize` on every platform; sets `isInPipMode` (`arguments == true`) and adds to `pipModeStream` | Invoked from `onPictureInPictureModeChanged` | Handler registered but never called |
 
 ### com.example.motocam/media
 
@@ -312,16 +312,16 @@ Source: [AndroidManifest.xml](../android/app/src/main/AndroidManifest.xml). The 
 
 | Permission | Why | Requested at runtime | API-level notes |
 |---|---|---|---|
-| `INTERNET` | Map tiles from `tile.openstreetmap.org` ([map_source_config.dart](../lib/features/map/map_source_config.dart)) | No (normal permission) | — |
-| `ACCESS_NETWORK_STATE` | No app Dart or Kotlin code references it | No (normal permission) | — |
-| `CAMERA` | Video capture; camera service type | `AppPermissionService` (`Permission.camera`, required) and `CameraProvider.initializeCamera` | — |
-| `RECORD_AUDIO` | Audio track; microphone service type | Same two places, only when audio is enabled (required then) | — |
+| `INTERNET` | Map tiles from `tile.openstreetmap.org` ([map_source_config.dart](../lib/features/map/map_source_config.dart)) | No (normal permission) | n/a |
+| `ACCESS_NETWORK_STATE` | No app Dart or Kotlin code references it | No (normal permission) | n/a |
+| `CAMERA` | Video capture; camera service type | `AppPermissionService` (`Permission.camera`, required) and `CameraProvider.initializeCamera` | n/a |
+| `RECORD_AUDIO` | Audio track; microphone service type | Same two places, only when audio is enabled (required then) | n/a |
 | `ACCESS_FINE_LOCATION`, `ACCESS_COARSE_LOCATION` | GPS telemetry; location service type | `AppPermissionService` (`Permission.locationWhenInUse`, required); `TelemetryProvider` also calls `Geolocator.requestPermission` if denied | On API 31+ the user can grant approximate location only |
 | `FOREGROUND_SERVICE` | `BackgroundRecordingService` | No (normal permission) | API 28+ |
 | `FOREGROUND_SERVICE_CAMERA`, `_MICROPHONE`, `_LOCATION` | The three types in the service's `foregroundServiceType` | No (normal permissions) | API 34+ requires the type permissions; on API 30+ the service starts with only the types whose runtime permission is granted |
 | `POST_NOTIFICATIONS` | Visible foreground-service notification | `AppPermissionService` (`Permission.notification`, recommended) | Runtime permission on API 33+ |
-| `WAKE_LOCK` | Partial wake lock in the service | No (normal permission) | — |
-| `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` | Lets the app launch the direct exemption dialog | Only from the offer-once dialog, see [above](#battery-optimization-exemption) | — |
+| `WAKE_LOCK` | Partial wake lock in the service | No (normal permission) | n/a |
+| `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` | Lets the app launch the direct exemption dialog | Only from the offer-once dialog, see [above](#battery-optimization-exemption) | n/a |
 | `com.example.motocam.permission.INTERNAL_BROADCAST` | Protects the notification-stop broadcast | No (signature permission, granted at install) | Declared in the same manifest |
 | `WRITE_EXTERNAL_STORAGE` (`maxSdkVersion="28"`) | Gallery copies on API 24-28: writing them to `Movies/MotoCam/Recordings` and deleting them through MediaStore | `AppPermissionService` (`Permission.storage`, recommended) when gallery export is on and `sdkInt < 29`; the export drain after a stop and Save to gallery after a `PERMISSION_DENIED` (once per drain; the launch retry never asks); `removeGalleryCopies` after a `needsPermission` | Ignored on API 29+ |
 
