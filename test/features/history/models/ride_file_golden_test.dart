@@ -259,6 +259,35 @@ void main() {
         expect(actual, expected);
       });
     }
+
+    // A ride moved (or copied) to another recordings root still declares
+    // absolute paths in its old root, and during a migration those source
+    // files can still exist. The same-named files next to the moved JSON
+    // win, so the moved ride reads exactly as the original. Both roots have
+    // the same directory name, as real recordings roots do, so a segment
+    // that was already missing (v2_c.mp4 of envelope_v2) stays missing
+    // rather than quarantined.
+    for (final name in _absolutePathCases) {
+      test('$name moved byte for byte reads as recorded while the declared '
+          'files still exist', () async {
+        final original = await materializeAbsolute(name);
+        final sep = Platform.pathSeparator;
+        final movedDirectory = Directory(
+          '${tempRoot.path}${sep}moved$sep$name',
+        );
+        await movedDirectory.create(recursive: true);
+        for (final segment in _segmentsOnDisk[name]!) {
+          await File(
+            '${original.parent.path}${Platform.pathSeparator}$segment',
+          ).copy('${movedDirectory.path}${Platform.pathSeparator}$segment');
+        }
+        final moved = await original.copy(
+          '${movedDirectory.path}${Platform.pathSeparator}'
+          '$name.telemetry.json',
+        );
+        expect(await describeRead(name, moved), _expectedReads[name]);
+      });
+    }
   });
 }
 

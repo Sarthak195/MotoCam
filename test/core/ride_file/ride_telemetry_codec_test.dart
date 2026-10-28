@@ -294,4 +294,140 @@ void main() {
       },
     );
   });
+
+  group('declared path resolution', () {
+    late Directory temp;
+    late Directory rideDirectory;
+    late Directory elsewhere;
+
+    setUp(() async {
+      temp = await Directory.systemTemp.createTemp('motocam_resolve_');
+      rideDirectory = await Directory('${temp.path}${_sep}ride').create();
+      elsewhere = await Directory('${temp.path}${_sep}elsewhere').create();
+    });
+
+    tearDown(() async {
+      if (await temp.exists()) {
+        await temp.delete(recursive: true);
+      }
+    });
+
+    Future<String> touch(Directory directory, String name) async {
+      final file = File('${directory.path}$_sep$name');
+      await file.writeAsString('video:$name', flush: true);
+      return file.path;
+    }
+
+    test('a sibling wins over an existing declared path elsewhere', () async {
+      final declared = await touch(elsewhere, 'a.mp4');
+      final sibling = await touch(rideDirectory, 'a.mp4');
+      expect(
+        await resolveDeclaredRidePath(
+          declared,
+          telemetryDirectory: rideDirectory.path,
+        ),
+        sibling,
+      );
+    });
+
+    test('an existing declared path inside the directory is kept', () async {
+      final nested = await Directory(
+        '${rideDirectory.path}${_sep}nested',
+      ).create();
+      final declared = await touch(nested, 'a.mp4');
+      await touch(rideDirectory, 'a.mp4');
+      expect(
+        await resolveDeclaredRidePath(
+          declared,
+          telemetryDirectory: rideDirectory.path,
+        ),
+        declared,
+      );
+    });
+
+    test('an existing declared path elsewhere without a sibling stays '
+        'quarantined', () async {
+      final declared = await touch(elsewhere, 'a.mp4');
+      final telemetryFile = File(
+        '${rideDirectory.path}${_sep}r.telemetry.json',
+      );
+      final segments = await resolveRideSegments(
+        telemetryFile: telemetryFile,
+        json: <String, dynamic>{
+          'videoPath': declared,
+          'segmentPaths': <String>[declared],
+        },
+      );
+      expect(segments, isNull);
+      expect(
+        await resolveDeclaredRidePath(
+          declared,
+          telemetryDirectory: rideDirectory.path,
+        ),
+        declared,
+      );
+
+      final inside = await touch(rideDirectory, 'b.mp4');
+      final mixed = await resolveRideSegments(
+        telemetryFile: telemetryFile,
+        json: <String, dynamic>{
+          'videoPath': inside,
+          'segmentPaths': <String>[declared, inside],
+        },
+      );
+      expect(mixed!.segmentPaths, <String>[inside]);
+      expect(mixed.quarantinedSegmentPaths, <String>[declared]);
+    });
+
+    test('a missing path in a same-named directory elsewhere counts as a '
+        'missing sibling', () async {
+      final oldRoot = await Directory('${elsewhere.path}${_sep}ride').create();
+      final gone = '${oldRoot.path}${_sep}gone.mp4';
+      expect(
+        await resolveDeclaredRidePath(
+          gone,
+          telemetryDirectory: rideDirectory.path,
+        ),
+        '${rideDirectory.path}${_sep}gone.mp4',
+      );
+      final kept = await touch(rideDirectory, 'kept.mp4');
+      final segments = await resolveRideSegments(
+        telemetryFile: File('${rideDirectory.path}${_sep}r.telemetry.json'),
+        json: <String, dynamic>{
+          'videoPath': '${oldRoot.path}${_sep}kept.mp4',
+          'segmentPaths': <String>[gone, '${oldRoot.path}${_sep}kept.mp4'],
+        },
+      );
+      expect(segments!.segmentPaths, <String>[
+        '${rideDirectory.path}${_sep}gone.mp4',
+        kept,
+      ]);
+      expect(segments.missingSegmentPaths, <String>[
+        '${rideDirectory.path}${_sep}gone.mp4',
+      ]);
+      expect(segments.quarantinedSegmentPaths, isEmpty);
+    });
+
+    test('a missing path in a differently named directory stays declared '
+        'and is quarantined', () async {
+      final gone = '${elsewhere.path}${_sep}gone.mp4';
+      expect(
+        await resolveDeclaredRidePath(
+          gone,
+          telemetryDirectory: rideDirectory.path,
+        ),
+        gone,
+      );
+      final kept = await touch(rideDirectory, 'kept.mp4');
+      final segments = await resolveRideSegments(
+        telemetryFile: File('${rideDirectory.path}${_sep}r.telemetry.json'),
+        json: <String, dynamic>{
+          'videoPath': kept,
+          'segmentPaths': <String>[gone, kept],
+        },
+      );
+      expect(segments!.segmentPaths, <String>[kept]);
+      expect(segments.quarantinedSegmentPaths, <String>[gone]);
+    });
+  });
 }

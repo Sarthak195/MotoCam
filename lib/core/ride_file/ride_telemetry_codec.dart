@@ -662,10 +662,18 @@ Future<ResolvedRideSegments?> resolveRideSegments({
 ///
 /// * a plain file name (no separator) is resolved inside
 ///   [telemetryDirectory];
-/// * an existing path is kept;
-/// * a missing path whose file name exists inside [telemetryDirectory] is
-///   relocated there (the data directory moved since recording);
-/// * anything else is kept as declared.
+/// * an existing path inside [telemetryDirectory] is kept;
+/// * otherwise, when the file name exists inside [telemetryDirectory], that
+///   sibling is used, even when the declared path also exists elsewhere (the
+///   ride was moved or copied, for example from a legacy recordings root,
+///   and the source copy may still be there);
+/// * a missing path outside [telemetryDirectory] whose parent directory has
+///   the same name as [telemetryDirectory] (for example both are
+///   `MotoCam Recordings`: the ride moved between roots and this segment
+///   was already gone) is mapped to that missing sibling, so it counts as
+///   missing rather than quarantined; nothing outside the directory is read;
+/// * anything else is kept as declared (a path outside [telemetryDirectory]
+///   is then quarantined by [resolveRideSegments]).
 Future<String> resolveDeclaredRidePath(
   String declaredPath, {
   required String telemetryDirectory,
@@ -684,13 +692,36 @@ Future<String> resolveDeclaredRidePath(
   if (name == path) {
     return candidatePath;
   }
-  if (await File(path).exists()) {
+  final isInside = path_utils.isPathInsideDirectory(path, telemetryDirectory);
+  final exists = await File(path).exists();
+  if (isInside && exists) {
     return path;
   }
   if (await File(candidatePath).exists()) {
     return candidatePath;
   }
+  if (!isInside && !exists && _hasSameParentName(path, telemetryDirectory)) {
+    return candidatePath;
+  }
   return path;
+}
+
+/// Whether the parent directory of [path] has the same name as
+/// [directory] (compared like normalised paths, so case-insensitively on
+/// Windows).
+bool _hasSameParentName(String path, String directory) {
+  final normalized = path_utils.normalizePath(path);
+  final separatorIndex = normalized.lastIndexOf(Platform.pathSeparator);
+  if (separatorIndex <= 0) {
+    return false;
+  }
+  final parentName = path_utils.fileNameFromPath(
+    normalized.substring(0, separatorIndex),
+  );
+  final directoryName = path_utils.fileNameFromPath(
+    path_utils.normalizePath(directory),
+  );
+  return parentName.isNotEmpty && parentName == directoryName;
 }
 
 Future<List<String>> _existingPathsInOrder(Iterable<String> paths) async {
