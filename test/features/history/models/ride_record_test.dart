@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 
 import 'package:flutter_test/flutter_test.dart';
 
@@ -75,6 +76,31 @@ void main() {
       expect(loaded.samplesLoaded, isTrue);
       expect(loaded.samples, hasLength(3));
       expect(identical(await full.loadSamples(), full), isTrue);
+
+      // Playback loads the samples on a background isolate.
+      final fromIsolate = await Isolate.run(lazy.loadSamples);
+      expect(fromIsolate.samples, hasLength(3));
+      expect(fromIsolate.samples.last.elapsedMs, 2500);
+    });
+
+    test('a sample-less ride whose file is gone still plays without '
+        'telemetry', () async {
+      final segmentFile = await createSegment('segment_01.mp4', 'data');
+      final telemetryFile = telemetryFileNamed('segment_01');
+      await _writeRide(
+        telemetryFile: telemetryFile,
+        payload: _ridePayload(segmentPaths: <String>[segmentFile.path]),
+        envelope: _Envelope.bound,
+      );
+      final lazy = (await RideRecord.fromTelemetryFile(
+        telemetryFile,
+        loadSamples: false,
+      ))!;
+      await telemetryFile.delete();
+
+      final loaded = await lazy.loadSamples();
+      expect(identical(loaded, lazy), isTrue);
+      expect(loaded.sampleForPosition(Duration.zero).hasFix, isFalse);
     });
 
     test(

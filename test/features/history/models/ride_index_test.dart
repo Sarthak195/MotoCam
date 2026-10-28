@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 
 import 'package:flutter_test/flutter_test.dart';
 
@@ -296,6 +297,22 @@ void main() {
       );
     });
 
+    test('a populated index crosses into a background isolate', () async {
+      final a = await writeFile('REC1.mp4', 'one');
+      await writeRide('a', <File>[a]);
+      final paths = listing();
+      final first = await loadRideHistoryIndexed(paths);
+      final parsed = RideIndex.parse(jsonEncode(indexOf(first).toJson()));
+
+      final load = await Isolate.run(
+        () => loadRideHistoryIndexed(paths, index: parsed),
+      );
+      expect(load.decodedPaths, isEmpty);
+      expect(load.rides.single.createdAt, first.rides.single.createdAt);
+      expect(load.videoChecks.values.single.total, 1);
+      expect(load.videoChecks.values.single.checked, 0);
+    });
+
     test('loading reads the index file but never writes it', () async {
       final a = await writeFile('REC1.mp4', 'one');
       await writeRide('a', <File>[a]);
@@ -379,6 +396,31 @@ void main() {
       expect(identical(await store.read(adopt: adopted), adopted), isTrue);
       // Once loaded, a later adoption does not replace the memory copy.
       expect(identical(await store.read(adopt: RideIndex()), adopted), isTrue);
+    });
+
+    test('the first read removes stale temp files of the index', () async {
+      await indexFile.parent.create(recursive: true);
+      final stale = File('${indexFile.path}.1-2-3.tmp');
+      final fresh = File('${indexFile.path}.4-5-6.tmp');
+      final other = File('${indexFile.parent.path}${sep}other.tmp');
+      for (final file in <File>[stale, fresh, other]) {
+        await file.writeAsString('x');
+      }
+      await stale.setLastModified(
+        DateTime.now().subtract(const Duration(hours: 1)),
+      );
+      await other.setLastModified(
+        DateTime.now().subtract(const Duration(hours: 1)),
+      );
+
+      await RideIndexStore(indexFile).read();
+      // The prune runs alongside the read; give it a moment to finish.
+      for (var i = 0; i < 50 && stale.existsSync(); i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+      }
+      expect(stale.existsSync(), isFalse);
+      expect(fresh.existsSync(), isTrue);
+      expect(other.existsSync(), isTrue);
     });
 
     test('a corrupt index file starts an empty index', () async {

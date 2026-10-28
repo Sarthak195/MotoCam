@@ -9,6 +9,7 @@
 /// docs/data-formats.md.
 library;
 
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:isolate';
@@ -374,6 +375,7 @@ class RideIndexStore {
       return Future<RideIndex>.value(adopt);
     }
     return _loading ??= () async {
+      unawaited(_pruneStaleTempFiles());
       final path = file.path;
       RideIndex index;
       try {
@@ -383,6 +385,36 @@ class RideIndexStore {
       }
       return _memory ??= index;
     }();
+  }
+
+  /// Deletes temp files that a killed write left next to the index
+  /// (`ride_index.json.<suffix>.tmp`) once they are 10 minutes old.
+  Future<void> _pruneStaleTempFiles() async {
+    try {
+      final directory = file.parent;
+      if (!await directory.exists()) {
+        return;
+      }
+      final prefix = '${path_utils.fileNameFromPath(file.path)}.';
+      final cutoff = DateTime.now().subtract(const Duration(minutes: 10));
+      await for (final entity in directory.list(followLinks: false)) {
+        final name = path_utils.fileNameFromPath(entity.path);
+        if (entity is! File ||
+            !name.startsWith(prefix) ||
+            !name.endsWith('.tmp')) {
+          continue;
+        }
+        try {
+          if ((await entity.stat()).modified.isBefore(cutoff)) {
+            await entity.delete();
+          }
+        } catch (_) {
+          // Skip files that vanish or cannot be deleted.
+        }
+      }
+    } catch (_) {
+      // Only a cache directory.
+    }
   }
 
   /// Applies [change] to the in-memory index and writes the index file.

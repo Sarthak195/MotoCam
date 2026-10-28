@@ -189,8 +189,10 @@ class RideRecord {
   /// supplies latitude, longitude and bearing (or the nearest sample is
   /// returned when neither has a fix). Bearing is interpolated along the
   /// shortest arc (see [interpolateBearing]).
+  ///
+  /// A ride without samples, including a sample-less record whose file
+  /// could not be re-read by [loadSamples], gives [TelemetryData.empty].
   TelemetryData sampleForPosition(Duration position) {
-    assert(samplesLoaded, 'Load the samples (loadSamples) before playback.');
     if (samples.isEmpty) {
       return TelemetryData.empty();
     }
