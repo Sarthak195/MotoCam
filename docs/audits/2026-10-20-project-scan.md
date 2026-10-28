@@ -1,26 +1,26 @@
-# MotoCam — whole-project scan (2026-10-20)
+# MotoCam: whole-project scan (2026-10-20)
 
 Snapshot audit of commit `a33a583` (branch `main`). Every finding below was independently re-verified against the code: critical/high/medium findings by two separate verifiers (a code-truth lens and a reachability/impact lens), low/info findings by one combined verifier. **All 154 findings were confirmed; none were refuted.**
 
-The *Status* column reflects the working tree after the fix phase (2026-10-21). Items marked *deferred* or *owner decision* were intentionally left unchanged.
+The *Status* column reflects the working tree after the fix phase (2026-10-21) and the later fixes on branch `fix/scan-2026-10-20` (to 2026-10-28). Items marked *deferred* or *owner decision* were intentionally left unchanged.
 
 ## Executive summary
 
 - **Scope.** 154 findings, every one confirmed by independent verifiers: 5 critical, 16 high, 55 medium, 74 low and 4 info.
-- **Fix phase (working tree as of 2026-10-21).** 116 fixed, 23 partially fixed and 7 fixed in the documentation; 3 are deferred by the owner and 5 wait on an owner decision. See [Fix status](#fix-status) and the *Status* column.
+- **Fix phase (fix phase of 2026-10-21, then the branch `fix/scan-2026-10-20` up to 2026-10-28).** 132 fixed, 10 partially fixed and 7 fixed in the documentation; 2 are deferred by the owner and 3 wait on an owner decision. The partially fixed items are F004 (implemented, device check pending), F009 (swiping the app from Recents still ends a recording) and eight whose remainder is owner-only (F007, F025, F026, F030, F035, F075, F076, F126). Several fixes are not yet confirmed on a device (see the fix notes). See [Fix status](#fix-status) and the *Status* column.
 - **Critical findings.** [F001](#f001) (Android 14+ foreground-service crash), [F002](#f002) (iOS Info.plist fragment), [F003](#f003) (iOS permission macros) and [F005](#f005) (retention deleted locked footage of other rides) are fixed. [F004](#f004), recording stopping when the screen locks or the app leaves the foreground without PiP, was deferred in the fix phase and has since been implemented (2026-10-28, see its fix note), but not yet confirmed on a device: while the recording's foreground service runs, MainActivity holds the lifecycle CameraX is bound to at STARTED, and a keep-screen-on setting (on by default) is the fallback.
-- **Security and privacy.** The unused Mappls credential files are deleted from the tree and ignored, and they remain in the public git history, but the owner has already rotated those keys (confirmed 2026-10-21). Background location is no longer requested, recordings are excluded from Android backup and device transfer, gallery export of locked clips is opt-in, and the integrity envelope is described as what it is: an unkeyed SHA-256 integrity check that detects accidental corruption and naive edits, not tampering.
-- **Owner decisions still open.** The application ID `com.example.motocam` cannot be published on Google Play ([migration steps](../release.md#application-id)); the published v0.1.5 to v0.1.12 APKs are debug-signed ([details](../release.md#signing-of-published-apks)); recordings storage location; a camera-plugin fork for Android bitrate and audio-off; the iOS iCloud backup policy; keyed integrity; a global storage budget.
+- **Security and privacy.** The unused Mappls credential files are deleted from the tree and ignored, and they remain in the public git history, but the owner has already rotated those keys (confirmed 2026-10-21). Background location is no longer requested, recordings are excluded from Android backup and device transfer, gallery export of locked clips is opt-in, and rides recorded on Android are now signed with a non-exportable Android Keystore key (integrity envelope v3), so tampering is detected on the phone that recorded them; iOS rides stay on the unkeyed SHA-256 check, which detects accidental corruption and naive edits only.
+- **Owner decisions still open.** The application ID `com.example.motocam` cannot be published on Google Play ([migration steps](../release.md#application-id)); the published v0.1.5 to v0.1.12 APKs are debug-signed ([details](../release.md#signing-of-published-apks)); a camera-plugin fork for Android bitrate and audio-off; the iOS iCloud backup policy. The recordings storage location (private app storage with a migration), keyed integrity (Android) and an optional global storage budget have been decided and implemented.
 
-### Tooling after the fix phase
+### Tooling after the fixes (branch state of 2026-10-28)
 
 | Check | Result |
 |---|---|
 | `flutter analyze` | No issues, with 7 stricter lint rules added |
-| `flutter test` | 222 of 222 passed (11 before) |
+| `flutter test` | 583 of 583 passed (11 before) |
 | `dart format --set-exit-if-changed lib test` | Clean |
 | `scripts/release-security-precheck.ps1 -SkipTests -SkipAnalyze` | Passed |
-| `flutter build apk --debug` | Succeeded in 6 min 43 s (AGP 8.11.1, Kotlin Gradle plugin 2.2.20, camera_android_camerax 0.7.2 with CameraX 1.6.0). One warning: the `jni` plugin, new through path_provider_android 2.3.1, builds with NDK 28.2.13676358 while the app pins 28.1.13356709; it is harmless |
+| `flutter build apk --debug` | Succeeded (6 min 43 s in the fix phase; AGP 8.11.1, Kotlin Gradle plugin 2.2.20, camera_android_camerax 0.7.2 with CameraX 1.6.0). One warning: the `jni` plugin, new through path_provider_android 2.3.1, builds with NDK 28.2.13676358 while the app pins 28.1.13356709; it is harmless; the app now pins NDK 28.2.13676358 and the warning is gone |
 
 Nothing has been run on a device or an emulator, and nothing for iOS has been built (no macOS). Device checks still needed: entering and leaving PiP and tapping the notification; the chronometer and "stopping" notifications; START with audio off on Android 14+; notification Stop with the screen locked; returning from system settings; gallery export on Android 9 and lower.
 
@@ -56,18 +56,18 @@ Nothing has been run on a device or an emulator, and nothing for iOS has been bu
 
 | Status | critical | high | medium | low | info | total |
 |---|---|---|---|---|---|---|
-| fixed | 4 | 12 | 36 | 62 | 2 | 116 |
+| fixed | 4 | 13 | 44 | 68 | 3 | 132 |
 | fixed (docs) | 0 | 0 | 3 | 3 | 1 | 7 |
-| partially fixed | 0 | 2 | 13 | 7 | 1 | 23 |
-| deferred | 1 | 1 | 1 | 0 | 0 | 3 |
-| owner decision | 0 | 1 | 2 | 2 | 0 | 5 |
+| partially fixed | 1 | 1 | 7 | 1 | 0 | 10 |
+| deferred | 0 | 1 | 1 | 0 | 0 | 2 |
+| owner decision | 0 | 1 | 0 | 2 | 0 | 3 |
 
 ## Method
 
-1. **Understand** — 9 readers mapped every subsystem line by line (camera, recording UI, playback, ride data and integrity, telemetry, settings/bootstrap, native bridges, maps, build/release/CI).
-2. **Scan** — 10 dimension scanners (above) produced 207 evidence-backed findings from the maps, the source and 270 reader leads; tooling ran on the same tree.
-3. **Dedup** — clustered into 154 canonical findings.
-4. **Verify** — every finding re-checked by independent verifiers; severities corrected where the impact was over- or under-stated.
+1. **Understand**: 9 readers mapped every subsystem line by line (camera, recording UI, playback, ride data and integrity, telemetry, settings/bootstrap, native bridges, maps, build/release/CI).
+2. **Scan**: 10 dimension scanners (above) produced 207 evidence-backed findings from the maps, the source and 270 reader leads; tooling ran on the same tree.
+3. **Dedup**: clustered into 154 canonical findings.
+4. **Verify**: every finding re-checked by independent verifiers; severities corrected where the impact was over- or under-stated.
 
 ### Tooling baseline (before fixes)
 
@@ -87,7 +87,7 @@ Nothing has been run on a device or an emulator, and nothing for iOS has been bu
 | [F001](#f001) | critical | On Android 14+ the two-argument startForeground() applies the manifest's camera\|microphone\|location types, so START crashes with a Security… | `android/app/src/main/kotlin/com/example/motocam/BackgroundRecordingService.kt:43` | fixed |
 | [F002](#f002) | critical | ios/Runner/Info.plist is a fragment missing CFBundleIdentifier/Executable/PackageType/version, launch-screen, main-storyboard and scene-man… | `ios/Runner/Info.plist:4` | fixed |
 | [F003](#f003) | critical | No tracked Podfile defines PERMISSION_CAMERA/MICROPHONE/LOCATION, so permission_handler_apple compiles those strategies out and iOS always… | `lib/core/services/app_permission_service.dart:78` | fixed |
-| [F004](#f004) | critical | Recording stops whenever MainActivity stops (screen timeout, lock, background without PiP): CameraX is bound to the Activity lifecycle and… | `lib/features/camera/providers/camera_provider.dart:614` | deferred |
+| [F004](#f004) | critical | Recording stops whenever MainActivity stops (screen timeout, lock, background without PiP): CameraX is bound to the Activity lifecycle and… | `lib/features/camera/providers/camera_provider.dart:614` | partially fixed |
 | [F005](#f005) | critical | Once a session holds more locked segments than the loop size, the directory-wide retention sweep deletes the oldest videos of every ride, i… | `lib/features/camera/providers/camera_provider.dart:1193` | fixed |
 | [F006](#f006) | high | Template applicationId com.example.motocam cannot ship on Google Play, and the manifest hard-codes the INTERNAL_BROADCAST permission name t… | `android/app/build.gradle.kts:75` | owner decision |
 | [F008](#f008) | high | Unused Mappls SDK credential blobs (app1770452729873i2092687013.a.conf/.a.olf and assets/mappls-conf.txt) are tracked in the public repo an… | `android/app/src/main/assets/mappls-conf.txt:1` | fixed |
@@ -96,7 +96,7 @@ Nothing has been run on a device or an emulator, and nothing for iOS has been bu
 | [F011](#f011) | high | Kotlin Gradle plugin pinned at 2.1.0 is below current Flutter stable's (3.47) KGP error floor of 2.2.20, so the Android build fails on curr… | `android/settings.gradle:22` | fixed |
 | [F012](#f012) | high | ACCESS_BACKGROUND_LOCATION ('Allow all the time') is requested at every launch and every START with no prominent disclosure, although the l… | `lib/core/services/app_permission_service.dart:97` | fixed |
 | [F013](#f013) | high | A startVideoRecording failure during a segment roll is only logged: state stays 'recording' (REC pill, timer, notification) while nothing r… | `lib/features/camera/providers/camera_provider.dart:1018` | fixed |
-| [F014](#f014) | high | Retention is per-session only: earlier rides' footage and GPS trails are never aged out or deletable in-app and free space is never checked… | `lib/features/camera/providers/camera_provider.dart:1117` | partially fixed |
+| [F014](#f014) | high | Retention is per-session only: earlier rides' footage and GPS trails are never aged out or deletable in-app and free space is never checked… | `lib/features/camera/providers/camera_provider.dart:1117` | fixed |
 | [F015](#f015) | high | START is enabled while the previous stop is still finalizing and saving (the button checks only camera.isRecording, not _isStoppingRecordin… | `lib/features/camera/providers/camera_provider.dart:1486` | fixed |
 | [F017](#f017) | high | Ride JSON stores absolute iOS data-container paths (videoPath, segmentPaths, storageDirectory, segmentHashes keys), so past rides become un… | `lib/features/history/models/ride_record.dart:261` | fixed |
 | [F018](#f018) | high | _seekGlobal has no in-flight guard, so overlapping cross-segment seeks (+/-10 s buttons, scrub commits) each call _loadSegment and orphan a… | `lib/features/history/ride_playback_screen.dart:768` | fixed |
@@ -106,7 +106,7 @@ Nothing has been run on a device or an emulator, and nothing for iOS has been bu
 | [F022](#f022) | high | Ride samples, segment list, locks and timeline exist only in memory until a successful STOP, so a kill, crash or task swipe mid-ride orphan… | `lib/features/telemetry/providers/telemetry_provider.dart:347` | fixed |
 | [F023](#f023) | high | Stopping a ride SHA-256-hashes every segment in pure Dart on the UI isolate before the ride's only index JSON is written | `lib/features/telemetry/providers/telemetry_provider.dart:655` | fixed |
 | [F007](#f007) | medium | Every published release APK (v0.1.5-v0.1.12, including the only downloadable v0.1.12 asset) is signed with an Android debug certificate, so… | `android/app/build.gradle.kts:95` | partially fixed |
-| [F016](#f016) | medium | Rides recorded by v0.1.10-v0.1.12 in earlier storage roots (including public Movies/MotoCam/Recordings with GPS JSON) are never migrated, d… | `lib/features/camera/providers/camera_provider.dart:1544` | owner decision |
+| [F016](#f016) | medium | Rides recorded by v0.1.10-v0.1.12 in earlier storage roots (including public Movies/MotoCam/Recordings with GPS JSON) are never migrated, d… | `lib/features/camera/providers/camera_provider.dart:1544` | fixed |
 | [F024](#f024) | medium | CI follows unpinned Flutter 'stable' and runs pub get without --enforce-lockfile, so it analyzes and tests a different SDK, lock resolution… | `.github/workflows/ci.yml:18` | fixed |
 | [F025](#f025) | medium | CI never builds Android or iOS, never checks formatting and collects no coverage | `.github/workflows/ci.yml:21` | partially fixed |
 | [F026](#f026) | medium | Gallery export of locked clips cannot succeed on Android 7-9: WRITE_EXTERNAL_STORAGE (maxSdk 28) is declared but never requested, and the p… | `android/app/src/main/kotlin/com/example/motocam/MainActivity.kt:213` | partially fixed |
@@ -115,12 +115,12 @@ Nothing has been run on a device or an emulator, and nothing for iOS has been bu
 | [F029](#f029) | medium | ios/Runner/PrivacyInfo.xcprivacy is not referenced by the Xcode project (never bundled) and declares API categories and reason codes that A… | `ios/Runner/PrivacyInfo.xcprivacy:13` | fixed |
 | [F030](#f030) | medium | Locked permission_handler_android 13.0.1 reports 'Ask every time' permissions as permanentlyDenied, and ensure()'s status-first flow then n… | `lib/core/services/app_permission_service.dart:57` | partially fixed |
 | [F031](#f031) | medium | The battery-optimization exemption intent fires on every launch and START (and again after recording starts) via a Play-restricted direct i… | `lib/core/services/app_permission_service.dart:105` | fixed |
-| [F032](#f032) | medium | The integrity envelope is an unkeyed SHA-256 and segmentHashes sit outside payloadHash, so anyone who can write the files can forge a ride… | `lib/core/utils/integrity_utils.dart:19` | partially fixed |
+| [F032](#f032) | medium | The integrity envelope is an unkeyed SHA-256 and segmentHashes sit outside payloadHash, so anyone who can write the files can forge a ride… | `lib/core/utils/integrity_utils.dart:19` | fixed |
 | [F033](#f033) | medium | writeTelemetryAtomically deletes the target before renaming and every writer shares one '<target>.tmp' path, so overlapping writes or a kil… | `lib/core/utils/integrity_utils.dart:86` | fixed |
 | [F034](#f034) | medium | initializeCamera has no re-entrancy guard, so START during the launch or history-return init runs two concurrent inits that interfere and o… | `lib/features/camera/providers/camera_provider.dart:315` | fixed |
 | [F035](#f035) | medium | The bitrate setting is a no-op on Android: locked camera_android_camerax 0.7.1 never passes videoBitrate to the CameraX Recorder (fixed in… | `lib/features/camera/providers/camera_provider.dart:643` | partially fixed |
-| [F036](#f036) | medium | Ride videos and per-second GPS traces are stored in app-specific external storage, readable by other apps with storage permission on Androi… | `lib/features/camera/providers/camera_provider.dart:663` | owner decision |
-| [F037](#f037) | medium | On Android every finished segment is copied rather than renamed because CameraX's cache dir and the recordings dir are on different mounts | `lib/features/camera/providers/camera_provider.dart:761` | partially fixed |
+| [F036](#f036) | medium | Ride videos and per-second GPS traces are stored in app-specific external storage, readable by other apps with storage permission on Androi… | `lib/features/camera/providers/camera_provider.dart:663` | fixed |
+| [F037](#f037) | medium | On Android every finished segment is copied rather than renamed because CameraX's cache dir and the recordings dir are on different mounts | `lib/features/camera/providers/camera_provider.dart:761` | fixed |
 | [F038](#f038) | medium | Recording, retention, playback-timeline, persistence and settings-migration logic is untested (about 18% line coverage) | `lib/features/camera/providers/camera_provider.dart:1001` | fixed |
 | [F039](#f039) | medium | Each segment roll stops and re-binds CameraX before restarting, losing roughly a second of footage at every boundary (7-19% with the 5-15 s… | `lib/features/camera/providers/camera_provider.dart:1012` | deferred |
 | [F040](#f040) | medium | recoverRecordingPipeline registers (copies) the segment and runs a full telemetry prune between stop and restart, widening the footage gap | `lib/features/camera/providers/camera_provider.dart:1064` | fixed |
@@ -128,15 +128,15 @@ Nothing has been run on a device or an emulator, and nothing for iOS has been bu
 | [F042](#f042) | medium | When locked segments fill the loop budget, the per-registration trim deletes each newly registered unlocked segment immediately, leaving no… | `lib/features/camera/providers/camera_provider.dart:1118` | fixed |
 | [F043](#f043) | medium | markIncident's pending-lock counter is not tied to a segment, so during a roll the current-segment lock lands on the previous segment and r… | `lib/features/camera/providers/camera_provider.dart:1316` | fixed |
 | [F044](#f044) | medium | stopRecording waits only 2 s for an in-flight segment roll and then stops and registers concurrently, which can drop or misorder the last s… | `lib/features/camera/providers/camera_provider.dart:1458` | fixed |
-| [F045](#f045) | medium | Locked clips, including automatic crash-detector locks, are silently exported with audio to the shared Movies gallery and the public copy i… | `lib/features/camera/providers/camera_provider.dart:1505` | partially fixed |
+| [F045](#f045) | medium | Locked clips, including automatic crash-detector locks, are silently exported with audio to the shared Movies gallery and the public copy i… | `lib/features/camera/providers/camera_provider.dart:1505` | fixed |
 | [F046](#f046) | medium | Unlock (setLockState) re-hashes whatever segment bytes exist and re-signs the envelope after only the payload-only list check, sealing swap… | `lib/features/history/models/ride_record.dart:656` | fixed |
-| [F048](#f048) | medium | Opening a ride re-hashes every segment on the UI isolate, unawaited and never cancelled, only to drive a one-shot SnackBar | `lib/features/history/ride_playback_screen.dart:61` | partially fixed |
+| [F048](#f048) | medium | Opening a ride re-hashes every segment on the UI isolate, unawaited and never cancelled, only to drive a one-shot SnackBar | `lib/features/history/ride_playback_screen.dart:61` | fixed |
 | [F049](#f049) | medium | Playback says it 'continues with trusted segments only' but never filters the playlist by the verification result, playing hash-mismatched… | `lib/features/history/ride_playback_screen.dart:111` | fixed |
 | [F050](#f050) | medium | Opening a ride initializes a native video player for every segment sequentially just to read durations before the first frame, and keeps pr… | `lib/features/history/ride_playback_screen.dart:170` | fixed |
 | [F051](#f051) | medium | Playback has no error state: when no segment is playable or segment 0 fails to load, _controller stays null and the screen spins forever wh… | `lib/features/history/ride_playback_screen.dart:1231` | fixed |
 | [F052](#f052) | medium | The collapsed Route Map stays built inside AnimatedCrossFade, so every ride playback fetches and caches OSM tiles around the route, sending… | `lib/features/history/ride_playback_screen.dart:1367` | fixed |
 | [F053](#f053) | medium | Seekbar incident and lock markers are painted by a childless CustomPaint laid out at Size.zero, so they never appear although the legend li… | `lib/features/history/ride_playback_screen.dart:1457` | fixed |
-| [F054](#f054) | medium | Ride History parses every sample (one DateTime.tryParse each) and re-hashes every ride's canonical JSON on the UI isolate before the list a… | `lib/features/history/rides_list_screen.dart:66` | partially fixed |
+| [F054](#f054) | medium | Ride History parses every sample (one DateTime.tryParse each) and re-hashes every ride's canonical JSON on the UI isolate before the list a… | `lib/features/history/rides_list_screen.dart:66` | fixed |
 | [F055](#f055) | medium | 'Open Settings' and 'Open Location Settings' re-check as soon as startActivity returns, before the rider comes back, and nothing re-checks… | `lib/features/recording/recording_screen.dart:166` | fixed |
 | [F056](#f056) | medium | Stall recovery is inverted: _lastBackgroundedAt is refreshed by the synthesized hidden/inactive on return, so recovery never fires after a… | `lib/features/recording/recording_screen.dart:243` | fixed |
 | [F057](#f057) | medium | _stopRecordingFlow stops the foreground service (releasing the wake lock) before camera.stopRecording and the long telemetry hash/save, whi… | `lib/features/recording/recording_screen.dart:863` | fixed |
@@ -159,7 +159,7 @@ Nothing has been run on a device or an emulator, and nothing for iOS has been bu
 | [F075](#f075) | medium | The v0.1.11 and v0.1.12 GitHub releases ship the same APK, and the v0.1.11 notes' hash was rewritten to a build containing v0.1.12-only code | `release-notes/v0.1.11.md:109` | partially fixed |
 | [F076](#f076) | medium | release-notes/v0.1.13.md is still a Draft listing only a version bump, omitting the storage move, MANAGE_EXTERNAL_STORAGE removal and signi… | `release-notes/v0.1.13.md:7` | partially fixed |
 | [F078](#f078) | medium | release-security-precheck.ps1 never checks $LASTEXITCODE, so it prints 'passed' and exits 0 even when flutter analyze or flutter test fails | `scripts/release-security-precheck.ps1:67` | fixed |
-| [F115](#f115) | medium | The three 1.6k-2k-line files mix pure timeline/retention logic with widget and plugin code, so the riskiest logic cannot be unit-tested | `lib/features/history/ride_playback_screen.dart:1219` | partially fixed |
+| [F115](#f115) | medium | The three 1.6k-2k-line files mix pure timeline/retention logic with widget and plugin code, so the riskiest logic cannot be unit-tested | `lib/features/history/ride_playback_screen.dart:1219` | fixed |
 | [F047](#f047) | low | Integrity verification fails open: the envelope was added without bumping or reading schemaVersion, so a ride with its 'integrity' key remo… | `lib/features/history/models/ride_record.dart:674` | fixed |
 | [F061](#f061) | low | A failed camera init shows the same endless spinner as loading, with no reason and no retry | `lib/features/recording/recording_screen.dart:1473` | fixed |
 | [F077](#f077) | low | generate-keystore.ps1 prints both keystore passwords, puts them on keytool's command line and re-parses them with Invoke-Expression; its de… | `scripts/generate-keystore.ps1:35` | fixed |
@@ -185,21 +185,21 @@ Nothing has been run on a device or an emulator, and nothing for iOS has been bu
 | [F098](#f098) | low | With 'Audio Off', camera_android_camerax still enables muted audio, opening the microphone and muxing a silent track whenever RECORD_AUDIO… | `lib/features/camera/providers/camera_provider.dart:641` | owner decision |
 | [F099](#f099) | low | _setupRecordingsDirectory re-resolves the recordings root on every init and silently falls back to app documents or the evictable cache, hi… | `lib/features/camera/providers/camera_provider.dart:663` | fixed |
 | [F100](#f100) | low | On iOS all recordings and GPS JSON live in Documents and are backed up to iCloud with no exclusion, while Android disables backup | `lib/features/camera/providers/camera_provider.dart:665` | owner decision |
-| [F101](#f101) | low | Pending gallery exports of locked clips live only in memory, are cleared by the next START and lost if the process dies | `lib/features/camera/providers/camera_provider.dart:865` | partially fixed |
+| [F101](#f101) | low | Pending gallery exports of locked clips live only in memory, are cleared by the next START and lost if the process dies | `lib/features/camera/providers/camera_provider.dart:865` | fixed |
 | [F102](#f102) | low | Every private loop segment is handed to MediaScanner (with no .nomedia), so app-private footage can be indexed into MediaStore on older And… | `lib/features/camera/providers/camera_provider.dart:1140` | fixed |
 | [F103](#f103) | low | _pruneOrphanTelemetryFiles fully jsonDecodes every ride JSON on the UI isolate, twice per stop and once per resume recovery | `lib/features/camera/providers/camera_provider.dart:1515` | fixed |
 | [F104](#f104) | low | getRecordings sorts every file with two statSync calls per comparison, an ordering its only caller discards | `lib/features/camera/providers/camera_provider.dart:1550` | fixed |
 | [F105](#f105) | low | RideRecord.fromVideoFile has had no callers since v0.1.11, so video-only ride recovery and its 'VIDEO ONLY (RECOVERED)' badge are dead | `lib/features/history/models/ride_record.dart:170` | fixed |
 | [F106](#f106) | low | Segment quarantine treats the storageDirectory and videoPath parent declared by the very JSON being validated as trusted roots | `lib/features/history/models/ride_record.dart:489` | fixed |
 | [F107](#f107) | low | A missing segment file is classified as 'modified' and surfaced as a tampering 'Security warning' | `lib/features/history/models/ride_record.dart:711` | fixed |
-| [F108](#f108) | low | The writer, reader and playback screen each re-implement telemetry-file rules (segment list, timeline clamping, integrity envelope) with di… | `lib/features/history/models/ride_record.dart:815` | partially fixed |
+| [F108](#f108) | low | The writer, reader and playback screen each re-implement telemetry-file rules (segment list, timeline clamping, integrity envelope) with di… | `lib/features/history/models/ride_record.dart:815` | fixed |
 | [F109](#f109) | low | An in-flight auto-advance can load and play the next segment after the app was backgrounded, playing audio in the background | `lib/features/history/ride_playback_screen.dart:143` | fixed |
 | [F110](#f110) | low | _initializePlayback calls setState without a mounted check when probing finds no playable segment, and the probe loop ignores disposal | `lib/features/history/ride_playback_screen.dart:204` | fixed |
 | [F111](#f111) | low | Footage removed by loop recording becomes an unmarked dead zone on the playback seekbar | `lib/features/history/ride_playback_screen.dart:272` | fixed |
 | [F112](#f112) | low | Runtime VideoPlayerValue errors are never read, so playback silently stalls and auto-advance never fires | `lib/features/history/ride_playback_screen.dart:660` | fixed |
 | [F113](#f113) | low | Incidents are not persisted; playback re-derives markers from 1 Hz samples with a hard-coded 3.2 g / 5 s rule unrelated to the rider's dete… | `lib/features/history/ride_playback_screen.dart:913` | fixed |
 | [F114](#f114) | low | Speed-graph drag re-adds the finger's offset from centre on every update, acting as a rate-dependent jog where a leftward drag can still mo… | `lib/features/history/ride_playback_screen.dart:1168` | fixed |
-| [F116](#f116) | low | A single ValueListenableBuilder rebuilds the whole playback body every 100 ms, and RouteMapView redoes all route work on each rebuild | `lib/features/history/ride_playback_screen.dart:1233` | partially fixed |
+| [F116](#f116) | low | A single ValueListenableBuilder rebuilds the whole playback body every 100 ms, and RouteMapView redoes all route work on each rebuild | `lib/features/history/ride_playback_screen.dart:1233` | fixed |
 | [F117](#f117) | low | A translucent marker Listener over the Slider makes one tap trigger both the marker jump and the Slider's own seek; the tap position wins w… | `lib/features/history/ride_playback_screen.dart:1493` | fixed |
 | [F118](#f118) | low | The ride list shows VERIFIED after a payload-only check, so replaced or missing segment files still show VERIFIED | `lib/features/history/rides_list_screen.dart:66` | fixed |
 | [F119](#f119) | low | The ride card title is the raw CameraX temp file name, and fixed-width badges squeeze it to an unreadable column or make the row overflow | `lib/features/history/rides_list_screen.dart:176` | fixed |
@@ -292,7 +292,7 @@ Also affects: `lib/features/camera/providers/camera_provider.dart:372`, `lib/fea
 
 **Recording stops whenever MainActivity stops (screen timeout, lock, background without PiP): CameraX is bound to the Activity lifecycle and nothing keeps the screen on, contradicting the README/notification 'screen-off recording' claims**
 
-Severity: **critical** · Category: lifecycle · Location: `lib/features/camera/providers/camera_provider.dart:614` · Verification: two-lens (code-truth + reachability/impact) → confirmed · Status: **deferred**
+Severity: **critical** · Category: lifecycle · Location: `lib/features/camera/providers/camera_provider.dart:614` · Verification: two-lens (code-truth + reachability/impact) → confirmed · Status: **partially fixed**
 
 Also affects: `android/app/src/main/kotlin/com/example/motocam/BackgroundRecordingService.kt:96`, `README.md:108`, `lib/features/recording/recording_screen.dart:294`, `lib/features/recording/recording_screen.dart:414`, `android/app/src/main/kotlin/com/example/motocam/MainActivity.kt:25`, `lib/features/camera/providers/camera_provider.dart:638`, `android/app/src/main/kotlin/com/example/motocam/MainActivity.kt:305`, `pub-cache camera_android_camerax-0.7.1/android/src/main/java/io/flutter/plugins/camerax/ProxyApiRegistrar.java:109` …
 
@@ -301,7 +301,7 @@ Also affects: `android/app/src/main/kotlin/com/example/motocam/BackgroundRecordi
 - **Evidence:** ProxyApiRegistrar.java:109-116 `public LifecycleOwner getLifecycleOwner() { if (context instanceof LifecycleOwner) { return (LifecycleOwner) context; } ...`; CameraAndroidCameraxPlugin.java:53 `proxyApiRegistrar.setContext(activityPluginBinding.getActivity());`; FlutterActivity.java:212 `implements FlutterActivityAndFragmentDelegate.Host, LifecycleOwner`, :867 `lifecycle.handleLifecycleEvent(Lifecycle.Event.ON_STOP);`; javap -c/-v androidx.camera.lifecycle.LifecycleCamera (camera-lifecycle 1.5.3, the version pinned by camera_android_camerax-0.7.1/android/build.gradle:75-79): `public void onStop(androidx.lifecycle.LifecycleOwner)` annotated `androidx.lifecycle.OnLifecycleEvent(value=...ON_STOP)` and invoking `CameraUseCaseAdapter.detachUseCases:()V`; grep -i 'wakelock|keep_screen_on|keepScreenOn|FLAG_KEEP_SCREEN_ON|setShowWhenLocked' over lib/, android/app/src/main and pubspec.yaml match…
 - **Verifier corrections:** MainActivity.kt:305-308 also calls maybeEnterRecordingPip() from onPause. That does not help: PiP keeps the activity started only while the display is on, and screen-off still delivers onStop. The stall-recovery path (recording_screen.dart:231-268, recoverRecordingPipeline) runs only after resume, so it cannot recover the footage that was lost. | Narrow the scope. maybeEnterRecordingPip() runs from onPause and onUserLeaveHint (MainActivity.kt:300-327), so pressing Home while recording moves the Activity into PiP, where it stays STARTED and recording continues. The failure is specific to the screen turning off: the system screen timeout, or the power-button lock, which stops every activity,…
 - **Recommendation:** In MainActivity.kt, call window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) in the startForegroundRecording handler (where isRecordingActive becomes true) and clearFlags in stopForegroundRecording. Blackout mode can dim the screen instead of letting it sleep. Change BackgroundRecordingService.kt:96 and README.md:108 to say the screen must stay on, and that locking the phone pauses video. Real screen-off capture would need native CameraX bound to a LifecycleService inside the FGS; treat that as a separate project.
-- **Fix note:** deferred by owner (decision 5) in the fix phase. Update 2026-10-28, owner-approved design: MainActivity overrides `lifecycle` with a mirror of FlutterActivity's registry that a hold keeps at STARTED while the recording's foreground service runs (engaged after a successful service start; released by releaseCameraHold as soon as capture stops, before the ride is saved, with stopForegroundRecording as the backstop, by a token-checked FOREGROUND_STOPPED broadcast from the service, which during a recording also makes Dart show the "Background protection unavailable" warning, and in onDestroy), so CameraX keeps capturing with the screen off. New setting keep_screen_on_while_recording (default on) sets FLAG_KEEP_SCREEN_ON during a recording as the fallback. The resume stall restart is skipped only when the in-progress REC*.mp4 demonstrably grew in the background, overall and also over a 5 to 10 s span ending at the return. Docs, README and the notification text describe this; not yet confirmed on a device.
+- **Fix note:** Fixed in code, device check pending: MainActivity holds the lifecycle CameraX is bound to at STARTED while the recording's foreground service runs (released when capture stops, on service stop and on destroy), a keep-screen-on setting (on by default) is the fallback, and the resume stall restart is skipped only when the in-progress REC*.mp4 demonstrably grew in the background. Deferred by the owner in the fix phase, implemented 2026-10-28.
 
 #### F005
 
@@ -430,7 +430,7 @@ Also affects: `lib/features/camera/providers/camera_provider.dart:1050-1079`, `l
 
 **Retention is per-session only: earlier rides' footage and GPS trails are never aged out or deletable in-app and free space is never checked, so storage grows without bound and running out of space fails silently**
 
-Severity: **high** · Category: correctness · Location: `lib/features/camera/providers/camera_provider.dart:1117` · Verification: two-lens (code-truth + reachability/impact) → confirmed · Status: **partially fixed**
+Severity: **high** · Category: correctness · Location: `lib/features/camera/providers/camera_provider.dart:1117` · Verification: two-lens (code-truth + reachability/impact) → confirmed · Status: **fixed**
 
 Also affects: `lib/features/camera/providers/camera_provider.dart:1180-1256`, `lib/features/history/rides_list_screen.dart:54-77`, `lib/core/utils/integrity_utils.dart:72-95`, `lib/features/recording/recording_screen.dart:873-880`, `lib/features/camera/providers/camera_provider.dart:1193`, `lib/features/camera/providers/camera_provider.dart:862`, `lib/features/camera/providers/camera_provider.dart:1117`, `lib/features/camera/providers/camera_provider.dart:1209` …
 
@@ -440,7 +440,7 @@ Also affects: `lib/features/camera/providers/camera_provider.dart:1180-1256`, `l
 - **Verifier corrections:** The fix must be coordinated with F005: the only existing cross-ride deletion is the unsafe sweep, which should be removed rather than broadened. | Recordings are in app-specific external storage (getExternalStorageDirectory, camera_provider.dart:663), so uninstalling the app also removes them. The growth matters while the app stays installed. The unlock snackbar's 'normal loop policy' never applies to past rides.
 - **Recommendation:** Two non-destructive parts need no owner decision. First, add a free-space check (via a MethodChannel to StatFs, or path_provider plus a small native call) before START and at each roll, refusing to start or stopping with a visible error below a threshold. Second, add a 'Delete ride' action to Ride History that removes the ride's segments and its sidecar. Automatic age-out of old unlocked rides under a storage budget, in whole rides and never locked ones, is a separate policy change.
 - **Owner decision:** Automatically ageing out earlier rides deletes user recordings, so the owner must choose the retention policy (byte budget or free-space threshold, and whether to auto-delete or only warn). The in-app delete action and the free-space check do not need that decision. | Automatically deleting a rider's past unlocked rides under a storage budget destroys user data. The owner must choose that policy…
-- **Fix note:** free-space checks + native StatFs + in-app delete; global storage budget is owner-only
+- **Fix note:** Optional global storage budget (setting recordings_storage_budget_gb: Off, 4, 8, 16, 32 or 64 GB; default Off) enforced while recording by deleting whole unlocked rides oldest first. It never deletes locked or quarantined rides, the current session, or rides left half-moved by a migration or import. Enforcement wiring is untested on a device.
 
 #### F015
 
@@ -584,7 +584,7 @@ Also affects: `android/app/build.gradle.kts:82`, `lib/features/camera/providers/
 
 **Rides recorded by v0.1.10-v0.1.12 in earlier storage roots (including public Movies/MotoCam/Recordings with GPS JSON) are never migrated, discovered or cleaned up after upgrade**
 
-Severity: **medium (scanner said high)** · Category: privacy · Location: `lib/features/camera/providers/camera_provider.dart:1544` · Verification: two-lens (code-truth + reachability/impact) → confirmed · Status: **owner decision**
+Severity: **medium (scanner said high)** · Category: privacy · Location: `lib/features/camera/providers/camera_provider.dart:1544` · Verification: two-lens (code-truth + reachability/impact) → confirmed · Status: **fixed**
 
 Also affects: `release-notes/v0.1.12.md:23`, `release-notes/v0.1.11.md:20`, `release-notes/v0.1.13.md:7`, `lib/features/history/models/ride_record.dart:499`, `lib/features/camera/providers/camera_provider.dart:1535`, `lib/features/camera/providers/camera_provider.dart:659`, `lib/features/history/models/ride_record.dart:71`, `lib/features/history/rides_list_screen.dart:54`
 
@@ -594,7 +594,7 @@ Also affects: `release-notes/v0.1.12.md:23`, `release-notes/v0.1.11.md:20`, `rel
 - **Verifier corrections:** The v0.1.12 APK download count is 4, not 3. I could not verify the debug-signing claim (aapt/apksigner output) in this pass. v0.1.10 rides lived in getApplicationDocumentsDirectory()/MotoCam Recordings (internal, private), which HEAD does not scan either, so they are orphaned but not publicly exposed. HEAD itself still exports locked clips to Movies/MotoCam/Recordings by design (telemetry 'publicExportRelativePath'). | Severity is scoped to HEAD's migration gap; leaving the v0.1.12 APK as the effective latest download is a separate release-management decision. v0.1.10 stored rides in getApplicationDocumentsDirectory(), which is private: after an upgrade those rides are orphaned and invisibl…
 - **Recommendation:** Add a one-time legacy step on Android. It finds Movies/MotoCam/Recordings/*.telemetry.json and the matching MP4s, then offers to import them into private storage or delete them: MediaStore.createDeleteRequest for media on API 30+, and an ACTION_OPEN_DOCUMENT_TREE grant for the JSON. Add a release note warning that earlier builds left location files in that folder. Separately, publish a release-signed current build as the Latest asset and withdraw or deprecate the v0.1.11 and v0.1.12 APKs.
 - **Owner decision:** The fix needs owner decisions on publishing a release asset, withdrawing or deprecating the v0.1.11/v0.1.12 APKs, and whether the app may delete or relocate existing user recordings from the legacy folder. | Fixing this means deleting or relocating riders' existing recordings and GPS files, and withdrawing published release assets or publishing a new release. Both are the owner's decisions.
-- **Fix note:** owner-only: legacy public-folder migration + re-release (F007, decision 7)
+- **Fix note:** Import of the old public Movies/MotoCam/Recordings folder through the Storage Access Framework (Ride History menu), with a summary and an optional delete of the originals; only that folder is accepted. Not verified on a phone. The owner-only part (re-release, withdrawing the v0.1.11/v0.1.12 APKs) is not done.
 
 #### F024
 
@@ -719,7 +719,7 @@ Also affects: `lib/core/services/background_recording_service.dart:56`, `android
 
 **The integrity envelope is an unkeyed SHA-256 and segmentHashes sit outside payloadHash, so anyone who can write the files can forge a ride that shows VERIFIED**
 
-Severity: **medium** · Category: security · Location: `lib/core/utils/integrity_utils.dart:19` · Verification: two-lens (code-truth + reachability/impact) → confirmed · Status: **partially fixed**
+Severity: **medium** · Category: security · Location: `lib/core/utils/integrity_utils.dart:19` · Verification: two-lens (code-truth + reachability/impact) → confirmed · Status: **fixed**
 
 Also affects: `lib/features/telemetry/providers/telemetry_provider.dart:662`, `lib/features/history/models/ride_record.dart:693`, `lib/features/history/models/ride_record.dart:701`, `lib/features/history/rides_list_screen.dart:204`, `README.md:114`
 
@@ -729,7 +729,7 @@ Also affects: `lib/features/telemetry/providers/telemetry_provider.dart:662`, `l
 - **Verifier corrections:** The envelope is built in telemetry_provider.dart:648-667 (_buildIntegrityMetadata); the call at ~line 662 is inside it. The envelope also carries 'hashedSegmentCount', which is likewise unprotected. The 'other apps on Android 9 and earlier' vector depends on the separate storage-location finding and was not verified here. | Moving segmentHashes under payloadHash alone fixes nothing while the hash has no key; the core problem is the missing key. Option (a) would need new native Keystore code in MainActivity.kt and has no iOS counterpart, because iOS has no channel handlers.
 - **Recommendation:** Minimal fix: relabel it as a corruption checksum. Change the VERIFIED badge to 'CHECKSUM OK' in rides_list_screen.dart, soften the 'Security warning' text in ride_playback_screen.dart, and reword README.md:114 so it does not claim tamper protection. Real tamper evidence would mean an HMAC/ECDSA signature from an Android Keystore key over the canonical payload including segmentHashes, added through a new background_recording or media channel method.
 - **Owner decision:** The owner must choose whether MotoCam markets rides as tamper-evident evidence, which requires device-bound signing and a native Keystore channel that iOS does not have, or relabels the feature as a corruption checksum. | Whether MotoCam claims evidentiary tamper resistance (and builds Keystore signing) or presents the hash as a corruption checksum is a product decision about how ride footage is…
-- **Fix note:** bound envelope v2 + honest wording; keyed integrity (HMAC) is owner-only
+- **Fix note:** Keyed integrity on Android: final saves are signed with a non-exportable P-256 Android Keystore key (envelope v3, SignedRideRegistry, signature-removed check, re-signing on unlock). The native signer compiles but has not run on a device; iOS rides stay unsigned v2 by owner decision.
 
 #### F033
 
@@ -780,7 +780,7 @@ Also affects: `lib/features/recording/recording_screen.dart:854`, `lib/core/prov
 
 **Ride videos and per-second GPS traces are stored in app-specific external storage, readable by other apps with storage permission on Android 7-9 (minSdk 24)**
 
-Severity: **medium** · Category: privacy · Location: `lib/features/camera/providers/camera_provider.dart:663` · Verification: two-lens (code-truth + reachability/impact) → confirmed · Status: **owner decision**
+Severity: **medium** · Category: privacy · Location: `lib/features/camera/providers/camera_provider.dart:663` · Verification: two-lens (code-truth + reachability/impact) → confirmed · Status: **fixed**
 
 Also affects: `lib/features/telemetry/providers/telemetry_provider.dart:434`, `lib/features/telemetry/providers/telemetry_provider.dart:697`, `android/app/build.gradle.kts:76`, `README.md:158`
 
@@ -789,13 +789,13 @@ Also affects: `lib/features/telemetry/providers/telemetry_provider.dart:434`, `l
 - **Evidence:** camera_provider.dart:662-673: `if (Platform.isAndroid) { baseDirectory = (await getExternalStorageDirectory()) ?? await getApplicationDocumentsDirectory(); } ... Directory('${baseDirectory.path}${Platform.pathSeparator}$_recordingsDirectoryName')`. telemetry_provider.dart:434 adds `'samples': _activeRideSamples.map((sample) => sample.toJson()).toList()`, and each sample serialises latitude and longitude (telemetry_data.dart:81-92). telemetry_provider.dart:678-698 writes the file next to the first segment. android/app/build.gradle.kts:76 `minSdk = flutter.minSdkVersion`, which is 24 in Flutter 3.41.2. Android docs (Access app-specific files): "On devices that run Android 9 (API level 28) or lower, your app can access the app-specific files that belong to other apps, provided that your app has the appropriate storage permissions." README.md:158: "App Storage (private-first)".
 - **Recommendation:** Change `_setupRecordingsDirectory` in camera_provider.dart to use `getApplicationSupportDirectory()` (internal filesDir) on Android, and write the telemetry JSON beside the segments, as telemetry_provider.dart already does. Add a one-time migration of existing recordings from the external folder. Reword README.md:158, or raise minSdk to 29 instead.
 - **Owner decision:** Moving the recordings root means relocating existing recordings and telemetry, or orphaning them (rides list, retention sweep and gallery export all depend on this directory). Raising minSdk to 29 drops support for Android 7-9 devices. Either choice is a product decision for the owner. | Fixing it means relocating existing riders' recordings, or raising minSdk and dropping Android 7-9 users. It a…
-- **Fix note:** owner-only (decision 7)
+- **Fix note:** Recordings live in private app storage (getApplicationSupportDirectory()/MotoCam Recordings, same mount as the CameraX cache) with a one-shot, resumable, verified migration of the legacy roots (snapshot plus done flag, whole-ride space check, split rides hidden and retried). Not confirmed on a device. Rides are no longer reachable over USB; gallery export is the way out.
 
 #### F037
 
 **On Android every finished segment is copied rather than renamed because CameraX's cache dir and the recordings dir are on different mounts**
 
-Severity: **medium** · Category: performance · Location: `lib/features/camera/providers/camera_provider.dart:761` · Verification: two-lens (code-truth + reachability/impact) → confirmed · Status: **partially fixed**
+Severity: **medium** · Category: performance · Location: `lib/features/camera/providers/camera_provider.dart:761` · Verification: two-lens (code-truth + reachability/impact) → confirmed · Status: **fixed**
 
 Also affects: `lib/features/camera/providers/camera_provider.dart:662`, `lib/features/camera/providers/camera_provider.dart:1097`, `lib/features/camera/providers/camera_provider.dart:1457`, `lib/features/history/ride_playback_screen.dart:233`
 
@@ -805,7 +805,7 @@ Also affects: `lib/features/camera/providers/camera_provider.dart:662`, `lib/fea
 - **Verifier corrections:** The timeline skew does not accumulate: it equals the previous boundary's persist (copy) time for each segment. The STOP race is timing-dependent. If stopRecording's own stopVideoRecording finds no active recording, the plugin throws CameraException code 'videoRecordingFailed', not 'No video is recording', so the race branch at 1474 is not taken and the outer catch returns _sessionSegmentPaths.last. | Stop-race mechanics: when STOP lands after the roll's restart, stopRecording stops and registers N+1 while N's copy is still running. N can then be appended after N+1 (the timeline is out of order) or after the caller has read the session paths. When STOP lands between the roll's stop and resta…
 - **Recommendation:** Relocate the Android recordings root to internal storage (`getApplicationSupportDirectory()`, same mount as the cache dir) so the rename is O(1); this is the same change as F036. Independently of that, in camera_provider.dart stamp segment boundaries in `_rollSegmentIfNeeded` at the stop and restart instants and pass them into `_registerCompletedSegment`. Replace the 2 s polling in stopRecording with an awaited Completer for the in-flight roll.
 - **Owner decision:** Removing the copy requires relocating the recordings root (and existing recordings) to internal storage, which is the same owner decision as F036. The timestamp and Completer fixes need no decision. | Removing the copy requires relocating the recordings root and migrating existing recordings, which is the same owner decision as F036. The timestamp and stop-await fix needs no owner decision.
-- **Fix note:** boundaries stamped at stop/restart; same-mount relocation is F036 (owner)
+- **Fix note:** The stop path awaits the roll (no polling) and boundaries are stamped before persisting; the recordings root now shares a mount with the CameraX cache, so persisting a segment is a rename (copy fallback kept). Whether the rename path is taken is unconfirmed until checked on a device.
 
 #### F038
 
@@ -915,7 +915,7 @@ Also affects: `lib/features/camera/providers/camera_provider.dart:1001-1048`, `l
 
 **Locked clips, including automatic crash-detector locks, are silently exported with audio to the shared Movies gallery and the public copy is never removed**
 
-Severity: **medium** · Category: privacy · Location: `lib/features/camera/providers/camera_provider.dart:1505` · Verification: two-lens (code-truth + reachability/impact) → confirmed · Status: **partially fixed**
+Severity: **medium** · Category: privacy · Location: `lib/features/camera/providers/camera_provider.dart:1505` · Verification: two-lens (code-truth + reachability/impact) → confirmed · Status: **fixed**
 
 Also affects: `lib/features/recording/recording_screen.dart:920`, `lib/features/recording/recording_screen.dart:1826`, `lib/features/camera/providers/camera_provider.dart:1385`, `lib/features/history/rides_list_screen.dart:269`, `README.md:159`
 
@@ -925,7 +925,7 @@ Also affects: `lib/features/recording/recording_screen.dart:920`, `lib/features/
 - **Verifier corrections:** On API < 29 the native branch writes to Movies/MotoCam/Videos, not Recordings (MainActivity.kt:206-207). The Dart fallback copy (_copySegmentToAndroidPublicGallery) targets /storage/emulated/0/Movies/MotoCam/Recordings. Both need a runtime WRITE_EXTERNAL_STORAGE grant that is never requested, so on API 24-28 they fail and the code only media-scans the private file. ride_record.dart:500 also adds the public export directory as a path-resolution root on Android. | The pre-Q branch in MainActivity.kt:205-206 writes to Movies/MotoCam/Videos and ignores relativePath, while Dart's _androidPublicExportDirectory (camera_provider.dart:45-46) and the trusted root in ride_record.dart:71/500 use /stora…
 - **Recommendation:** Add an 'Export locked clips to gallery' setting to app_settings_provider.dart and the settings sheet, defaulting to off (or add a per-ride 'Save to gallery' action), and have stopRecording export only when it is enabled. Show a notice when an export happens. Store the content URI returned by exportVideoToGallery in the sidecar, so that Unlock or delete can offer to remove the copy through ContentResolver.delete / createDeleteRequest. Update README.md:159 to match.
 - **Owner decision:** Whether public export should be opt-in (off by default) or stay automatic for locked or crash clips is a product and privacy choice. Turning it off changes behaviour that riders who rely on gallery copies of incidents may expect. | Making the export opt-in, or removing it, changes behaviour riders may rely on: locked incident clips would no longer appear in the gallery automatically. The owner ha…
-- **Fix note:** gallery export opt-in (default off, persisted toggle); storing content URIs for removal not done
+- **Fix note:** Gallery copies are tracked (gallery-link store with content URIs) and removable on unlock, before delete and from a Save to gallery menu in Ride History; no copy is left untracked when a ride changes during a copy. The API 29, 30+ and Android 9 delete paths are tested only with a faked channel, not on a phone. Copies made by older versions are not tracked.
 
 #### F046
 
@@ -946,7 +946,7 @@ Also affects: `lib/features/history/models/ride_record.dart:626-629`, `lib/featu
 
 **Opening a ride re-hashes every segment on the UI isolate, unawaited and never cancelled, only to drive a one-shot SnackBar**
 
-Severity: **medium** · Category: performance · Location: `lib/features/history/ride_playback_screen.dart:61` · Verification: two-lens (code-truth + reachability/impact) → confirmed · Status: **partially fixed**
+Severity: **medium** · Category: performance · Location: `lib/features/history/ride_playback_screen.dart:61` · Verification: two-lens (code-truth + reachability/impact) → confirmed · Status: **fixed**
 
 Also affects: `lib/features/history/models/ride_record.dart:734`, `lib/features/history/models/ride_record.dart:702`, `lib/features/history/models/ride_record.dart:625`, `lib/features/history/rides_list_screen.dart:262`, `lib/core/utils/integrity_utils.dart:65`
 
@@ -955,7 +955,7 @@ Also affects: `lib/features/history/models/ride_record.dart:734`, `lib/features/
 - **Evidence:** ride_playback_screen.dart:61 'unawaited(_verifySegmentsAsync());'; :66-67 'final verifiedRide = await _activeRide.verifySegmentIntegrity(); if (!mounted) {'; _activeRide is read only at :82-96 (grep). ride_record.dart:766-770 '_verifyIntegrity(json: json, segmentPaths: declaredSegmentPaths, verifySegments: true)'; :703-710 'for (final segmentPath in segmentPaths) { ... final actualHash = await _hashFileSha256(segmentPath);'. ride_record.dart:656 'final integrity = await _buildIntegrityMetadataForPayload(json);' -> :831-832 'for (final segmentPath in segmentPaths) { final hash = await _hashFileSha256(segmentPath);'. rides_list_screen.dart:258-262 onPressed '... await ride.setLockState(false);' with no in-flight flag.
 - **Verifier corrections:** Segments with no expected hash are skipped without being hashed (ride_record.dart:705-708), so only hashed segments cost time. The line numbers cited for ride_record.dart are accurate.
 - **Recommendation:** In ride_record.dart, run the segment-hash loop inside Isolate.run (pass the paths and return the issues) so the UI isolate is not blocked, and let a cancellation flag be checked between segments. Also cache results keyed by path+size+mtime. In setLockState, reuse the existing integrity.segmentHashes for files whose size and mtime are unchanged and recompute only payloadHash. In rides_list_screen.dart, disable the Unlock button while a setLockState call is in flight.
-- **Fix note:** hashing off UI isolate + cache; in-loop cancellation/lazy verification not done
+- **Fix note:** Per-segment Isolate.run hashing, playing segment first, cancellable between segments, results persisted in the ride index and reused across opens and restarts, with a 'Check videos again' action. A stored result hides a change that keeps a segment's size and times until re-checked. Not verified on a device.
 
 #### F049
 
@@ -1035,7 +1035,7 @@ Also affects: `lib/features/history/ride_playback_screen.dart:1451-1467`, `lib/f
 
 **Ride History parses every sample (one DateTime.tryParse each) and re-hashes every ride's canonical JSON on the UI isolate before the list appears**
 
-Severity: **medium** · Category: performance · Location: `lib/features/history/rides_list_screen.dart:66` · Verification: two-lens (code-truth + reachability/impact) → confirmed · Status: **partially fixed**
+Severity: **medium** · Category: performance · Location: `lib/features/history/rides_list_screen.dart:66` · Verification: two-lens (code-truth + reachability/impact) → confirmed · Status: **fixed**
 
 Also affects: `lib/features/history/models/ride_record.dart:253`, `lib/features/history/models/ride_record.dart:559`, `lib/features/history/models/ride_record.dart:693`, `lib/features/telemetry/models/telemetry_data.dart:107`, `lib/features/history/rides_list_screen.dart:117`
 
@@ -1044,7 +1044,7 @@ Also affects: `lib/features/history/models/ride_record.dart:253`, `lib/features/
 - **Evidence:** rides_list_screen.dart:64-66 'for (final telemetryFile in telemetryFiles) { try { final ride = await RideRecord.fromTelemetryFile(telemetryFile);'. ride_record.dart:259-260 'final raw = await telemetryFile.readAsString(); final json = jsonDecode(raw) as Map<String, dynamic>;'; :322 'final samples = _readSamples(json);'; :565-567 'raw.map((key, value) => MapEntry(key.toString(), value)); samples.add(TelemetryData.fromJson(normalized));'; telemetry_data.dart:107 'timestamp: DateTime.tryParse(json['timestamp']?.toString() ?? '') ??'; ride_record.dart:693-695 'Map<String, dynamic>.from(json)..remove('integrity'); final actualPayloadHash = _hashJsonCanonical(payloadWithoutIntegrity);'; :164 is the only use of a sample timestamp. Benchmark (bench/bin/bench.dart, bench2.dart): 'n=7200 ... total load=334ms', 'n=36000 ... jsonDecode=320ms readSamples=2286ms canonicalHash=826ms | total load=3432m…
 - **Verifier corrections:** The work is broken into one synchronous block per ride (with await gaps between rides), so it is a series of per-ride freezes rather than a single block, as the finding's '100-500 ms freezes' implies. A single very long ride is the only case near multi-second stalls. The quoted benchmark timings are unverified here. | The list uses ListView with a children list (rides_list_screen.dart:121), but card building is not the main cost. The awaits between rides give the event loop a chance to run, so the result is per-ride stalls rather than one long block, unless a single ride is very long.
 - **Recommendation:** Minimal: in ride_record.dart, move the parse-and-verify body of fromTelemetryFile (readAsString result to jsonDecode, _readSamples, _verifyIntegrity payload hash) into `Isolate.run(...)` with plain data across the boundary, so the UI isolate only builds the cards. Follow-up: write a small summary sidecar at stop and load samples lazily in RidePlaybackScreen.
-- **Fix note:** history load in Isolate.run; summary sidecar / epoch-ms format not done
+- **Fix note:** Persistent ride index (RideIndexStore, atomic single writer) so history no longer decodes unchanged rides; samples load lazily in Isolate.run on open; ListView.builder. An index hit costs one stat of the telemetry file plus one per segment.
 
 #### F055
 
@@ -1380,7 +1380,7 @@ Also affects: `scripts/release-security-precheck.ps1:72`, `scripts/release-secur
 
 **The three 1.6k-2k-line files mix pure timeline/retention logic with widget and plugin code, so the riskiest logic cannot be unit-tested**
 
-Severity: **medium (scanner said low)** · Category: maintainability · Location: `lib/features/history/ride_playback_screen.dart:1219` · Verification: single → confirmed · Status: **partially fixed**
+Severity: **medium (scanner said low)** · Category: maintainability · Location: `lib/features/history/ride_playback_screen.dart:1219` · Verification: single → confirmed · Status: **fixed**
 
 Also affects: `lib/features/history/ride_playback_screen.dart:355`, `lib/features/history/ride_playback_screen.dart:1684`, `lib/features/camera/providers/camera_provider.dart:1081`, `lib/features/camera/providers/camera_provider.dart:1180`, `lib/features/recording/recording_screen.dart:565`, `lib/features/recording/recording_screen.dart:1248`, `lib/features/recording/recording_screen.dart:1681`
 
@@ -1389,7 +1389,7 @@ Also affects: `lib/features/history/ride_playback_screen.dart:355`, `lib/feature
 - **Evidence:** Method spans from a structural outline: ride_playback build() 1219-1670, _buildEffectiveTimelineEntries 355-436, _initializePlayback 151-301. recording_screen _buildStartPreflightChecks 565-731, _openSettingsSheet 1248-1386, _buildControls 1681-1865. camera_provider initializeCamera 315-496, _enforceRecordingRetention 1180-1258. Lines hit per lcov: 2/850, 22/747 and 234/743.
 - **Verifier corrections:** There are two CustomPainters plus one SliderTrackShape, not three painters. The coverage percentages (0.2%, 2.9%, 31.5%) could not be verified from the repo.
 - **Recommendation:** Extract a pure PlaybackTimeline (entries, offsets, missing ranges, locate, markers) and a RetentionPolicy/SegmentSession (rolling-limit and lock rules), and add unit tests for each extraction. Splitting the widget build sections can follow.
-- **Fix note:** pure logic extracted (retention, timeline, recording UI, start preflight evaluator); playback build() not split
+- **Fix note:** Pure logic extracted (retention, timeline, recording UI, start preflight evaluator, all unit-tested) and the playback build() split into widgets under lib/features/history/widgets with the painters moved out.
 
 ### Low (74)
 
@@ -1421,7 +1421,7 @@ Also affects: `lib/features/camera/providers/camera_provider.dart:380-403`, `lib
 - **Evidence:** recording_screen.dart:1473-1477 `if (!camera.isInitialized || camera.controller == null) { return const Center(child: CircularProgressIndicator(color: Colors.white),); }`; camera_provider.dart:380-385 `if (!_isPermissionGranted(cameraStatus) || !_isPermissionGranted(microphoneStatus)) { _log('Camera or microphone permission denied'); _isInitialized = false; notifyListeners(); return; }`; :462-466 `_isInitialized = false; _log('Unable to initialize camera for any preset on this device.'); notifyListeners(); return;`; recording_screen.dart:108-110 `if (!mounted || resolvedAudit.hasBlockingIssues) { return; }`; app_settings_provider.dart:98 `bool _audioEnabled = true;`.
 - **Verifier corrections:** Missing permissions are named, once, in the bootstrap dialog and SnackBar (recording_screen.dart:129-138, 188-189), so the rider is told which permission is missing. The message is just not persistent. START re-runs the permission audit and re-initializes the camera through the preflight (569-571), so a retry path exists even though no control is labelled as one. Severity lowered to low: this is a UX polish issue with a recovery path, not a failure of a main feature. | 'No retry' is overstated. Tapping START RECORDING re-runs _initializeCamera through the preflight, and the preflight sheet shows which permission or check failed. A transient SnackBar also names the missing permissions after…
 - **Recommendation:** Add an initError field (an enum plus a message) to CameraProvider, set it on each early-return path in initializeCamera, and expose a getter. In recording_screen.dart _buildCameraPreview, when the camera is not initializing and initError is set, show the reason with Retry (calling _initializeCamera) and Open Settings buttons. On AppLifecycleState.resumed, when idle and not initialized, call _initializeCamera.
-- **Fix note:** CameraProvider.initState and initFailure set on every init path; the preview panel names the reason (camera or microphone permission, no camera, camera unavailable, storage, unknown with the error text) with Retry and Open Settings; the resume retry is kept
+- **Fix note:** CameraProvider.initState and initFailure are set on every init path; the preview panel names the reason (camera or microphone permission, no camera, camera unavailable, storage, unknown with the error text) with Retry and Open Settings; the resume retry is kept. Not exercised on a device.
 
 #### F077
 
@@ -1762,7 +1762,7 @@ Also affects: `android/app/src/main/AndroidManifest.xml:33`, `android/app/src/ma
 
 **Pending gallery exports of locked clips live only in memory, are cleared by the next START and lost if the process dies**
 
-Severity: **low** · Category: correctness · Location: `lib/features/camera/providers/camera_provider.dart:865` · Verification: single → confirmed · Status: **partially fixed**
+Severity: **low** · Category: correctness · Location: `lib/features/camera/providers/camera_provider.dart:865` · Verification: single → confirmed · Status: **fixed**
 
 Also affects: `lib/features/camera/providers/camera_provider.dart:1505-1513`
 
@@ -1770,7 +1770,7 @@ Also affects: `lib/features/camera/providers/camera_provider.dart:1505-1513`
 - **Failure scenario:** The rider stops with three locked incident clips and restarts within a few seconds, or the app is killed. Clips not yet copied never reach the gallery; only the private copies remain, and the retention sweep can delete those.
 - **Evidence:** camera_provider.dart:865 `_pendingGalleryExports.clear();`; 1365-1367 `Future<void>.delayed(const Duration(seconds: 2), () async { try { await _drainGalleryExportQueue();`; 1375-1376 `while (_pendingGalleryExports.isNotEmpty) { final sourcePath = _pendingGalleryExports.removeAt(0);`.
 - **Recommendation:** Don't clear _pendingGalleryExports in startRecording. Save pending export paths, for example in the ride's telemetry sidecar or SharedPreferences, and retry them at launch or after the next stop.
-- **Fix note:** export queue no longer cleared/duplicated; persistence across process death not done
+- **Fix note:** Persisted export queue: locked clips are queued before the 2 s delay, retried once per launch and after every stop, and never copied twice (matched by name, size and queue time). A copy renamed by the system on a name clash cannot be matched, so a kill in the gap between the native reply and the store write could create a duplicate.
 
 #### F102
 
@@ -1865,7 +1865,7 @@ Also affects: `lib/features/history/ride_playback_screen.dart:76-117`, `lib/feat
 
 **The writer, reader and playback screen each re-implement telemetry-file rules (segment list, timeline clamping, integrity envelope) with diverging semantics**
 
-Severity: **low** · Category: maintainability · Location: `lib/features/history/models/ride_record.dart:815` · Verification: single → confirmed · Status: **partially fixed**
+Severity: **low** · Category: maintainability · Location: `lib/features/history/models/ride_record.dart:815` · Verification: single → confirmed · Status: **fixed**
 
 Also affects: `lib/features/telemetry/providers/telemetry_provider.dart:649`, `lib/features/telemetry/providers/telemetry_provider.dart:497`, `lib/features/history/models/ride_record.dart:457`, `lib/features/history/ride_playback_screen.dart:336`, `lib/features/telemetry/providers/telemetry_provider.dart:552`, `lib/features/history/models/ride_record.dart:593`, `lib/features/history/ride_playback_screen.dart:389`, `lib/features/camera/providers/camera_provider.dart:45` …
 
@@ -1874,7 +1874,7 @@ Also affects: `lib/features/telemetry/providers/telemetry_provider.dart:649`, `l
 - **Evidence:** Line references above. In the lcov at C:/Users/Sarthak/AppData/Local/Temp/claude/C--Users-Sarthak-Documents-MotoCam/f2235d59-4dc6-48c0-bff9-49e27bc65ea5/scratchpad/coverage/lcov.info, telemetry_provider.dart 362-460 and 497-698 have 0 hits, and ride_record.dart 815-847 has 0 hits.
 - **Verifier corrections:** The writer's segmentCount counts paths that are already filtered by directory and existence (telemetry_provider.dart:391-401). The reader's _buildIntegrityMetadataForPayload counts existing paths, so the two differ only in the directory/trust filter, not in what is counted.
 - **Recommendation:** Move segment-list normalization, timeline normalization and envelope construction into one shared helper in lib/core used by TelemetryProvider, RideRecord.setLockState and RidePlaybackScreen. Use path_utils.fileNameFromPath everywhere, and add one writer-to-reader round-trip test.
-- **Fix note:** shared envelope/path helpers; remaining duplication outside history noted
+- **Fix note:** One ride-file codec (lib/core/ride_file/ride_telemetry_codec.dart) serves the writer, the reader, segment resolution and envelope hashing for TelemetryProvider, RideRecord, orphan pruning and playback; golden tests cover it.
 
 #### F109
 
@@ -1966,7 +1966,7 @@ Also affects: `lib/features/history/ride_playback_screen.dart:1024-1045`, `lib/f
 
 **A single ValueListenableBuilder rebuilds the whole playback body every 100 ms, and RouteMapView redoes all route work on each rebuild**
 
-Severity: **low** · Category: performance · Location: `lib/features/history/ride_playback_screen.dart:1233` · Verification: single → confirmed · Status: **partially fixed**
+Severity: **low** · Category: performance · Location: `lib/features/history/ride_playback_screen.dart:1233` · Verification: single → confirmed · Status: **fixed**
 
 Also affects: `lib/features/history/widgets/route_map_view.dart:23`, `lib/features/history/widgets/route_map_view.dart:64`, `lib/features/history/ride_playback_screen.dart:1700`, `lib/features/history/ride_playback_screen.dart:842`
 
@@ -1975,7 +1975,7 @@ Also affects: `lib/features/history/widgets/route_map_view.dart:23`, `lib/featur
 - **Evidence:** ride_playback_screen.dart:1233-1235 'ValueListenableBuilder<VideoPlayerValue>(valueListenable: controller, builder: (context, value, _) {' wrapping the whole Column; :1376-1380 'RouteMapView(telemetryData: widget.ride.samples, height: mapHeight, currentSample: sample,'; :1706-1763 two loops over samples; :1803 'return oldDelegate.currentPositionMs != currentPositionMs ||'. video_player-2.11.1 video_player.dart:739 '_timer = Timer.periodic(const Duration(milliseconds: 100), ('. route_map_view.dart:23 'final routePoints = _downsample(_extractPoints(telemetryData));', :32 'LatLngBounds.fromPoints(routePoints)', :64-78 new TileLayer and PolylineLayer. flutter_map-8.2.2 tile_layer.dart:278 'tileProvider = tileProvider ?? NetworkTileProvider(),'; network/tile_provider.dart:42 '_httpClient = httpClient ?? RetryClient(Client());'; layer_projection_simplification/state.dart:52-58 didUpdateWidget…
 - **Verifier corrections:** The '1,801 points' cap is actually about 1800: _downsample keeps every step-th point. Map tiles are not refetched per tick, only objects are churned.
 - **Recommendation:** Make RouteMapView stateful and compute routePoints, bounds, zoom and the TileLayer/PolylineLayer once (or memoise on telemetryData identity), feeding only the current marker per tick. Narrow the controller listener to the position-dependent widgets, and skip building the map child when _showRouteMap is false.
-- **Fix note:** map layers cached, graph windowed; body still under one ValueListenableBuilder
+- **Fix note:** Only position-showing playback widgets rebuild per tick, the graph curve is cached with a separate cursor, and the map marker is fed from a ValueListenable (widget-tested). Real-device smoothness is unchecked.
 
 #### F117
 
@@ -2091,7 +2091,7 @@ Also affects: `lib/features/map/map_source_config.dart:11`
 - **Failure scenario:** A rider, or an OSMF reviewer, taps the attribution and nothing happens; nowhere in the app leads to openstreetmap.org/copyright or the ODbL.
 - **Evidence:** route_map_view.dart:134-137 `child: const Text(MapSourceConfig.attribution, style: TextStyle(color: Colors.white70, fontSize: 10),),`; map_source_config.dart:11 `static const String attribution = '© OpenStreetMap contributors';`; grep -i `LicenseRegistry|showAboutDialog|showLicensePage|AboutListTile|copyright|odbl|url_launcher` in lib/ and pubspec.yaml -> no matches; flutter_map-8.2.2/lib/src/layer/attribution_layer/rich/widget.dart defines RichAttributionWidget.
 - **Recommendation:** Replace the overlay with flutter_map's RichAttributionWidget, using a TextSourceAttribution('OpenStreetMap contributors') whose onTap opens https://www.openstreetmap.org/copyright (this adds url_launcher). Alternatively, add an About/licences entry that shows that URL and calls showLicensePage.
-- **Fix note:** `OsmAttribution` (flutter_map `RichAttributionWidget`, tap opens the copyright page with url_launcher, Android https `<queries>` entry) on the route map, and an About and licences entry in the recording settings sheet
+- **Fix note:** OsmAttribution (flutter_map RichAttributionWidget, tap opens the copyright page with url_launcher, Android https <queries> entry) on the route map, and an About and licences entry in the recording settings sheet. The browser launch is untested on a device.
 
 #### F125
 
@@ -2209,7 +2209,7 @@ Also affects: `lib/features/camera/providers/camera_provider.dart:1300-1322`, `l
 - **Failure scenario:** Two minutes into a ride, the rider witnesses a crash and taps LOCK. The screen briefly shows 'Emergency lock enabled (0)', which reads as 'nothing was locked', so they press again, which also locks the next segment.
 - **Evidence:** recording_screen.dart:1826-1833 `camera.markIncident(protectPastSegments: 2, protectCurrentSegment: true, reason: 'manual-emergency',); _showInAppNotice('Emergency lock enabled (${camera.lockedSegmentCount})',);`; camera_provider.dart:131 `int get lockedSegmentCount => _lockedSegmentPaths.length;`; :1315-1317 `if (protectCurrentSegment && isRecording) { _pendingIncidentSegmentLocks++; }`; app_settings_provider.dart:100 `int _segmentDurationSeconds = 300;`; recording_screen.dart:434 default `Duration duration = const Duration(seconds: 2)`.
 - **Recommendation:** Change the notice to describe what was protected (e.g. 'Locked: current clip + N previous'), counting pending locks. Show a persistent LOCKED badge while _pendingIncidentSegmentLocks > 0, and add HapticFeedback.heavyImpact(). Optionally cap pending locks so repeated presses do not queue more than one.
-- **Fix note:** lock feedback names what was locked; the LOCKED badge follows the pending lock of the segment being recorded (isActiveSegmentLocked) and ends at the roll or the stop, for manual and automatic locks; haptic on both
+- **Fix note:** Lock feedback names what was locked; the LOCKED badge follows the pending lock of the segment being recorded (isActiveSegmentLocked) and ends at the roll or the stop, for manual and automatic locks; haptic on both.
 
 #### F133
 
@@ -2524,7 +2524,7 @@ Also affects: `lib/features/camera/providers/camera_provider.dart:106`, `lib/fea
 - **Evidence:** Per-symbol grep over lib and test; for example, `grep -rnw lastRollTotalMs lib test` finds only the definition. Plugin sources: camera-0.12.0/lib/src/camera_controller.dart:253-268 and camera_platform_interface-2.12.0/lib/src/types/media_settings.dart:16-30 (asserts only). ride_playback_screen.dart:198-208 returns early unless at least one segment has a positive duration.
 - **Verifier corrections:** Not every one of the roughly 30 sub-claims was checked individually; the samples checked all held.
 - **Recommendation:** Delete the unused getters and branches, or mark the test-only members @visibleForTesting. Remove the roll-metric notifyListeners() or drop the metrics, and make the singletons' dispose() idempotent or remove it. Add an unused-code check to CI.
-- **Fix note:** unread public members, `RecordingState.paused`, the roll and recovery metrics, the singletons' `dispose` methods and `integrityLabel` removed; getters only tests read are `@visibleForTesting`
+- **Fix note:** Unread public members, RecordingState.paused, the roll and recovery metrics, the singletons' dispose methods and integrityLabel removed; getters only tests read are @visibleForTesting. Found by per-symbol scans, so a few unread members the scan did not flag could remain.
 
 #### F153
 
