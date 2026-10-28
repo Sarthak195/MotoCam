@@ -147,9 +147,12 @@ lib/
     │       ├── playback_timeline.dart          Pure playback timeline logic
     │       └── route_map_view.dart             flutter_map route on OpenStreetMap tiles
     ├── map/
+    │   ├── map_licence.dart                    OpenStreetMap notice for the licence page
     │   ├── map_source_config.dart              Tile URL, attribution, user agent and zoom constants
     │   ├── route_points.dart                   GPS-fix filter and route downsampling
-    │   └── widgets/static_map_viewer.dart      Tile-free CustomPaint route fallback
+    │   └── widgets/
+    │       ├── osm_attribution.dart            Tappable OpenStreetMap attribution
+    │       └── static_map_viewer.dart          Tile-free CustomPaint route fallback
     ├── recording/
     │   ├── recording_screen.dart               Home screen and session coordinator
     │   ├── recording_screen_logic.dart         Pure helpers: stall and checkpoint trackers, lock notices, button colours
@@ -183,6 +186,7 @@ Versions are the ones resolved in `pubspec.lock`, and the toolchain the maintain
 | Video playback | `video_player` | 2.11.1 |
 | Maps | `flutter_map` | 8.3.2 |
 | Coordinates | `latlong2` | 0.9.1 |
+| Opening links | `url_launcher` | 6.3.3 |
 | Lints (dev) | `flutter_lints` | 6.0.0 |
 | Android build | Gradle / Android Gradle Plugin / Kotlin | 8.14.4 / 8.11.1 / 2.2.20 |
 | Android SDK | compileSdk / targetSdk / NDK / JVM target | 36 / 36 / 28.2.13676358 / 17 |

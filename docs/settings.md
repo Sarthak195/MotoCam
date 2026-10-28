@@ -127,6 +127,8 @@ sequenceDiagram
     Screen->>Screen: SnackBar with outcome
 ```
 
+The last entry of the sheet, below SAVE SETTINGS, is **About and licences**. It opens Flutter's `showLicensePage` for the app name `MotoCam` (the app exposes no version string and does not depend on `package_info_plus`, so none is shown). The page lists every package's licence plus the OpenStreetMap data notice, which `registerMapLicence` (called from `main`) adds. It changes no setting.
+
 A result whose triple matches a preset is saved with `updateRecordingQualityProfile`, even if the sheet showed Custom. Otherwise three separate setters run; each one whose value changed notifies and writes all four video keys, so listeners can briefly see mixed values. `CameraProvider.applyRecordingSettings` returns `false` while a recording is starting, active or stopping. If the save happened during a recording, the snack bar reads "Camera settings saved. They apply to the next recording."; the camera keeps its current configuration, and the next START applies the saved camera settings (re-initializing the camera when they differ) before its preflight. Telemetry values and the keep-screen-on setting are applied live regardless. When the camera applies a lower resolution than requested, the snack bar names both; when initialization fails, it reads "Unable to initialize camera with the selected settings on this device."
 
 ## Legacy keys and migration

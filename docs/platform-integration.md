@@ -238,6 +238,7 @@ Source: [AndroidManifest.xml](../android/app/src/main/AndroidManifest.xml). The 
 
 Other manifest settings relevant to native integration:
 
+- A `<queries>` element with an intent filter for `android.intent.action.VIEW` on the `https` scheme, which `url_launcher` needs on Android 11 and later to open the OpenStreetMap copyright page from the map attribution. It grants no permission.
 - `uses-feature` `android.hardware.camera` and `android.hardware.location.gps`, both `required="false"`.
 - `MainActivity`: `exported="true"`, `launchMode="singleTop"`, `taskAffinity=""`, theme `@style/LaunchTheme` with `NormalTheme` as the Flutter normal theme, and the PiP attributes listed [above](#picture-in-picture).
 - `MainActivity` sets the property `android.window.PROPERTY_COMPAT_ALLOW_RESTRICTED_RESIZABILITY` to `true`. The app is portrait-only (`SystemChrome.setPreferredOrientations` in `main.dart`), and Android 16 ignores that lock on large screens (smallest width 600 dp and up) for apps targeting API 36 unless this opt-out is set.

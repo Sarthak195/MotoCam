@@ -1,13 +1,10 @@
-import 'dart:async';
-
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 
 import '../../map/map_source_config.dart';
 import '../../map/route_points.dart';
+import '../../map/widgets/osm_attribution.dart';
 import '../../map/widgets/static_map_viewer.dart';
 import '../../telemetry/models/telemetry_data.dart';
 
@@ -45,8 +42,6 @@ class RouteMapView extends StatefulWidget {
 }
 
 class _RouteMapViewState extends State<RouteMapView> {
-  static bool _osmLicenceRegistered = false;
-
   List<LatLng> _routePoints = const <LatLng>[];
   int _gpsFixCount = 0;
   LatLngBounds? _bounds;
@@ -117,54 +112,6 @@ class _RouteMapViewState extends State<RouteMapView> {
     setState(() {
       _tileLoadFailed = true;
     });
-  }
-
-  Future<void> _showAttributionDetails() async {
-    if (!_osmLicenceRegistered) {
-      _osmLicenceRegistered = true;
-      LicenseRegistry.addLicense(
-        () => Stream<LicenseEntry>.value(
-          const LicenseEntryWithLineBreaks(<String>[
-            'OpenStreetMap',
-          ], MapSourceConfig.licenceSummary),
-        ),
-      );
-    }
-
-    await showDialog<void>(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: const Text('Map data'),
-        content: const Text(MapSourceConfig.licenceSummary),
-        actions: [
-          TextButton(
-            onPressed: () {
-              unawaited(
-                Clipboard.setData(
-                  const ClipboardData(text: MapSourceConfig.copyrightUrl),
-                ),
-              );
-              Navigator.of(dialogContext).pop();
-              ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-                const SnackBar(content: Text('Copyright link copied')),
-              );
-            },
-            child: const Text('Copy link'),
-          ),
-          TextButton(
-            onPressed: () {
-              Navigator.of(dialogContext).pop();
-              showLicensePage(context: context, applicationName: 'MotoCam');
-            },
-            child: const Text('Licences'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.of(dialogContext).pop(),
-            child: const Text('Close'),
-          ),
-        ],
-      ),
-    );
   }
 
   @override
@@ -251,6 +198,7 @@ class _RouteMapViewState extends State<RouteMapView> {
                       ),
                   ],
                 ),
+                const OsmAttribution(),
               ],
             ),
             Positioned(
@@ -287,36 +235,6 @@ class _RouteMapViewState extends State<RouteMapView> {
                   ),
                 ),
               ),
-            Positioned(
-              right: 8,
-              bottom: 8,
-              child: Semantics(
-                button: true,
-                label: 'Map data attribution and licence',
-                child: GestureDetector(
-                  onTap: _showAttributionDetails,
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 8,
-                      vertical: 4,
-                    ),
-                    decoration: BoxDecoration(
-                      color: Colors.black.withValues(alpha: 0.6),
-                      borderRadius: BorderRadius.circular(4),
-                    ),
-                    child: const Text(
-                      '${MapSourceConfig.attribution}  ⓘ',
-                      style: TextStyle(
-                        color: Colors.white70,
-                        fontSize: 10,
-                        decoration: TextDecoration.underline,
-                        decorationColor: Colors.white70,
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-            ),
           ],
         ),
       ),

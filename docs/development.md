@@ -44,7 +44,7 @@ flutter doctor --android-licenses   # accept every SDK licence
 flutter doctor                      # confirm Android toolchain and a device
 ```
 
-- `flutter pub get` resolves the graph pinned in `pubspec.lock`: the 13 direct dependencies listed in [pubspec.yaml](../pubspec.yaml) (12 packages plus the Flutter SDK), 2 dev dependencies and 102 transitive packages. Dependabot proposes updates weekly (see [Continuous integration](#continuous-integration)).
+- `flutter pub get` resolves the graph pinned in `pubspec.lock`: the 14 direct dependencies listed in [pubspec.yaml](../pubspec.yaml) (13 packages plus the Flutter SDK), 2 dev dependencies and 109 transitive packages. Dependabot proposes updates weekly (see [Continuous integration](#continuous-integration)).
 - The Flutter tool writes the ignored file `android/local.properties`: `flutter pub get` sets `flutter.sdk` (and `sdk.dir` when it finds an Android SDK), and each Android build or run adds `flutter.versionName` and `flutter.versionCode` from pubspec. Gradle reads the version values from it; see [release.md](release.md).
 - Install SDK platform 36 and NDK 28.2.13676358 with Android Studio's SDK Manager, or with `sdkmanager "platforms;android-36" "ndk;28.2.13676358"`.
 - Debug and profile builds, debug app bundles and `flutter run` need no signing set-up. Any Gradle invocation that packages or signs a release artifact does, including a plain `assemble` or `build` (see [Troubleshooting](#troubleshooting)). Release signing is described in [release.md](release.md).

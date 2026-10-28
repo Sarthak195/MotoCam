@@ -12,13 +12,14 @@ class MapSourceConfig {
   /// Host that receives tile requests; named in the online-map disclosure.
   static const String tileHost = 'tile.openstreetmap.org';
 
-  /// Short attribution drawn on the map.
-  static const String attribution = '© OpenStreetMap contributors';
+  /// Attribution text of the map data. The attribution layer adds the
+  /// leading ©.
+  static const String attributionText = 'OpenStreetMap contributors';
 
   /// Page with the full OpenStreetMap copyright and licence information.
   static const String copyrightUrl = 'https://www.openstreetmap.org/copyright';
 
-  /// Licence summary shown when the rider taps the attribution.
+  /// Licence text listed on the app's licence page.
   static const String licenceSummary =
       'Map data © OpenStreetMap contributors, available under the Open '
       'Database License (ODbL). Map tiles are provided by the OpenStreetMap '

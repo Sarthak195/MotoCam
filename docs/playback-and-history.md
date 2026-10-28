@@ -277,9 +277,9 @@ The map height is `clamp(0.14 × screen height, 90, 130)`. `RouteMapView` receiv
 |---|---|
 | `tileUrlTemplate` | `https://tile.openstreetmap.org/{z}/{x}/{y}.png` |
 | `tileHost` | `tile.openstreetmap.org` (named in the consent dialog) |
-| `attribution` | `© OpenStreetMap contributors` |
+| `attributionText` | `OpenStreetMap contributors` (the attribution layer prepends the ©) |
 | `copyrightUrl` | `https://www.openstreetmap.org/copyright` |
-| `licenceSummary` | ODbL notice shown in the attribution dialog and on the licence page |
+| `licenceSummary` | ODbL notice listed on the licence page (registered by `registerMapLicence`) |
 | `userAgentPackageName` | `com.example.motocam` |
 | `contactUrl` | `https://github.com/Sarthak195/MotoCam` |
 | `userAgent` | `MotoCam (com.example.motocam; +https://github.com/Sarthak195/MotoCam) flutter_map`, sent as the `User-Agent` header of every tile request |
@@ -301,7 +301,7 @@ Layers: the OSM `TileLayer`; one `Polyline` (width 4, `lightBlueAccent`); marker
 
 The `TileLayer` and its single `NetworkTileProvider` are created once per map and reused on every rebuild; the `TileLayer` disposes the provider when the map is removed. The provider sends `MapSourceConfig.userAgent` and caches tiles through flutter_map's `BuiltInMapCachingProvider` (`fm_cache` under the platform cache directory) with a 25 MB limit. flutter_map applies that limit when the cache is first opened in the process, so the cache can grow past it while the app runs. The app does not clear the tile cache, and deleting rides does not clear it.
 
-Overlays: "GPS fixes: N" (fixes before downsampling) top left; "Map tiles unavailable (offline?)" bottom left once any tile fails to load (`errorTileCallback`); and the attribution "© OpenStreetMap contributors ⓘ" bottom right. Tapping the attribution opens a "Map data" dialog with `licenceSummary` and three buttons: "Copy link" copies `copyrightUrl` to the clipboard ("Copyright link copied"), "Licences" opens Flutter's licence page (an OpenStreetMap entry is registered on the first tap), and "Close". The app cannot open the link in a browser.
+Overlays: "GPS fixes: N" (fixes before downsampling) top left; "Map tiles unavailable (offline?)" bottom left once any tile fails to load (`errorTileCallback`); and the attribution bottom right. The attribution is `OsmAttribution` ([osm_attribution.dart](../lib/features/map/widgets/osm_attribution.dart)), the last child of the `FlutterMap`: flutter_map's `RichAttributionWidget` with an info button that opens a box with a `TextSourceAttribution` "© OpenStreetMap contributors" (plus the flutter_map credit, `showFlutterMapAttribution` left at its default). Tapping the OpenStreetMap line launches `copyrightUrl` in the external browser through `url_launcher` (`launchUrl`, `LaunchMode.externalApplication`); when that fails or no browser handles it, a SnackBar says "Could not open the link. Visit openstreetmap.org/copyright in a browser." The manifest has a `<queries>` entry for https `VIEW` intents so the lookup works on Android 11 and later. `StaticMapViewer` draws no tiles and needs no attribution. The licence page is reached from the recording settings sheet ("About and licences").
 
 ### `StaticMapViewer` fallback
 

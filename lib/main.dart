@@ -8,6 +8,7 @@ import 'package:flutter/foundation.dart';
 import 'package:provider/provider.dart';
 import 'core/providers/app_settings_provider.dart';
 import 'features/camera/providers/camera_provider.dart';
+import 'features/map/map_licence.dart';
 import 'features/telemetry/providers/telemetry_provider.dart';
 import 'features/recording/recording_screen.dart';
 
@@ -52,6 +53,7 @@ Future<void> main() async {
   // for apps targeting API 36 unless the manifest opts out.
   await SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
 
+  registerMapLicence();
   runApp(const MotoCamApp());
 }
 

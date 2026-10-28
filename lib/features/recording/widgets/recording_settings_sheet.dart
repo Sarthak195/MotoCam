@@ -672,6 +672,22 @@ class _RecordingSettingsSheetState extends State<RecordingSettingsSheet> {
                     ),
                   ),
                 ),
+                const SizedBox(height: 4),
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: const Icon(
+                    Icons.info_outline,
+                    color: Colors.white70,
+                  ),
+                  title: const Text(
+                    'About and licences',
+                    style: TextStyle(color: Colors.white),
+                  ),
+                  onTap: () => showLicensePage(
+                    context: context,
+                    applicationName: 'MotoCam',
+                  ),
+                ),
               ],
             ),
           ),

@@ -233,7 +233,7 @@ When the ride has samples, a collapsible **Route Map** card ([route_map_view.dar
 - **Consent.** Until the rider has agreed, expanding the card first opens a dialog `Show online map?` that explains that tiles are downloaded from `tile.openstreetmap.org`, which sends the ride's area and the IP address to the OpenStreetMap Foundation, and that tiles are cached on the device. **Not now** keeps the card collapsed; **Show map** stores the consent. The map is built, and tiles are requested, only while the card is expanded.
 - **State.** The expanded or collapsed state is saved and restored on the next playback (only once consent was given). Both preferences are listed in [settings.md](settings.md).
 - **Offline.** The map background is dark; when tiles fail to load, a `Map tiles unavailable (offline?)` badge appears. Zoom is capped at level 19.
-- **Attribution.** Tapping `© OpenStreetMap contributors ⓘ` opens a **Map data** dialog with the ODbL licence summary and the copyright URL. **Copy link** copies the URL (the app cannot open it in a browser), **Licences** opens Flutter's licence page, which includes the OpenStreetMap notice.
+- **Attribution.** flutter_map's attribution button (an info icon, bottom right) opens a box with `© OpenStreetMap contributors` (and the flutter_map credit). Tapping that line opens `https://www.openstreetmap.org/copyright` in the browser (`url_launcher`); if no browser can be started, a SnackBar names the address. The recording settings sheet ends with an **About and licences** entry that opens Flutter's licence page, which includes the OpenStreetMap data notice.
 - Rides with fewer than two GPS fixes show a static fallback that needs no network, or `No GPS fix recorded for this ride`.
 
 ## Integrity statuses

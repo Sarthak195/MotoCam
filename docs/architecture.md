@@ -71,6 +71,8 @@ There is no backend, account system, analytics or crash reporting. The only netw
 | [features/history/widgets/playback_seekbar_track_shape.dart](../lib/features/history/widgets/playback_seekbar_track_shape.dart) | `PlaybackSeekbarTrackShape`, the seekbar's slider track, which paints the timeline ranges and the incident and lock markers |
 | [features/history/widgets/route_map_view.dart](../lib/features/history/widgets/route_map_view.dart) | `RouteMapView`, a `flutter_map` route on OSM tiles, fitted to the route bounds. It falls back to `StaticMapViewer` when fewer than two GPS fixes remain |
 | [features/map/map_source_config.dart](../lib/features/map/map_source_config.dart) | `MapSourceConfig`, the tile URL, attribution, licence text, user agent with contact URL, zoom and tile-cache constants |
+| [features/map/widgets/osm_attribution.dart](../lib/features/map/widgets/osm_attribution.dart) | `OsmAttribution`, the tappable OpenStreetMap attribution layer of every tile map; opens the copyright page with `url_launcher` |
+| [features/map/map_licence.dart](../lib/features/map/map_licence.dart) | `registerMapLicence`, which adds the OpenStreetMap data notice to Flutter's licence page |
 | [features/map/route_points.dart](../lib/features/map/route_points.dart) | The shared GPS-fix filter (`latLngFromSample`, `samplesWithGpsFix`, `routePointsFromSamples`) and `downsampleRoute` |
 | [features/map/widgets/static_map_viewer.dart](../lib/features/map/widgets/static_map_viewer.dart) | `StaticMapViewer` and `MapPainter`, a tile-free `CustomPaint` drawing of the route, with a "No GPS fix" state |
 
