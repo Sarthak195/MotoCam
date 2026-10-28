@@ -13,6 +13,7 @@ This document describes every file MotoCam writes: where it goes, how it is name
 - [Integrity envelope](#integrity-envelope)
 - [Path scope and quarantine](#path-scope-and-quarantine)
 - [Atomic-write procedure](#atomic-write-procedure)
+- [Ride index (cache)](#ride-index-cache)
 - [Backward compatibility](#backward-compatibility)
 - [Related documents](#related-documents)
 
@@ -77,12 +78,13 @@ Plugin-generated segment names carry no timestamp or ride identifier; only the b
 | File | Format | Written by | Read by | Deleted by |
 |---|---|---|---|---|
 | Video segment `*.mp4` | MP4 container produced by the `camera` plugin. The app adds no metadata. | Plugin; moved into the recordings directory by `CameraProvider._persistSegmentToRecordingsDirectory` on every roll, recovery and stop | Playback (`video_player`), integrity hashing, retention, history discovery | The per-session rolling limit, which deletes only unlocked segments of the current session (locked segments and earlier rides are never deleted automatically; see [recording-pipeline.md](recording-pipeline.md)), and the in-app ride delete in Ride History |
-| Ride telemetry `ride_<id>.telemetry.json` | UTF-8 JSON, compact (not pretty-printed) | `TelemetryProvider.checkpointRideSession` (sealed checkpoints during recording), `TelemetryProvider.stopRideSessionAndPersist` (final save); rewritten by `RideRecord.setLockState`. See [Checkpoints and the final save](#checkpoints-and-the-final-save). | `RideRecord.fromTelemetryFile` (through `loadRideHistory`), `RideRecord.verifySegmentIntegrity`, `RideRecord.setLockState`, `findOrphanTelemetryFiles` | Orphan pruning (below) and the in-app ride delete |
+| Ride telemetry `ride_<id>.telemetry.json` | UTF-8 JSON, compact (not pretty-printed) | `TelemetryProvider.checkpointRideSession` (sealed checkpoints during recording), `TelemetryProvider.stopRideSessionAndPersist` (final save); rewritten by `RideRecord.setLockState`. See [Checkpoints and the final save](#checkpoints-and-the-final-save). | `RideRecord.fromTelemetryFile` (through `loadRideHistoryIndexed` when the ride index has no valid entry, and `RideRecord.loadSamples` when playback opens the ride), `RideRecord.verifySegmentIntegrity`, `RideRecord.setLockState`, `findOrphanTelemetryFiles` | Orphan pruning (below) and the in-app ride delete |
 | Telemetry temp file `<telemetry path>.<suffix>.tmp` | Same content as the target | `writeTelemetryAtomically` | Nothing | Renamed over the target, or deleted after the copy fallback or a failure. A leftover is deleted by `pruneStaleTelemetryTempFiles` once it is more than 10 minutes old. Discovery ignores it. |
 | `.nomedia` (Android only) | Empty file | `CameraProvider._ensureNoMediaMarker` | The Android media scanner | Never deleted by the app |
 | Write probe `.__motocam_write_probe.tmp` | The text `ok` | `RecordingScreen._verifyRecordingDirectoryWritable` (the start preflight's Media Write Access check) | Nothing | Deleted straight after it is written |
 | Android public copy (Android only, opt-in) | Byte copy of a locked segment | `CameraProvider._drainGalleryExportQueue` through the native exporter, about 2 s after stop | The system gallery | Never deleted by the app; the in-app ride delete does not touch it |
 | Telemetry file with the legacy name `<video base>.telemetry.json` | Older telemetry JSON (see [Backward compatibility](#backward-compatibility)) | Builds before commit 76974c1 | Same readers as the ride telemetry file; `RideRecord.fromVideoFile` also looks for it next to an unreferenced video | Same as the ride telemetry file |
+| Ride index `<application support>/ride_index/ride_index.json` | UTF-8 JSON, compact; see [Ride index (cache)](#ride-index-cache) | `RideIndexStore` on the UI isolate, through `writeTelemetryAtomically` (temp file plus rename) | `loadRideHistoryIndexed` (in the history isolate), `RideIndexStore.read` | Never deleted by the app; it is a cache and can be deleted at any time |
 | Map tile cache `<app cache>/fm_cache/` | flutter_map's built-in tile cache | `BuiltInMapCachingProvider` (size limit `MapSourceConfig.maxTileCacheBytes`, 25 MB) in [route_map_view.dart](../lib/features/history/widgets/route_map_view.dart), only after the rider accepts the one-time online map consent | `flutter_map` | The package's size limit or the OS (cache directory). It is not cleared when rides are deleted. See [playback-and-history.md](playback-and-history.md). |
 
 Private segments are not passed to the media scanner. Only the pre-API-29 public copy is media-scanned.
@@ -91,13 +93,13 @@ Private segments are not passed to the media scanner. Only the pre-API-29 public
 
 **In-app delete.** The ride list's delete action removes the ride's segment files, its `videoPath` and its telemetry file, but never a quarantined path. A locked ride must be unlocked first, unless its lock cannot be removed (failed integrity check or quarantined paths); such a ride can be deleted after a confirmation that says so.
 
-**Discovery.** `RidesListScreen._loadRides` calls `CameraProvider.getRecordings`, which lists every file under the recordings directory, recursively and without following symbolic links. On Android it also lists `<documents>/MotoCam Recordings` and `<cache>/MotoCam Recordings`, the roots earlier builds fell back to. `loadRideHistory` in [ride_history_loader.dart](../lib/features/history/models/ride_history_loader.dart) then runs in `Isolate.run` (or on the UI isolate if the isolate fails):
+**Discovery.** `RidesListScreen._loadRides` calls `CameraProvider.getRecordings`, which lists every file under the recordings directory, recursively and without following symbolic links. On Android it also lists `<documents>/MotoCam Recordings` and `<cache>/MotoCam Recordings`, the roots earlier builds fell back to. `loadRideHistoryIndexed` in [ride_history_loader.dart](../lib/features/history/models/ride_history_loader.dart) then runs in `Isolate.run` (or on the UI isolate if the isolate fails):
 
-1. Every file whose lower-cased path ends with `.telemetry.json` is loaded with `RideRecord.fromTelemetryFile`. Files that return `null` are skipped.
+1. Every file whose lower-cased path ends with `.telemetry.json` becomes a sample-less ride: from its [ride index](#ride-index-cache) entry when that entry is still valid, otherwise from `RideRecord.fromTelemetryFile(file, loadSamples: false)`. Files that are gone or return `null` are skipped.
 2. Every video file (`.mp4`, `.mov`, `.mkv`, `.avi`) that no loaded ride references as `videoPath`, segment or quarantined path is added through `RideRecord.fromVideoFile`. This shows the segments of a ride killed before its first checkpoint, or segments newer than the last checkpoint, as "VIDEO ONLY (RECOVERED)" rides with no telemetry.
 3. Rides are sorted newest first by `createdAt`.
 
-There is no index, database or manifest file: the ride list is rebuilt on every load by scanning the directories, and the telemetry JSON is the only per-ride record.
+The ride list is rebuilt on every load by scanning the directories, and the telemetry JSON is the only per-ride record. The ride index only caches what was decoded from it.
 
 ## Ride telemetry JSON
 
@@ -342,14 +344,15 @@ Segment files that no longer exist are not integrity issues. They are listed in 
 
 Where each mode runs:
 
-- The ride list loads every file with `fromTelemetryFile(file)` inside `loadRideHistory`. Segment verification is off there, so step 6 checks only that each existing segment has a hash; no segment file is read.
-- `RidePlaybackScreen` calls `RideRecord.verifySegmentIntegrity` on a background isolate when it opens a ride. It re-reads the file, resolves the segments the same way and runs all steps.
-- `RideRecord.setLockState` runs all steps before it rewrites a file.
+- The ride list decodes a file with `fromTelemetryFile(file, loadSamples: false)` inside `loadRideHistoryIndexed` when the ride index has no valid entry for it (otherwise the stored report is reused). Segment verification is off there, so step 6 checks only that each existing segment has a hash; no segment file is read.
+- `RidePlaybackScreen` runs step 6's segment hashing itself, one segment at a time, through `SegmentVerifier` ([segment_verifier.dart](../lib/features/history/models/segment_verifier.dart)): each segment's expected hash comes from `expectedSegmentHashesFor` (the same lookup as step 6), and a mismatch or an unreadable file adds the same `segment-hash-mismatch` or `unreadable-segment-file` issue to the load-time report. Results are stored in the ride index.
+- `RideRecord.setLockState` runs all steps before it rewrites a file. Step 6 hashes through an injectable `SegmentFileHasher`; Ride History passes `SegmentVerifier.lockHasher`, which answers from a still-valid ride index result and hashes the other segments on a background isolate, storing their results.
+- `RideRecord.verifySegmentIntegrity` (re-read plus all steps) is still available but the app no longer calls it.
 
 | Status | Exact condition | Shown as |
 |---|---|---|
 | `unknown` | `integrity` absent, the file is not a completed schema-3 file, and nothing quarantined | List: "UNVERIFIED" badge, with "Integrity: not available (recorded by an older version)" or, for `sessionComplete: false`, "(ride was not saved completely)"; "SIMULATED GPS" replaces the badge when `mockLocationDetected` is `true`. Playback: a notice that the ride has no integrity record. |
-| `verified` | Envelope present, no issue from steps 3-7, nothing quarantined | List: "DATA UNMODIFIED" badge (payload-level checks; videos are checked on playback), or "SIMULATED GPS" when `mockLocationDetected` is `true` |
+| `verified` | Envelope present, no issue from steps 3-7, nothing quarantined | List: "DATA UNMODIFIED" badge (payload-level checks; videos are checked when the ride is opened, and the stored result shows as "VIDEOS VERIFIED" or "VIDEO CHECK FAILED"), or "SIMULATED GPS" when `mockLocationDetected` is `true` |
 | `modified` | At least one of the 11 issue codes above | List: "INTEGRITY WARNING" badge; the unlock button is disabled. Playback: a notice that the ride data may have changed and how many segments could not be confirmed; those segments are marked purple on the seekbar. |
 | quarantined (not a status) | `quarantinedSegmentPaths` is non-empty; always paired with `modified` | "QUARANTINED n" badge |
 
@@ -390,11 +393,11 @@ flowchart TD
 4. For a `verified` ride, calls `resealIntegrityEnvelope`: the stored `segmentHashes` and other envelope fields are kept, `envelopeVersion` is set to 2 (so a version 1 envelope is upgraded), and `payloadHash` is recomputed. A ride without an envelope (`unknown`) is written without one, so it stays unverified.
 5. Writes the file with the atomic-write helper.
 
-All exceptions return `false`. The app only ever calls `setLockState(false)`, from the ride list's unlock action after a confirmation dialog. The verification in step 2 runs on the UI isolate.
+All exceptions return `false`. The app only ever calls `setLockState(false)`, from the ride list's unlock action after a confirmation dialog. Steps 1 to 5 run on the UI isolate; in step 2, segments with a still-valid result in the [ride index](#ride-index-cache) are not hashed again, and the others are hashed one per `Isolate.run` call.
 
 ### What it does and does not protect against
 
-- **Detected when the list loads**: any edit to a top-level field, or (version 2) to an envelope field such as `segmentHashes`; removal of `payloadHash`; removal of the envelope from a completed schema-3 file; an existing segment without a hash. **Detected when a ride is opened for playback**: changed, replaced or unreadable segment files.
+- **Detected when the list loads** (when the file's stamp changed, so it is decoded again; see [Ride index (cache)](#ride-index-cache)): any edit to a top-level field, or (version 2) to an envelope field such as `segmentHashes`; removal of `payloadHash`; removal of the envelope from a completed schema-3 file; an existing segment without a hash. **Detected when a ride is opened for playback**: changed, replaced or unreadable segment files.
 - **Not detected as `modified`**:
   - Anyone who can write the files can recompute every hash, because no secret is involved.
   - Removing the envelope and also setting `sessionComplete` to `false` or `schemaVersion` below 3 gives `unknown` ("UNVERIFIED").
@@ -453,6 +456,37 @@ Notes:
 - The lock is an in-memory map, so it serializes writes within one isolate only. All telemetry writes run on the UI isolate; only hashing and sealing run on background isolates.
 - `TelemetryProvider` also queues its own writes (`_enqueueWrite`), so checkpoints and the final save never overlap. `RideRecord.setLockState` holds `runExclusiveForPath` on the file path (a separate key from the write lock) for its whole read-modify-write cycle.
 - Segment files are not written this way. When `rename` fails, `_persistSegmentToRecordingsDirectory` copies the segment directly to its final name and deletes a partial copy if the copy fails.
+
+## Ride index (cache)
+
+[ride_index.dart](../lib/features/history/models/ride_index.dart) keeps a cache that spares Ride History from decoding every ride file on every visit and spares playback from hashing an unchanged segment twice.
+
+- **Location**: `getApplicationSupportDirectory()/ride_index/ride_index.json`, outside the recordings directory, so discovery never sees it and backups of the recordings do not carry it. The directory is resolved with path_provider on the UI isolate (`RideIndexStore.shared`); when it cannot be resolved the app works without the cache.
+- **Lifetime**: it is only a cache. A missing or unreadable file, content that is not JSON, or a `format` other than the current `rideIndexFormatVersion` (1) gives an empty index that the next load rebuilds; a malformed entry is skipped. Nothing ever fails because of it, and it can be deleted at any time. The app never deletes it.
+- **One writer**: `RideIndexStore` on the UI isolate. It reads the file once (parsed in `Isolate.run`, or adopted from the history isolate's read), keeps it in memory, applies every change there and writes the whole index with `writeTelemetryAtomically` (unique temp file in the same directory, renamed over the target). Writes are queued; a queued write that finds the index already written skips. The history isolate reads the file (or receives the in-memory copy) but never writes it.
+
+Content (all fields are written; readers need them all, and an entry missing one is ignored):
+
+| Field | Content |
+|---|---|
+| `format` | `1` |
+| `rides` | Object keyed by the telemetry file's normalised path (`rideIndexKey`, which is `normalizePath`). Each entry: `path` (the path as listed), `size`, `modifiedUs`, `changedUs` (`FileStat.size`, `modified` and `changed` in microseconds, taken before the file was decoded) and `ride`. |
+| `rides.*.ride` | The sample-less `RideRecord`: `videoPath`, `segmentPaths`, `missingSegmentPaths`, `quarantinedSegmentPaths`, `lockedSegmentPaths`, `segmentTimeline` (`path`, `startMs`, `endMs`), `createdAtUs`, `rideSessionId`, `sessionComplete`, `distanceKm`, `maxSpeedKmh`, `averageSpeedKmh`, `sampleCount`, `lastSampleElapsedMs`, `incidents` (`null`, or entries in the ride-file `incidents[]` form), `mockLocationDetected`, `integrity` (`status`, `hasMetadata`, `issues` of the payload-level check) and `expectedSegmentHashes` (resolved segment path to the hash the envelope records). |
+| `segmentHashes` | Object keyed by the segment's normalised resolved path. Each entry: `size`, `modifiedUs`, `changedUs` of the segment file taken before it was hashed, `expectedHash` (the envelope's hash at that time) and `sha256` (the computed hash). |
+
+**Ride entry key.** An entry is used only when the telemetry file still has the same normalised path, the same listed path, size, modification time and change time, and each of the ride's segments exists exactly when the entry says it does (resolution, `missingSegmentPaths` and the integrity report depend on that). `FileStat.changed` is the inode change time on Android and Linux, which `touch` cannot set back, so restoring a modification time after an edit does not hide it. On Windows `changed` is the creation time; tests inject the stat source. A hit costs one stat of the telemetry file plus one per segment and no read of the file. Any other file is decoded in the history isolate and gets a fresh entry. Entries whose files are gone are dropped when the load result is stored, and so are `segmentHashes` entries for segments no remaining ride lists.
+
+**Segment hash key.** A stored hash is reused only when the segment file still has the same normalised resolved path, size, modification time and change time, and the envelope still records the same `expectedHash`. Anything else hashes the file again. Results are never carried across paths: a ride whose files move to another directory is checked again when it is opened.
+
+**What is cached where.**
+
+| Reader | Uses |
+|---|---|
+| Ride History | Ride entries (a hit skips the decode); segment hashes for the video check state of each ride whose payload check passed. Nothing is hashed. |
+| Playback | Segment hashes: a segment with a still-valid result is not hashed again; every new result is stored. |
+| Unlock (`setLockState`) | Segment hashes, as playback. The ride entry is removed after the rewrite (the JSON, and so its key, changed). |
+
+Samples are never cached: `RideRecord` instances built from the index are sample-less (`samplesLoaded: false`), and playback reads the full ride in `Isolate.run` with `RideRecord.loadSamples`. Sample timestamps are parsed on first access (`TelemetryData.timestamp`).
 
 ## Backward compatibility
 

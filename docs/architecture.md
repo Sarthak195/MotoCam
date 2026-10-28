@@ -66,11 +66,13 @@ There is no backend, account system, analytics or crash reporting. The only netw
 | [features/recording/start_preflight_evaluator.dart](../lib/features/recording/start_preflight_evaluator.dart) | `StartPreflightEvaluator` and `StartPreflightInputs`: the pure pass, warn or fail logic of every start checklist row |
 | [features/recording/widgets/start_preflight_sheet.dart](../lib/features/recording/widgets/start_preflight_sheet.dart) | `StartPreflightSheet` and `StartPreflightCheck`, which present the start checklist |
 | [features/telemetry/providers/telemetry_provider.dart](../lib/features/telemetry/providers/telemetry_provider.dart) | `TelemetryProvider`: GPS stream with a fallback poll and location-off handling, speed filtering, gated distance, accelerometer incident detection (with a raw-accelerometer fallback), pausing while idle, the ride sample timer, checkpoints and the final per-ride telemetry JSON with its integrity envelope, and a retry queue for failed saves |
-| [features/telemetry/models/telemetry_data.dart](../lib/features/telemetry/models/telemetry_data.dart) | `TelemetryData`, one immutable telemetry sample with fix validity (`hasFix`, `fixAgeMs`), with JSON conversion |
-| [features/history/models/ride_record.dart](../lib/features/history/models/ride_record.dart) | `RideRecord`: the ride model built from a telemetry JSON through the ride-file codec (segment paths resolved against the telemetry file's directory, the rest quarantined, integrity verified); rewrites lock state after a full re-check and interpolates samples for playback. Re-exports the codec's ride model types |
-| [features/history/models/ride_history_loader.dart](../lib/features/history/models/ride_history_loader.dart) | `loadRideHistory`: turns the recordings listing into rides, newest first, and adds a video-only ride for each video that no ride JSON references. Runs off the UI isolate |
-| [features/history/rides_list_screen.dart](../lib/features/history/rides_list_screen.dart) | `RidesListScreen`: discovers files, loads the history in an isolate, lists rides with integrity, incomplete, simulated-GPS and lock badges, unlocks and deletes rides after confirmation, and opens playback |
-| [features/history/ride_playback_screen.dart](../lib/features/history/ride_playback_screen.dart) | `RidePlaybackScreen`: plays the segments as one timeline with telemetry overlays, a speed graph, incident, lock and missing-range markers, segment-hash verification off the UI isolate, a no-playable-video view with Retry and the opt-in route map |
+| [features/telemetry/models/telemetry_data.dart](../lib/features/telemetry/models/telemetry_data.dart) | `TelemetryData`, one immutable telemetry sample with fix validity (`hasFix`, `fixAgeMs`), with JSON conversion (a sample read from JSON parses its timestamp on first access) |
+| [features/history/models/ride_record.dart](../lib/features/history/models/ride_record.dart) | `RideRecord`: the ride model built from a telemetry JSON through the ride-file codec (segment paths resolved against the telemetry file's directory, the rest quarantined, integrity verified), with or without its samples (`samplesLoaded`, `loadSamples`); rewrites lock state after a full re-check and interpolates samples for playback. Re-exports the codec's ride model types |
+| [features/history/models/ride_history_loader.dart](../lib/features/history/models/ride_history_loader.dart) | `loadRideHistoryIndexed`: turns the recordings listing into sample-less rides, newest first, reusing ride index entries whose telemetry file is unchanged, and adds a video-only ride for each video that no ride JSON references. Runs off the UI isolate |
+| [features/history/models/ride_index.dart](../lib/features/history/models/ride_index.dart) | The ride index cache (`RideIndex`, `RideIndexEntry`, `SegmentHashEntry`, `RideFileStamp`) and `RideIndexStore`, its one writer on the UI isolate |
+| [features/history/models/segment_verifier.dart](../lib/features/history/models/segment_verifier.dart) | `SegmentVerifier`: checks segment hashes one at a time with a cancellation token and stores the results in the ride index; `RideVideoCheck` and `describeVideoCheck` for Ride History |
+| [features/history/rides_list_screen.dart](../lib/features/history/rides_list_screen.dart) | `RidesListScreen`: discovers files, loads the history through the ride index in an isolate, lists rides with integrity, video check, incomplete, simulated-GPS and lock badges, unlocks and deletes rides after confirmation, and opens playback |
+| [features/history/ride_playback_screen.dart](../lib/features/history/ride_playback_screen.dart) | `RidePlaybackScreen`: plays the segments as one timeline with telemetry overlays, a speed graph, incident, lock and missing-range markers, per-segment, cancellable hash verification off the UI isolate with a 'Check videos again' action, a no-playable-video view with Retry and the opt-in route map |
 | [features/history/widgets/playback_timeline.dart](../lib/features/history/widgets/playback_timeline.dart) | Pure playback timeline logic: segment order, the effective timeline, missing, failed-check and no-video ranges, seek targets, incident and lock marker offsets, and speed-graph tap and drag targets |
 | [features/history/widgets/playback_seekbar_track_shape.dart](../lib/features/history/widgets/playback_seekbar_track_shape.dart) | `PlaybackSeekbarTrackShape`, the seekbar's slider track, which paints the timeline ranges and the incident and lock markers |
 | [features/history/widgets/route_map_view.dart](../lib/features/history/widgets/route_map_view.dart) | `RouteMapView`, a `flutter_map` route on OSM tiles, fitted to the route bounds. It falls back to `StaticMapViewer` when fewer than two GPS fixes remain |
@@ -210,13 +212,15 @@ Deep dives: [recording-pipeline.md](recording-pipeline.md) covers segments, roll
 flowchart TD
     H["HISTORY button (idle only)"] --> R["releaseCameraIfIdle, TelemetryProvider.pauseTracking"]
     R --> L["RidesListScreen: CameraProvider.getRecordings"]
-    L --> F["Isolate.run(loadRideHistory): fromTelemetryFile, fromVideoFile for orphan videos"]
-    F --> List["Locked Clips / All Rides cards with integrity and lock badges"]
-    List -->|unlock| U["confirm, RideRecord.setLockState(false): re-verify, rewrite JSON + envelope, reload"]
+    L --> F["Isolate.run(loadRideHistoryIndexed): ride index hits, fromTelemetryFile for misses, fromVideoFile for orphan videos"]
+    F --> W["RideIndexStore (UI isolate) writes the refreshed index"]
+    F --> List["Locked Clips / All Rides cards with integrity, video check and lock badges"]
+    List -->|unlock| U["confirm, RideRecord.setLockState(false): re-verify (stored segment hashes reused), rewrite JSON + envelope, reload"]
     List -->|delete| D["confirm, delete segments and JSON, reload"]
     List -->|tap| P["RidePlaybackScreen"]
-    P --> V["verifySegmentIntegrity in Isolate.run"]
-    P --> I["stored timeline (probe legacy entries only), effective timeline, play segments in sequence"]
+    P --> S["loadSamples in Isolate.run"]
+    S --> I["stored timeline (probe legacy entries only), effective timeline, play segments in sequence"]
+    I --> V["SegmentVerifier: one segment per Isolate.run, playing segment first, results stored in the ride index"]
     I --> M["telemetry overlay, speed graph, RouteMapView after consent"]
     List -->|back to recording| C["RecordingScreen re-runs _initializeCamera"]
 ```
@@ -228,10 +232,11 @@ While recording, the HISTORY button reads MINIMISE, and both it and system back 
 - **Isolates.** Most work runs on the UI isolate as `async`/`await` code. Four classes run work in a background isolate through `Isolate.run`:
   - `CameraProvider`: the scan for telemetry files whose videos are gone.
   - `TelemetryProvider`: segment SHA-256 hashing and building the integrity envelope.
-  - `RidesListScreen`: `loadRideHistory`.
-  - `RidePlaybackScreen`: `verifySegmentIntegrity`.
+  - `RidesListScreen`: `loadRideHistoryIndexed`, and `SegmentVerifier` hashing (one segment per call) during an unlock.
+  - `RidePlaybackScreen`: `RideRecord.loadSamples`, and `SegmentVerifier` hashing (one segment per call, cancelled between segments when the screen closes).
+  - `RideIndexStore`: the first read of the ride index.
 
-  `RideRecord.setLockState` still re-hashes the segments on the UI isolate.
+  The ride index file is written only by `RideIndexStore` on the UI isolate. `RideRecord.setLockState` reads the ride JSON and computes its payload hashes on the UI isolate.
 - **Timers.**
 
   | Owner | Timers and delays |
@@ -255,8 +260,8 @@ While recording, the HISTORY button reads MINIMISE, and both it and system back 
 - **Failure as a return value.** Most APIs report failure through their return value:
   - `CameraProvider.startRecording` and `applyRecordingSettings` return `false`; a refused start because of low storage also sets `lastRecordingError`.
   - `stopRecording` returns `null` or the best available path.
-  - `RideRecord.fromTelemetryFile` returns `null`, and `loadRideHistory` skips that file.
-  - `verifySegmentIntegrity` returns the unchanged record when the telemetry file cannot be read.
+  - `RideRecord.fromTelemetryFile` returns `null`, and `loadRideHistoryIndexed` skips that file. A ride index that cannot be read is treated as empty.
+  - `verifySegmentIntegrity` and `loadSamples` return the unchanged record when the telemetry file cannot be read.
   - `TelemetryProvider.stopRideSessionAndPersist` returns `null` on a failed save, sets `lastPersistError` and queues the save for `retryPendingPersist`. A failed checkpoint is logged and returns `null`.
   - The service wrappers return safe defaults: `DeviceStatusSnapshot.empty`, `false` for PiP, `false` from `startForegroundRecording` when the service did not start, and `true` for "is ignoring battery optimizations" on error.
 - **Not wrapped.** Some calls have no `try/catch`, and an exception propagates to the caller:

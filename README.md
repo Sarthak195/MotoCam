@@ -43,7 +43,7 @@ The UI is portrait-only and always dark (Material 3). There is no localization; 
 - **Crash-safe ride files.** Once the first segment is saved, the ride's telemetry JSON is written as a checkpoint whenever a segment or lock is added and every 30 s, so a ride survives a crash or kill before STOP. A failed save can be retried.
 - **Blackout mode.** Hides the preview behind a black screen while recording continues; hold for 2 s to exit.
 - **Ride history and playback.** Rides grouped into Locked Clips and All Rides, plus video-only entries for videos without a ride file. Rides can be unlocked and deleted after a confirmation. Playback runs all segments as one timeline, marks missing segments and gaps on the seekbar, and shows a telemetry overlay, a speed graph with incident and lock markers, and a collapsible OpenStreetMap route map that loads tiles only after a one-time consent.
-- **Integrity checks.** Each ride's telemetry file carries an unkeyed SHA-256 integrity check over its payload and every segment file. It detects accidental corruption and naive edits; it is not tamper-proof, because anyone who can rewrite the files can recompute the hashes. The rides list checks the ride data only and shows one of `INTEGRITY WARNING`, `SIMULATED GPS` (fixes from a mock location provider), `DATA UNMODIFIED` or `UNVERIFIED`. Separate badges mark segment paths outside the ride's folder, which are quarantined and not played (`QUARANTINED n`), missing segment files (`INCOMPLETE`) and rides kept only as a checkpoint (`RECOVERED (INCOMPLETE)`). Opening a ride hashes its segment files; segments that fail the check still play and are marked on the seekbar.
+- **Integrity checks.** Each ride's telemetry file carries an unkeyed SHA-256 integrity check over its payload and every segment file. It detects accidental corruption and naive edits; it is not tamper-proof, because anyone who can rewrite the files can recompute the hashes. The rides list checks the ride data only and shows one of `INTEGRITY WARNING`, `SIMULATED GPS` (fixes from a mock location provider), `DATA UNMODIFIED` or `UNVERIFIED`, plus `VIDEOS VERIFIED` or `VIDEO CHECK FAILED` once the ride's segments were checked. Separate badges mark segment paths outside the ride's folder, which are quarantined and not played (`QUARANTINED n`), missing segment files (`INCOMPLETE`) and rides kept only as a checkpoint (`RECOVERED (INCOMPLETE)`). Opening a ride hashes its segment files one at a time in the background, starting with the segment about to play; leaving the screen stops the check, and results are kept in a ride index cache (which also spares the list from re-reading unchanged ride files), so an unchanged segment is not hashed again. Segments that fail the check still play and are marked on the seekbar; "Check videos again" re-hashes them all.
 - **Gallery export (Android, opt-in).** Off by default. When the rider turns it on, locked segments are copied to the device gallery (`Movies/MotoCam/Recordings`) when recording stops. MotoCam never removes these copies. There is no manual export button.
 
 Each feature, with its exact behaviour and the code behind it, is described in [docs/features.md](docs/features.md).
@@ -142,8 +142,10 @@ lib/
     │   └── recording_retention.dart            Pure loop-retention, LOCKED badge and orphan-sidecar rules
     ├── history/
     │   ├── models/
-    │   │   ├── ride_history_loader.dart        Loads rides (and video-only rides) off the UI isolate
-    │   │   └── ride_record.dart                Ride model, integrity verification, quarantine, lock state
+    │   │   ├── ride_history_loader.dart        Loads rides (and video-only rides) off the UI isolate, through the ride index
+    │   │   ├── ride_index.dart                 Ride index cache and its one writer
+    │   │   ├── ride_record.dart                Ride model, integrity verification, quarantine, lock state
+    │   │   └── segment_verifier.dart           Per-segment, cancellable video checks stored in the index
     │   ├── rides_list_screen.dart              Ride History list
     │   ├── ride_playback_screen.dart           Multi-segment playback with telemetry
     │   └── widgets/

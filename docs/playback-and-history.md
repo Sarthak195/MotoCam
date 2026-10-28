@@ -19,7 +19,9 @@ Key files:
 | File | Main symbols |
 |---|---|
 | [rides_list_screen.dart](../lib/features/history/rides_list_screen.dart) | `RidesListScreen` |
-| [ride_history_loader.dart](../lib/features/history/models/ride_history_loader.dart) | `loadRideHistory`, `findOrphanVideoPaths` |
+| [ride_history_loader.dart](../lib/features/history/models/ride_history_loader.dart) | `loadRideHistoryIndexed`, `RideHistoryLoad`, `loadRideHistory`, `findOrphanVideoPaths` |
+| [ride_index.dart](../lib/features/history/models/ride_index.dart) | `RideIndex`, `RideIndexEntry`, `SegmentHashEntry`, `RideFileStamp`, `RideIndexStore` |
+| [segment_verifier.dart](../lib/features/history/models/segment_verifier.dart) | `SegmentVerifier`, `SegmentCheckToken`, `orderSegmentsForCheck`, `RideVideoCheck`, `videoCheckFromIndex`, `describeVideoCheck` |
 | [ride_record.dart](../lib/features/history/models/ride_record.dart) | `RideRecord`, `RideIntegrityStatus`, `RideIntegrityReport`, `RideIncident`, `RideSegmentTimelineEntry` |
 | [ride_playback_screen.dart](../lib/features/history/ride_playback_screen.dart) | `RidePlaybackScreen` (state and playback logic are in the private `_RidePlaybackScreenState`; the speed-graph painter is the private `_SpeedGraphPainter`) |
 | [playback_timeline.dart](../lib/features/history/widgets/playback_timeline.dart) | Pure timeline functions (`buildEffectiveTimeline`, `locateSegment`, `uncoveredRanges`, marker and integrity helpers), `PlaybackRange`, `PlaybackMarker`, `SegmentSeekTarget` |
@@ -36,12 +38,13 @@ A ride is one start-to-stop recording session, persisted as one `*.telemetry.jso
 `_RidesListScreenState._loadRides` builds the list:
 
 1. `CameraProvider.getRecordings()` ([camera_provider.dart](../lib/features/camera/providers/camera_provider.dart)) recursively lists every file under the recordings directory and, on Android, under the legacy fallback roots (`MotoCam Recordings` under the app documents and app cache directories). Paths are de-duplicated by normalized path. Errors are swallowed: with no recordings directory it returns an empty list, and an unreadable directory is skipped.
-2. The paths go to `loadRideHistory` ([ride_history_loader.dart](../lib/features/history/models/ride_history_loader.dart)), run on a background isolate with `Isolate.run`. If the isolate fails, it runs on the UI isolate instead.
-3. Files whose lower-cased path ends with `.telemetry.json` are loaded one at a time with `RideRecord.fromTelemetryFile(file)`, using the default `verifySegments: false`. A `null` result or an exception skips that file.
+2. The paths go to `loadRideHistoryIndexed` ([ride_history_loader.dart](../lib/features/history/models/ride_history_loader.dart)), run on a background isolate with `Isolate.run`. If the isolate fails, it runs on the UI isolate instead. The screen first resolves the [ride index](data-formats.md#ride-index-cache) with `RideIndexStore.shared()` (path_provider, on the UI isolate) and passes the index file's path, or the store's in-memory index when it already holds one, into the isolate.
+3. Files whose lower-cased path ends with `.telemetry.json` are taken one at a time. A file that is gone is skipped. When the index has an entry with the same normalised path, listed path, size, modification time and change time, and the ride's segments exist exactly as the entry says, the entry's sample-less `RideRecord` is used and the file is not read (one stat for the file and one per segment). Otherwise the file is decoded with `RideRecord.fromTelemetryFile(file, loadSamples: false)` (`verifySegments: false`). A `null` result or an exception skips that file. The video check state of each ride is computed from the stored segment hashes (`videoCheckFromIndex`); nothing is hashed.
 4. `findOrphanVideoPaths` returns the video files (`.mp4`, `.mov`, `.mkv`, `.avi`) that no loaded ride references as its `videoPath`, a segment path or a quarantined path, for example segments of an interrupted ride that no checkpoint lists. Each one goes through `RideRecord.fromVideoFile`: if a `<base>.telemetry.json` next to the video (the video's name without its extension) references it, the ride is loaded from that file; otherwise a video-only ride is built (`telemetryPath` `null`, no samples, integrity `unknown`, `createdAt` from the file's modification time).
 5. Rides are sorted by `createdAt`, newest first. For a telemetry ride `createdAt` is the parsed `startedAt` field converted to local time, or the telemetry file's modification time if it cannot be parsed.
+6. Back on the UI isolate, `RideIndexStore` (the index's only writer) replaces the index's ride entries with the fresh ones, which drops the entries of vanished files, removes stored segment hashes that no remaining ride lists, and writes the file atomically.
 
-Every ride's samples are parsed during the load, copied back to the UI isolate, and kept in memory while the screen is open.
+The rides in the list are sample-less (`samplesLoaded: false`): they carry `sampleCount` and the last sample's `elapsedMs` (for the duration), but no samples. Samples are parsed only when a ride is opened.
 
 What `RideRecord.fromTelemetryFile` produces (details of each field are in [data-formats.md](data-formats.md)):
 
@@ -51,7 +54,8 @@ What `RideRecord.fromTelemetryFile` produces (details of each field are in [data
 - `videoPath`: the resolved JSON `videoPath` if trusted, otherwise the last existing segment, otherwise the last trusted one. It is appended to `segmentPaths` if missing from it. If no path is left at all, the ride is dropped (`null`).
 - `segmentTimeline`: entries whose resolved `path` is one of the segment paths, first entry per path, negative `startMs` clamped to 0, `endMs` raised to at least `startMs`, sorted by `startMs`.
 - `lockedSegmentPaths`: resolved entries that are one of the segment paths.
-- `samples`: the `samples` array in file order. A malformed sample is skipped; the ride is kept.
+- `samples`: the `samples` array in file order, only with `loadSamples: true` (the default; playback). A malformed sample is skipped; the ride is kept. A sample's ISO timestamp is parsed when it is first read. With `loadSamples: false` only the count and the last `elapsedMs` are read.
+- `expectedSegmentHashes`: the hash the envelope records for each trusted segment, keyed by resolved path (`expectedSegmentHashesFor`, the same lookup as the integrity check).
 - `incidents`: the optional top-level `incidents` list as `RideIncident` objects (entries without a usable non-negative `elapsedMs` are skipped), sorted by `elapsedMs`. It is `null` when the key is absent.
 - `mockLocationDetected` (default `false`) and `isSessionComplete` (from `sessionComplete`, default `true`).
 - `integrity`: a payload-level check (see [below](#opening-a-ride-and-integrity-verification)).
@@ -68,21 +72,22 @@ Each card shows:
 | File name | `RideRecord.fileName` (last component of `videoPath`), one line |
 | `VIDEO ONLY (RECOVERED)` badge | `telemetryPath == null` |
 | Integrity badge | The first that applies: `INTEGRITY WARNING` (`integrity.status == modified`), `SIMULATED GPS` (`mockLocationDetected`), `DATA UNMODIFIED` (`verified`), `UNVERIFIED` (`unknown` with a telemetry file) |
+| Video check badge | Only for a `verified` ride with recorded segment hashes: `VIDEO CHECK FAILED` when a stored result for a segment differs from its recorded hash, `VIDEOS VERIFIED` when every existing segment has a stored, still-valid, matching result |
 | `QUARANTINED n` badge | `quarantinedSegmentPaths` non-empty |
 | `INCOMPLETE` badge | `missingSegmentPaths` non-empty |
 | `RECOVERED (INCOMPLETE)` badge | A telemetry file with `sessionComplete: false` (a checkpoint: the app stopped before the ride was saved normally) |
 | `LOCKED` badge | `isLocked` |
-| Subtitle lines | Distance (2 dp), duration (`HH:MM:SS` from the last sample's `elapsedMs`), "Video: X of Y kept" when the stored timeline leaves spans of 2 s or more without video, max and average speed (1 dp), "Segments: n" or "Segments: a of n available", sample count, the integrity line, "Quarantined paths: n" when present, "Telemetry: Available" or "Telemetry: Not available" |
-| Unlock button | Locked rides only. Enabled when the status is not `modified` and there are no quarantined paths; otherwise disabled with the tooltip "Integrity warning: lock state changes disabled". A spinner replaces it while the unlock runs |
+| Subtitle lines | Distance (2 dp), duration (`HH:MM:SS` from the last sample's `elapsedMs`), "Video: X of Y kept" when the stored timeline leaves spans of 2 s or more without video, max and average speed (1 dp), "Segments: n" or "Segments: a of n available", sample count (`sampleCount`), the integrity line, the video check line (below; red when a segment failed), "Quarantined paths: n" when present, "Telemetry: Available" or "Telemetry: Not available" |
+| Unlock button | Locked rides only. Enabled when the status is not `modified`, there are no quarantined paths and no stored video check failed; otherwise disabled with the tooltip "Integrity warning: lock state changes disabled". While the unlock runs a progress ring replaces it (tooltip "Checking the videos before unlocking"): indeterminate until the first segment is checked, then the share of segments checked |
 | Delete button | Every ride. Tooltip "Delete ride", or "Unlock the ride to delete it" for a locked ride that can be unlocked. A spinner replaces it while the files are deleted |
 
-The badges wrap onto further lines instead of squeezing the file name. `DATA UNMODIFIED` covers the ride JSON only; segment files are hashed when the ride is opened.
+The badges wrap onto further lines instead of squeezing the file name. `DATA UNMODIFIED` covers the ride JSON only; segment files are hashed when the ride is opened (or unlocked), and the list shows what was stored then. The list is a `ListView.builder` (section headers and cards), so only visible cards are built.
 
 The integrity line is one of:
 
 | Status | Text |
 |---|---|
-| `verified` | "Integrity: ride data unmodified since recording (videos are checked on playback)" |
+| `verified` | "Integrity: ride data unmodified since recording" |
 | `modified` | "Integrity: check failed" |
 | `unknown`, video-only ride | "Integrity: not available" |
 | `unknown`, otherwise | "Integrity: not available (recorded by an older version)" |
@@ -90,9 +95,18 @@ The integrity line is one of:
 
 When `mockLocationDetected` is set, ". GPS came from a simulated (mock) location provider." is appended.
 
+The video check line (`describeVideoCheck`) appears only for a `verified` ride with at least one existing segment that has a recorded hash (n such segments). A stored result counts only while the segment file keeps the stamp and the envelope keeps the hash it was computed for:
+
+| Stored results | Text |
+|---|---|
+| f of them failed | "Videos: f of n segment(s) failed the check" |
+| All n checked, none failed | "Videos verified: unmodified since recording" |
+| None | "Videos not checked yet (open the ride to check)" |
+| k of n, none failed | "Videos: k of n segments checked, no failure so far (open the ride to finish)" |
+
 Behaviour:
 
-- Tapping a card pushes `RidePlaybackScreen(ride: ride)`. An `_isOpeningRide` flag ignores further taps until the route is popped. The list is not reloaded on return.
+- Tapping a card pushes `RidePlaybackScreen(ride: ride)` with the sample-less ride. An `_isOpeningRide` flag ignores further taps until the route is popped. The list is not reloaded on return; only that ride's video check state is re-read from the index (`_refreshVideoCheck`, a few stats, no hashing).
 - Pull to refresh reloads everything (the list is replaced by the spinner while it runs). It is only available when the list is non-empty.
 - Unlock and delete are described under [Ride actions](#ride-actions-and-their-effect-on-disk). The screen has no lock, export, share or search action.
 
@@ -101,25 +115,33 @@ Behaviour:
 `_RidePlaybackScreenState.initState` runs, in order:
 
 1. Records whether the app is in the foreground and registers the lifecycle observer.
-2. Computes the ride's maximum sample speed for the speed graph.
-3. `_loadPlaybackPreferences()` (not awaited): reads the route-map panel preference and the online-map consent.
-4. `_showInitialIntegrityWarning()`: shows the load-time notices after the first frame, and marks segments that have no recorded hash (`missing-segment-hash` issues are known before any hashing).
-5. `_verifySegmentsAsync()` (not awaited): runs the full segment check, described below.
-6. `_initializePlayback()` (not awaited): builds the playlist and loads the first segment ([Playback engine](#playback-engine)).
+2. `_loadPlaybackPreferences()` (not awaited): reads the route-map panel preference and the online-map consent.
+3. `_start()` (not awaited), which runs in order:
+   1. For a sample-less ride, `RideRecord.loadSamples` in `Isolate.run` (on the UI isolate if that fails) re-reads the ride with its samples; the result replaces the screen's `_ride`. A ride that cannot be re-read plays without telemetry. The spinner shows meanwhile.
+   2. Computes the ride's maximum sample speed for the speed graph.
+   3. `_showInitialIntegrityWarning()`: shows the load-time notices after the next frame, and marks segments that have no recorded hash (`missing-segment-hash` issues are known before any hashing).
+   4. `_initializePlayback()`: builds the playlist and loads the first segment ([Playback engine](#playback-engine)).
+   5. `_verifySegmentsAsync()` (not awaited): the segment check, described below.
 
-Steps 3, 5 and 6 then run concurrently. `dispose` cancels segment loads, but not the hashing job: its result is ignored once the screen is gone.
+`dispose` cancels segment loads and the segment check (after the segment being hashed).
 
 The two verification levels differ (the envelope format and the issue codes are in [data-formats.md](data-formats.md)):
 
 | | Ride History load | Playback screen |
 |---|---|---|
-| Call | `fromTelemetryFile(file)` with `verifySegments: false` | `verifySegmentIntegrity()` (re-reads the JSON, `verifySegments: true`) |
-| Checks | Envelope presence and format, `algo`, `envelopeVersion`, `payloadHash`, a recorded hash for every existing segment, orphan keys in `segmentHashes`, quarantine | The same, plus a full SHA-256 of every existing trusted segment file (`segment-hash-mismatch`, `unreadable-segment-file`) |
-| Result | Card badges | Seekbar ranges and the integrity notice |
+| Call | `fromTelemetryFile(file, loadSamples: false)` with `verifySegments: false`, or the ride index entry | The report of `loadSamples` (the same payload-level checks, on the re-read file) plus `SegmentVerifier` for the segments |
+| Checks | Envelope presence and format, `algo`, `envelopeVersion`, `payloadHash`, a recorded hash for every existing segment, orphan keys in `segmentHashes`, quarantine | The same, plus a SHA-256 of every existing trusted segment file with a recorded hash (`segment-hash-mismatch`, `unreadable-segment-file`), reused from the ride index while still valid |
+| Result | Card badges, the video check state from stored results | Seekbar ranges, the integrity notice, stored segment results |
 
 Verification fails closed. A completed ride whose `schemaVersion` is 3 or later and that has no envelope is `modified` (`missing-integrity`), and so is an envelope that is not an object (`invalid-integrity`). A ride without an envelope is `unknown` only when its `schemaVersion` is below 3 or it is marked `sessionComplete: false`. A segment file that is missing is not an integrity issue: it makes the ride incomplete (`missingSegmentPaths`, the `INCOMPLETE` badge and the red seekbar ranges) without counting as modification.
 
-The full check runs `RideRecord.verifySegmentIntegrity` on a background isolate with `Isolate.run` (or on the UI isolate if that fails), and only the issue list and the quarantine count come back. Results are kept in the static `_integrityJobs` map, at most 16 entries, keyed by the telemetry path plus the size and modification time of the telemetry file and every segment. Re-opening an unchanged ride does not hash its segments again, and concurrent opens share one job. Nothing is written to disk and the result is not passed back to Ride History.
+The segment check (`_verifySegmentsAsync`) uses `SegmentVerifier` ([segment_verifier.dart](../lib/features/history/models/segment_verifier.dart)):
+
+- **Order** (`orderSegmentsForCheck`): the segment about to play (the active playlist entry) first, then the others in timeline order, then any other segment with a recorded hash. Segments without a recorded hash (already flagged at load) and missing files are skipped.
+- **One segment at a time.** Each segment is hashed with its own `Isolate.run` call (on the UI isolate if that fails). A `SegmentCheckToken` is checked before each segment; `dispose` and 'Check videos again' cancel it, so the work stops after the segment in flight, whose result is still stored.
+- **Stored results.** Before hashing, the verifier stats the segment; a result in the [ride index](data-formats.md#ride-index-cache) with the same normalised path, size, modification time, change time and expected hash is reused, so re-opening an unchanged ride (also after an app restart) hashes nothing. Every new hash is written to the index by `RideIndexStore`. Results are never carried across paths.
+- **Failures.** A mismatch or an unreadable file adds a `segment-hash-mismatch` or `unreadable-segment-file` issue; the segment is painted purple on the seekbar as soon as it is found. At the end the notice below is shown if there is something new to say.
+- **'Check videos again'.** An app bar action (shown when the ride has recorded hashes; a small spinner while a check runs, disabled while the first segment loads). It cancels the running check, resets the purple marks to the load-time ones, shows "Checking the videos again...", hashes every segment while ignoring stored results, and then always reports: the integrity notice, or "Videos checked: all N segment(s) match the recording." A ride without recorded hashes says "This ride has no recorded video hashes to check."
 
 What the playback screen shows:
 
@@ -128,7 +150,7 @@ What the playback screen shows:
 | Load-time issues or quarantined paths | SnackBar (5 s) with the text from `describeIntegrityIssues` (below) |
 | Status `unknown` with a telemetry file | "This ride has no integrity record, so its files cannot be checked." in the same SnackBar |
 | `mockLocationDetected` | "GPS in this ride came from a simulated (mock) location provider." in the same SnackBar |
-| The full check finds issues | Segments that failed are painted purple on the seekbar, and a SnackBar (6 s) with the `describeIntegrityIssues` text, unless it is the notice already shown |
+| The segment check finds issues | Segments that failed are painted purple on the seekbar as they are found, and at the end a SnackBar (6 s) with the `describeIntegrityIssues` text (load-time issues plus the new ones), unless it is the notice already shown |
 
 `describeIntegrityIssues` builds "Integrity check: ..." from up to three parts, joined with "; ": "the ride data may have changed since recording" (any issue other than a segment or quarantine issue), "N segment(s) could not be confirmed unmodified since recording (marked purple on the seekbar)" (`segment-hash-mismatch`, `missing-segment-hash` or `unreadable-segment-file`, counted once per segment), and "N segment path(s) outside the recordings folder was/were skipped".
 
@@ -318,13 +340,14 @@ These actions in Ride History and playback write app data:
 
 | Action | Where | Effect on disk |
 |---|---|---|
-| Unlock | Ride History, locked rides | After the dialog "Unlock this clip?" ("Unlocking only removes the lock marker. MotoCam never deletes past rides automatically; the ride moves from Locked Clips to All Rides."), `RideRecord.setLockState(false)` runs. It refuses if the in-memory status is `modified`, paths are quarantined or the ride has no telemetry file. Otherwise, under a per-file lock, it re-reads the JSON and re-verifies it in full, including every segment hash, and refuses if that check fails. It then sets `lockedSegmentPaths` to `[]` and rewrites the file with `writeTelemetryAtomically`. A verified ride keeps its `segmentHashes` and gets a new `payloadHash` (`resealIntegrityEnvelope`); a ride without an envelope is written without one, so it stays unverified (details in [data-formats.md](data-formats.md#re-signing-on-lock-change)). On success the list reloads and shows "Clip unlocked."; otherwise "Could not unlock this clip: its files failed the integrity check or could not be saved." (3 s) |
+| Unlock | Ride History, locked rides | After the dialog "Unlock this clip?" ("Unlocking only removes the lock marker. MotoCam never deletes past rides automatically; the ride moves from Locked Clips to All Rides."), `RideRecord.setLockState(false)` runs. It refuses if the in-memory status is `modified`, paths are quarantined or the ride has no telemetry file. Otherwise, under a per-file lock, it re-reads the JSON and re-verifies it in full, including every segment hash (a still-valid result stored in the ride index is reused instead of hashing; the button shows a progress ring), and refuses if that check fails. It then sets `lockedSegmentPaths` to `[]` and rewrites the file with `writeTelemetryAtomically`. A verified ride keeps its `segmentHashes` and gets a new `payloadHash` (`resealIntegrityEnvelope`); a ride without an envelope is written without one, so it stays unverified (details in [data-formats.md](data-formats.md#re-signing-on-lock-change)). On success the list reloads and shows "Clip unlocked."; otherwise "Could not unlock this clip: its files failed the integrity check or could not be saved." (3 s) |
 | Delete | Ride History, any ride | See below |
 | Route Map toggle | Playback | SharedPreferences bool `ride_playback_show_route_map` |
 | Online map consent | Playback, first map expansion | SharedPreferences bool `ride_playback_online_map_consent` |
+| Segment check | Playback, and Unlock | Each newly computed segment hash is stored in the [ride index](data-formats.md#ride-index-cache) (outside the recordings directory) |
 | Everything else in playback | Playback | Reads only (telemetry JSON, segment hashing, decoder probes). The only other disk writes are the map tiles flutter_map caches under `fm_cache` (see [Route map](#route-map)) |
 
-The re-verification in `setLockState` hashes the segment files on the UI isolate, so unlocking a long ride can take a while.
+The re-verification in `setLockState` hashes through `SegmentVerifier.lockHasher`: a segment with a still-valid stored result (for example one checked when the ride was played) is not hashed again, and the others are hashed one per `Isolate.run` call and stored. Reading the JSON and computing its payload hash still run on the UI isolate. After a successful unlock the ride's index entry is removed (the JSON changed) and the reload decodes it again. The unlock button cannot be pressed twice: `_lockUpdatesInFlight` replaces it with the progress ring and makes a second call return at once, and `setLockState` itself runs under `runExclusiveForPath` for the file.
 
 **Delete.** Each card has a delete button:
 

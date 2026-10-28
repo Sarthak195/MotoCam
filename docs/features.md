@@ -195,17 +195,18 @@ Consequences:
 
 [rides_list_screen.dart](../lib/features/history/rides_list_screen.dart) (`RidesListScreen`, title "Ride History") opens from the **HISTORY** button when not recording. The recording screen releases the camera and pauses idle telemetry first, and re-initializes both on return.
 
-- The list is built on a background isolate (`loadRideHistory` in [ride_history_loader.dart](../lib/features/history/models/ride_history_loader.dart)): every `*.telemetry.json` file becomes a ride (`RideRecord.fromTelemetryFile`), and video files that no ride references become video-only rides (`RideRecord.fromVideoFile`). Rides are sorted newest first.
+- The list is built on a background isolate (`loadRideHistoryIndexed` in [ride_history_loader.dart](../lib/features/history/models/ride_history_loader.dart)): every `*.telemetry.json` file becomes a ride without its samples, taken from the ride index when the file is unchanged and decoded otherwise (`RideRecord.fromTelemetryFile`), and video files that no ride references become video-only rides (`RideRecord.fromVideoFile`). Rides are sorted newest first. The index is a cache in the app's support directory and can be deleted at any time ([data-formats.md](data-formats.md#ride-index-cache)).
 - A **Locked Clips** section lists rides with any locked segment; **All Rides** lists the rest.
 - Each card is titled with the ride's date and time, with the video file name under it. Badges, as shown in the UI:
   - `VIDEO ONLY (RECOVERED)`: a video with no ride JSON.
   - One of `INTEGRITY WARNING`, `SIMULATED GPS`, `DATA UNMODIFIED` or `UNVERIFIED`; see [Integrity statuses](#integrity-statuses).
+  - `VIDEOS VERIFIED` or `VIDEO CHECK FAILED`: the result of the segment checks stored when the ride was opened or unlocked. Nothing is hashed in the list.
   - `QUARANTINED n`: segment paths outside the recordings folder.
   - `INCOMPLETE`: some listed segment files are missing.
   - `RECOVERED (INCOMPLETE)`: the JSON is a checkpoint; the app stopped before the ride was saved normally.
   - `LOCKED`.
-- The card also shows distance, duration, `Video: <kept> of <duration> kept` when loop deletion removed part of the ride's video, max and average speed, `Segments: n` (or `Segments: a of n available`), sample count, the integrity line and whether telemetry is available.
-- **Unlock clip** (locked rides only) asks `Unlock this clip?` first. Unlocking only removes the lock marker: past rides are never deleted automatically, and the ride moves from Locked Clips to All Rides. `RideRecord.setLockState(false)` re-reads and fully re-verifies the ride, including segment hashes, and refuses when any check fails. The SnackBar reads `Clip unlocked.` or `Could not unlock this clip: its files failed the integrity check or could not be saved.` The button is disabled for rides with an integrity warning or quarantined paths.
+- The card also shows distance, duration, `Video: <kept> of <duration> kept` when loop deletion removed part of the ride's video, max and average speed, `Segments: n` (or `Segments: a of n available`), sample count, the integrity line, a video check line ("Videos verified: unmodified since recording", "Videos not checked yet (open the ride to check)", "Videos: k of n segments checked, no failure so far (open the ride to finish)" or "Videos: f of n segment(s) failed the check") and whether telemetry is available.
+- **Unlock clip** (locked rides only) asks `Unlock this clip?` first. Unlocking only removes the lock marker: past rides are never deleted automatically, and the ride moves from Locked Clips to All Rides. `RideRecord.setLockState(false)` re-reads and fully re-verifies the ride, including segment hashes (segments with a still-valid stored result are not hashed again), and refuses when any check fails. A progress ring counts the checked segments. The SnackBar reads `Clip unlocked.` or `Could not unlock this clip: its files failed the integrity check or could not be saved.` The button is disabled for rides with an integrity warning, quarantined paths or a stored failed video check.
 - **Delete ride** asks `Delete this ride?` and then deletes the ride's segment files, main video and telemetry JSON (never quarantined paths or gallery copies). A locked ride must be unlocked first. A locked ride that cannot be unlocked (integrity warning or quarantined paths) can still be deleted after the dialog warns about it.
 - Pull to refresh reloads the list (not available when it is empty). There is no share or export action.
 
@@ -250,7 +251,7 @@ The rides list shows the status like this:
 
 | Badge | Integrity line |
 |---|---|
-| `DATA UNMODIFIED` (`verified`) | `Integrity: ride data unmodified since recording (videos are checked on playback)` |
+| `DATA UNMODIFIED` (`verified`) | `Integrity: ride data unmodified since recording` (the video check line and badge follow it) |
 | `INTEGRITY WARNING` (`modified`) | `Integrity: check failed` |
 | `UNVERIFIED` (`unknown`, with a ride JSON) | `Integrity: not available (recorded by an older version)` or `Integrity: not available (ride was not saved completely)` |
 | none (video-only ride) | `Integrity: not available` |
@@ -258,7 +259,7 @@ The rides list shows the status like this:
 
 - **Missing files.** A segment file that no longer exists is not an integrity failure. It is reported as `INCOMPLETE` and in the segment count.
 - **Quarantine.** The only trusted root is the folder the telemetry file was found in. Fields of the JSON itself, such as `storageDirectory`, are never trusted. A stored path whose file no longer exists is resolved to the file of the same name in that folder, when there is one (for example after the iOS app container moved). Other paths outside the folder are dropped from playback and counted in the `QUARANTINED n` badge, which always comes with `modified`.
-- **Full check.** Opening playback runs `verifySegmentIntegrity` on a background isolate, which hashes every segment; results are cached for unchanged files. Findings appear in one SnackBar starting `Integrity check:`, for example `the ride data may have changed since recording`, `<n> segments could not be confirmed unmodified since recording (marked purple on the seekbar)` or `<n> segment paths outside the recordings folder were skipped`. A ride without an envelope shows `This ride has no integrity record, so its files cannot be checked.` Issue codes are never shown verbatim. The result is not passed back to the list's badge.
+- **Full check.** Opening playback hashes the segments one at a time on background isolates, starting with the segment about to play; leaving the screen stops after the segment in flight. Results are stored in the ride index, so an unchanged segment is not hashed again, and the app bar's **Check videos again** action re-hashes every segment. A failed segment is marked purple as soon as it is found. Findings appear in one SnackBar starting `Integrity check:`, for example `the ride data may have changed since recording`, `<n> segments could not be confirmed unmodified since recording (marked purple on the seekbar)` or `<n> segment paths outside the recordings folder were skipped`. A ride without an envelope shows `This ride has no integrity record, so its files cannot be checked.` Issue codes are never shown verbatim. Back in the list, the ride's video check badge and line show the stored result.
 - **What it does not guarantee.** The hashes are unkeyed (no secret, signature or device binding). The check detects accidental corruption and edits made without recomputing the hashes. Anyone who can rewrite the files can also recompute the envelope, so it is not tamper-proof evidence. Keyed integrity is not implemented.
 
 ## Export to gallery
