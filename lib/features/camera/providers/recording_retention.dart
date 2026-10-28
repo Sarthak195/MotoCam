@@ -7,6 +7,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import '../../../core/ride_file/ride_telemetry_codec.dart' as ride_codec;
 import '../../../core/utils/path_utils.dart' as path_utils;
 
 /// Returns the session segments the rolling loop should delete, oldest first.
@@ -99,10 +100,14 @@ bool isActiveSegmentLocked({
 /// Lists the `*.telemetry.json` sidecars under [directoryPath] (recursively)
 /// whose ride no longer has any video segment on disk.
 ///
-/// A sidecar is an orphan when its `segmentPaths` is empty, or when none of
-/// its segments exists either at the stored path or under the same file name
-/// next to the sidecar. Sidecars that list any `lockedSegmentPaths`, and
-/// sidecars that cannot be read or parsed, are never returned.
+/// The segments are the ones the reader starts from: `segmentPaths` under
+/// the codec's segment-list rule, or `[videoPath]` when that list is empty
+/// (schema 1 files), or, when both are empty, a video named after a legacy
+/// `<video base>.telemetry.json` file. A sidecar is an orphan when that
+/// list is empty, or when none of its segments exists either at the stored
+/// path or under the same file name next to the sidecar. Sidecars that list
+/// any `lockedSegmentPaths`, and sidecars that cannot be read or parsed, are
+/// never returned.
 ///
 /// Uses synchronous I/O; run it off the UI isolate (for example with
 /// `Isolate.run`).
@@ -133,7 +138,7 @@ List<String> findOrphanTelemetryFiles(String directoryPath) {
         continue;
       }
 
-      final segmentPaths = _readPathList(json['segmentPaths']);
+      final segmentPaths = _declaredSegmentPaths(entity.path, json);
       if (segmentPaths.isEmpty) {
         orphans.add(entity.path);
         continue;
@@ -159,12 +164,34 @@ List<String> findOrphanTelemetryFiles(String directoryPath) {
   return orphans;
 }
 
-List<String> _readPathList(Object? value) {
-  if (value is! List) {
+List<String> _readPathList(Object? value) =>
+    ride_codec.normalizeSegmentPathList(value is List ? value : const []);
+
+/// The reader's starting segment list for a sidecar (see
+/// `resolveRideSegments` in the ride-file codec), before path resolution.
+List<String> _declaredSegmentPaths(
+  String telemetryPath,
+  Map<String, dynamic> json,
+) {
+  final segmentPaths = _readPathList(json['segmentPaths']);
+  if (segmentPaths.isNotEmpty) {
+    return segmentPaths;
+  }
+  final videoPath = json['videoPath']?.toString().trim() ?? '';
+  if (videoPath.isNotEmpty) {
+    return <String>[videoPath];
+  }
+  // Legacy `<video base>.telemetry.json`: the reader recovers that video.
+  final suffix = ride_codec.rideTelemetryFileSuffix;
+  if (!telemetryPath.toLowerCase().endsWith(suffix)) {
     return const <String>[];
   }
-  return value
-      .map((entry) => entry.toString().trim())
-      .where((path) => path.isNotEmpty)
-      .toList();
+  final basePath = telemetryPath.substring(
+    0,
+    telemetryPath.length - suffix.length,
+  );
+  return <String>[
+    for (final extension in ride_codec.rideVideoFileExtensions)
+      '$basePath$extension',
+  ];
 }

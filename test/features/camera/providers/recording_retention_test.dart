@@ -192,6 +192,28 @@ void main() {
       });
     });
 
+    test('falls back to videoPath like the reader (schema 1 files)', () {
+      File(sep('s1_ride.mp4')).writeAsStringSync('video');
+      writeSidecar('ride_s1.telemetry.json', {'videoPath': sep('s1_ride.mp4')});
+      writeSidecar('ride_s1_empty.telemetry.json', {
+        'segmentPaths': <String>[' ', ''],
+        'videoPath': '/old/root/s1_ride.mp4',
+      });
+      final gone = writeSidecar('ride_s1_gone.telemetry.json', {
+        'videoPath': sep('s1_gone.mp4'),
+      });
+      expect(findOrphanTelemetryFiles(root.path), [gone.path]);
+    });
+
+    test('keeps a legacy sidecar whose video is recovered by name', () {
+      File(sep('legacy_ride.mp4')).writeAsStringSync('video');
+      writeSidecar('legacy_ride.telemetry.json', <String, dynamic>{});
+      final gone = writeSidecar('legacy_gone.telemetry.json', {
+        'segmentPaths': <String>[],
+      });
+      expect(findOrphanTelemetryFiles(root.path), [gone.path]);
+    });
+
     test('never flags locked rides, even without videos', () {
       writeSidecar('ride_d.telemetry.json', {
         'segmentPaths': [sep('gone.mp4')],
