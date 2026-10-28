@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
@@ -16,23 +17,30 @@ import '../../telemetry/models/telemetry_data.dart';
 /// only while the rider is looking at it. Rides with fewer than two GPS fixes
 /// fall back to [StaticMapViewer], which needs no network.
 ///
-/// The route, its bounds and the tile and polyline layers are computed once
-/// per [telemetryData] list, so frequent rebuilds that only move
-/// [currentSample] stay cheap.
+/// The route, its bounds, the tile and polyline layers and the start and end
+/// markers are computed once per [telemetryData] list. The current-position
+/// marker follows [currentSampleListenable], which rebuilds only that marker
+/// layer: a playback tick does not rebuild this widget.
 class RouteMapView extends StatefulWidget {
   /// Creates a route map for [telemetryData].
   const RouteMapView({
     super.key,
     required this.telemetryData,
     this.currentSample,
+    this.currentSampleListenable,
     this.height = 180,
   });
 
   /// Telemetry samples of the ride, in recording order.
   final List<TelemetryData> telemetryData;
 
-  /// Sample at the current playback position, drawn as a cyan marker.
+  /// Sample at the current playback position, drawn as a cyan marker. Used
+  /// when [currentSampleListenable] is `null`.
   final TelemetryData? currentSample;
+
+  /// Source of the sample at the current playback position. Each change
+  /// moves the cyan marker without rebuilding the map.
+  final ValueListenable<TelemetryData?>? currentSampleListenable;
 
   /// Height of the map.
   final double height;
@@ -46,6 +54,7 @@ class _RouteMapViewState extends State<RouteMapView> {
   int _gpsFixCount = 0;
   LatLngBounds? _bounds;
   PolylineLayer? _polylineLayer;
+  MarkerLayer? _endpointLayer;
   TileLayer? _tileLayer;
   StaticMapViewer? _fallbackView;
   bool _tileLoadFailed = false;
@@ -72,6 +81,7 @@ class _RouteMapViewState extends State<RouteMapView> {
     if (_routePoints.length < 2) {
       _bounds = null;
       _polylineLayer = null;
+      _endpointLayer = null;
       return;
     }
     _bounds = LatLngBounds.fromPoints(_routePoints);
@@ -82,6 +92,42 @@ class _RouteMapViewState extends State<RouteMapView> {
           strokeWidth: 4,
           color: Colors.lightBlueAccent,
         ),
+      ],
+    );
+    _endpointLayer = MarkerLayer(
+      markers: [
+        Marker(
+          point: _routePoints.first,
+          width: 26,
+          height: 26,
+          child: const _RouteMarker(
+            color: Colors.green,
+            icon: Icons.play_arrow,
+          ),
+        ),
+        Marker(
+          point: _routePoints.last,
+          width: 26,
+          height: 26,
+          child: const _RouteMarker(color: Colors.red, icon: Icons.stop),
+        ),
+      ],
+    );
+  }
+
+  /// The layer with the current-position marker for [sample]; empty without
+  /// a GPS position.
+  Widget _currentLayer(TelemetryData? sample) {
+    final point = latLngFromSample(sample);
+    return MarkerLayer(
+      markers: [
+        if (point != null)
+          Marker(
+            point: point,
+            width: 20,
+            height: 20,
+            child: const _CurrentMarker(),
+          ),
       ],
     );
   }
@@ -118,7 +164,8 @@ class _RouteMapViewState extends State<RouteMapView> {
   Widget build(BuildContext context) {
     final bounds = _bounds;
     final polylineLayer = _polylineLayer;
-    if (bounds == null || polylineLayer == null) {
+    final endpointLayer = _endpointLayer;
+    if (bounds == null || polylineLayer == null || endpointLayer == null) {
       // The map subtree (if any) is being removed, and its TileLayer State
       // disposes the tile provider, so a later map must create a new one.
       _tileLayer = null;
@@ -135,7 +182,7 @@ class _RouteMapViewState extends State<RouteMapView> {
       );
     }
 
-    final currentPoint = latLngFromSample(widget.currentSample);
+    final listenable = widget.currentSampleListenable;
 
     return Container(
       height: widget.height,
@@ -169,35 +216,14 @@ class _RouteMapViewState extends State<RouteMapView> {
               children: [
                 _obtainTileLayer(),
                 polylineLayer,
-                MarkerLayer(
-                  markers: [
-                    Marker(
-                      point: _routePoints.first,
-                      width: 26,
-                      height: 26,
-                      child: const _RouteMarker(
-                        color: Colors.green,
-                        icon: Icons.play_arrow,
-                      ),
-                    ),
-                    Marker(
-                      point: _routePoints.last,
-                      width: 26,
-                      height: 26,
-                      child: const _RouteMarker(
-                        color: Colors.red,
-                        icon: Icons.stop,
-                      ),
-                    ),
-                    if (currentPoint != null)
-                      Marker(
-                        point: currentPoint,
-                        width: 20,
-                        height: 20,
-                        child: const _CurrentMarker(),
-                      ),
-                  ],
-                ),
+                endpointLayer,
+                if (listenable == null)
+                  _currentLayer(widget.currentSample)
+                else
+                  ValueListenableBuilder<TelemetryData?>(
+                    valueListenable: listenable,
+                    builder: (context, sample, _) => _currentLayer(sample),
+                  ),
                 const OsmAttribution(),
               ],
             ),
