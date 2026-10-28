@@ -1,10 +1,29 @@
+import 'dart:async';
+
 import 'package:camera/camera.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../../../core/providers/app_settings_provider.dart';
 import '../../camera/providers/camera_provider.dart';
+import '../recording_screen_logic.dart';
 
+/// Frame rate the settings sheet starts with: [savedFps] when [availableFps]
+/// contains it, otherwise 30 when available, otherwise the last option.
+///
+/// [availableFps] can shrink after camera-init failures, so the saved rate
+/// may no longer be offered. An empty list returns [savedFps].
+int resolveInitialFps(int savedFps, List<int> availableFps) {
+  if (availableFps.isEmpty || availableFps.contains(savedFps)) {
+    return savedFps;
+  }
+  return availableFps.contains(30) ? 30 : availableFps.last;
+}
+
+/// Values the rider saved in [RecordingSettingsSheet], returned when the
+/// sheet is closed with SAVE SETTINGS.
 class RecordingSettingsFormResult {
+  /// Creates a result holding every field of the settings form.
   const RecordingSettingsFormResult({
     required this.resolution,
     required this.fps,
@@ -15,24 +34,57 @@ class RecordingSettingsFormResult {
     required this.segmentDurationSeconds,
     required this.loopSegmentCount,
     required this.incidentSensitivity,
+    this.exportLockedClipsToGallery = false,
   });
 
+  /// Requested vertical resolution in pixels (e.g. 1080).
   final int resolution;
+
+  /// Requested frame rate.
   final int fps;
+
+  /// Requested video bitrate in Mbps.
   final int bitrateMbps;
+
+  /// Whether audio is recorded.
   final bool audioEnabled;
+
+  /// Minimum interval between speed UI refreshes, in milliseconds.
   final int speedRefreshMs;
+
+  /// Name of the selected camera (CameraDescription.name).
   final String cameraName;
+
+  /// Length of one recording segment, in seconds.
   final int segmentDurationSeconds;
+
+  /// Number of unlocked segments kept by the loop buffer.
   final int loopSegmentCount;
+
+  /// Sensitivity of automatic incident detection.
   final IncidentSensitivity incidentSensitivity;
+
+  /// Whether locked clips are copied to the shared gallery when a ride
+  /// stops (Android).
+  final bool exportLockedClipsToGallery;
 }
 
+/// Modal form for the recording, camera and telemetry settings.
+///
+/// Reads the saved values from [AppSettingsProvider] and pops a
+/// [RecordingSettingsFormResult] on SAVE SETTINGS; it does not persist or
+/// apply anything itself.
 class RecordingSettingsSheet extends StatefulWidget {
+  /// Frame rates offered for the saved resolution.
   final List<int> initialFpsOptions;
+
+  /// Cameras the rider can choose from.
   final List<CameraDescription> initialCameraOptions;
+
+  /// Resolution presets known to fail on this device; shown as unsupported.
   final Set<ResolutionPreset> initialUnsupportedPresets;
 
+  /// Creates the settings form with the given option lists.
   const RecordingSettingsSheet({
     super.key,
     required this.initialFpsOptions,
@@ -51,6 +103,7 @@ class _RecordingSettingsSheetState extends State<RecordingSettingsSheet> {
   late String selectedQualityProfileId;
   late QualityPresetTier selectedPresetTier;
   late bool audioEnabled;
+  late bool exportLockedClipsToGallery;
   late int speedRefreshMs;
   late int segmentDurationSeconds;
   late int loopSegmentCount;
@@ -72,17 +125,24 @@ class _RecordingSettingsSheetState extends State<RecordingSettingsSheet> {
     selectedQualityProfileId = settings.qualityProfileId;
     selectedPresetTier =
         AppSettingsProvider.profileById(settings.qualityProfileId)?.tier ??
-            QualityPresetTier.balanced;
+        QualityPresetTier.balanced;
     audioEnabled = settings.audioEnabled;
+    exportLockedClipsToGallery = settings.exportLockedClipsToGallery;
     speedRefreshMs = settings.speedRefreshMs;
     segmentDurationSeconds = settings.segmentDurationSeconds;
     loopSegmentCount = settings.loopSegmentCount;
     incidentSensitivity = settings.incidentSensitivity;
     availableFps = List<int>.from(widget.initialFpsOptions);
-    unsupportedResolutionPresets =
-        Set<ResolutionPreset>.from(widget.initialUnsupportedPresets);
+    final initialFps = resolveInitialFps(selectedFps, availableFps);
+    if (initialFps != selectedFps) {
+      selectedFps = initialFps;
+      selectedQualityProfileId = AppSettingsProvider.customQualityProfileId;
+    }
+    unsupportedResolutionPresets = Set<ResolutionPreset>.from(
+      widget.initialUnsupportedPresets,
+    );
     cameraOptions = List<CameraDescription>.from(widget.initialCameraOptions);
-    
+
     selectedCameraName = settings.selectedCameraName;
     if (selectedCameraName.isEmpty) {
       selectedCameraName = cameraProvider.activeCameraName;
@@ -174,8 +234,8 @@ class _RecordingSettingsSheetState extends State<RecordingSettingsSheet> {
                         (tier) => DropdownMenuItem<QualityPresetTier>(
                           value: tier,
                           child: Text(
-                              AppSettingsProvider.qualityTierLabel(
-                                  tier)),
+                            AppSettingsProvider.qualityTierLabel(tier),
+                          ),
                         ),
                       )
                       .toList(),
@@ -183,8 +243,7 @@ class _RecordingSettingsSheetState extends State<RecordingSettingsSheet> {
                     if (value == null) return;
 
                     final tierProfiles =
-                        AppSettingsProvider.qualityProfilesForTier(
-                            value);
+                        AppSettingsProvider.qualityProfilesForTier(value);
                     if (tierProfiles.isEmpty) {
                       return;
                     }
@@ -195,31 +254,29 @@ class _RecordingSettingsSheetState extends State<RecordingSettingsSheet> {
                       selectedQualityProfileId = selectedProfile.id;
                     });
 
-                    () async {
+                    unawaited(() async {
                       final fpsOptions = await cameraProvider
                           .getSupportedFpsOptionsForPreset(
-                        preset: CameraProvider.presetForResolution(
-                          selectedProfile.resolution,
-                        ),
-                      );
+                            preset: CameraProvider.presetForResolution(
+                              selectedProfile.resolution,
+                            ),
+                          );
                       if (!mounted) {
                         return;
                       }
                       setState(() {
                         selectedResolution = selectedProfile.resolution;
-                        selectedBitrateMbps =
-                            selectedProfile.bitrateMbps;
+                        selectedBitrateMbps = selectedProfile.bitrateMbps;
                         availableFps = List<int>.from(fpsOptions);
-                        if (availableFps
-                            .contains(selectedProfile.fps)) {
+                        if (availableFps.contains(selectedProfile.fps)) {
                           selectedFps = selectedProfile.fps;
                         } else {
                           selectedFps = availableFps.last;
-                          selectedQualityProfileId = AppSettingsProvider
-                              .customQualityProfileId;
+                          selectedQualityProfileId =
+                              AppSettingsProvider.customQualityProfileId;
                         }
                       });
-                    }();
+                    }());
                   },
                 ),
                 const SizedBox(height: 12),
@@ -235,8 +292,8 @@ class _RecordingSettingsSheetState extends State<RecordingSettingsSheet> {
                       child: Text('Custom'),
                     ),
                     ...AppSettingsProvider.qualityProfilesForTier(
-                            selectedPresetTier)
-                        .map(
+                      selectedPresetTier,
+                    ).map(
                       (profile) => DropdownMenuItem<String>(
                         value: profile.id,
                         child: Text(profile.label),
@@ -247,26 +304,24 @@ class _RecordingSettingsSheetState extends State<RecordingSettingsSheet> {
                     if (value == null) return;
                     setState(() => selectedQualityProfileId = value);
 
-                    if (value ==
-                        AppSettingsProvider.customQualityProfileId) {
+                    if (value == AppSettingsProvider.customQualityProfileId) {
                       return;
                     }
 
-                    final profile =
-                        AppSettingsProvider.profileById(value);
+                    final profile = AppSettingsProvider.profileById(value);
                     if (profile == null) {
                       return;
                     }
 
                     setState(() => selectedPresetTier = profile.tier);
 
-                    () async {
+                    unawaited(() async {
                       final fpsOptions = await cameraProvider
                           .getSupportedFpsOptionsForPreset(
-                        preset: CameraProvider.presetForResolution(
-                          profile.resolution,
-                        ),
-                      );
+                            preset: CameraProvider.presetForResolution(
+                              profile.resolution,
+                            ),
+                          );
                       if (!mounted) {
                         return;
                       }
@@ -278,11 +333,11 @@ class _RecordingSettingsSheetState extends State<RecordingSettingsSheet> {
                           selectedFps = profile.fps;
                         } else {
                           selectedFps = availableFps.last;
-                          selectedQualityProfileId = AppSettingsProvider
-                              .customQualityProfileId;
+                          selectedQualityProfileId =
+                              AppSettingsProvider.customQualityProfileId;
                         }
                       });
-                    }();
+                    }());
                   },
                 ),
                 const SizedBox(height: 12),
@@ -290,8 +345,10 @@ class _RecordingSettingsSheetState extends State<RecordingSettingsSheet> {
                   _buildSettingsLabel('Camera lens'),
                   DropdownButtonFormField<String>(
                     key: ValueKey(selectedCameraName),
-                    initialValue: cameraOptions.any((camera) =>
-                            camera.name == selectedCameraName)
+                    initialValue:
+                        cameraOptions.any(
+                          (camera) => camera.name == selectedCameraName,
+                        )
                         ? selectedCameraName
                         : cameraOptions.first.name,
                     dropdownColor: const Color(0xFF1B1B1B),
@@ -300,8 +357,7 @@ class _RecordingSettingsSheetState extends State<RecordingSettingsSheet> {
                         .map(
                           (camera) => DropdownMenuItem<String>(
                             value: camera.name,
-                            child: Text(
-                                cameraProvider.cameraLabel(camera)),
+                            child: Text(cameraProvider.cameraLabel(camera)),
                           ),
                         )
                         .toList(),
@@ -318,32 +374,26 @@ class _RecordingSettingsSheetState extends State<RecordingSettingsSheet> {
                   initialValue: selectedResolution,
                   dropdownColor: const Color(0xFF1B1B1B),
                   decoration: _settingsInputDecoration(),
-                  items: AppSettingsProvider.resolutionOptions.map(
-                    (resolution) {
-                      final isUnsupported =
-                          unsupportedResolutionPresets.contains(
-                        CameraProvider.presetForResolution(
-                          resolution,
+                  items: AppSettingsProvider.resolutionOptions.map((
+                    resolution,
+                  ) {
+                    final isUnsupported = unsupportedResolutionPresets.contains(
+                      CameraProvider.presetForResolution(resolution),
+                    );
+                    final label = AppSettingsProvider.resolutionLabel(
+                      resolution,
+                    );
+                    return DropdownMenuItem<int>(
+                      value: resolution,
+                      enabled: !isUnsupported,
+                      child: Text(
+                        isUnsupported ? '$label (unsupported)' : label,
+                        style: TextStyle(
+                          color: isUnsupported ? Colors.white38 : Colors.white,
                         ),
-                      );
-                      final label = AppSettingsProvider.resolutionLabel(
-                          resolution);
-                      return DropdownMenuItem<int>(
-                        value: resolution,
-                        enabled: !isUnsupported,
-                        child: Text(
-                          isUnsupported
-                              ? '$label (unsupported)'
-                              : label,
-                          style: TextStyle(
-                            color: isUnsupported
-                                ? Colors.white38
-                                : Colors.white,
-                          ),
-                        ),
-                      );
-                    },
-                  ).toList(),
+                      ),
+                    );
+                  }).toList(),
                   onChanged: (value) {
                     if (value == null) return;
                     setState(() {
@@ -352,12 +402,11 @@ class _RecordingSettingsSheetState extends State<RecordingSettingsSheet> {
                           AppSettingsProvider.customQualityProfileId;
                     });
 
-                    () async {
+                    unawaited(() async {
                       final fpsOptions = await cameraProvider
                           .getSupportedFpsOptionsForPreset(
-                        preset:
-                            CameraProvider.presetForResolution(value),
-                      );
+                            preset: CameraProvider.presetForResolution(value),
+                          );
                       if (!mounted) {
                         return;
                       }
@@ -367,7 +416,7 @@ class _RecordingSettingsSheetState extends State<RecordingSettingsSheet> {
                           selectedFps = availableFps.last;
                         }
                       });
-                    }();
+                    }());
                   },
                 ),
                 if (unsupportedResolutionPresets.isNotEmpty) ...[
@@ -429,6 +478,15 @@ class _RecordingSettingsSheetState extends State<RecordingSettingsSheet> {
                     });
                   },
                 ),
+                if (!cameraProvider.supportsVideoBitrateControl)
+                  const Padding(
+                    padding: EdgeInsets.only(top: 6),
+                    child: Text(
+                      'No effect on this device: the Android camera plugin '
+                      'records at its own bitrate for the chosen resolution.',
+                      style: TextStyle(color: Colors.orange, fontSize: 12),
+                    ),
+                  ),
                 const SizedBox(height: 12),
                 _buildSettingsLabel('Segment length'),
                 DropdownButtonFormField<int>(
@@ -436,15 +494,12 @@ class _RecordingSettingsSheetState extends State<RecordingSettingsSheet> {
                   initialValue: segmentDurationSeconds,
                   dropdownColor: const Color(0xFF1B1B1B),
                   decoration: _settingsInputDecoration(),
-                  items: AppSettingsProvider
-                      .segmentDurationOptionsSeconds
+                  items: AppSettingsProvider.segmentDurationOptionsSeconds
                       .map(
                         (seconds) => DropdownMenuItem<int>(
                           value: seconds,
                           child: Text(
-                            AppSettingsProvider.segmentDurationLabel(
-                              seconds,
-                            ),
+                            AppSettingsProvider.segmentDurationLabel(seconds),
                           ),
                         ),
                       )
@@ -503,11 +558,13 @@ class _RecordingSettingsSheetState extends State<RecordingSettingsSheet> {
                   decoration: _settingsInputDecoration(),
                   items: IncidentSensitivity.values
                       .map(
-                        (sensitivity) =>
-                            DropdownMenuItem<IncidentSensitivity>(
+                        (sensitivity) => DropdownMenuItem<IncidentSensitivity>(
                           value: sensitivity,
-                          child: Text(AppSettingsProvider
-                              .incidentSensitivityLabel(sensitivity)),
+                          child: Text(
+                            AppSettingsProvider.incidentSensitivityLabel(
+                              sensitivity,
+                            ),
+                          ),
                         ),
                       )
                       .toList(),
@@ -534,6 +591,26 @@ class _RecordingSettingsSheetState extends State<RecordingSettingsSheet> {
                     setState(() => audioEnabled = value);
                   },
                 ),
+                if (defaultTargetPlatform == TargetPlatform.android)
+                  SwitchListTile.adaptive(
+                    contentPadding: EdgeInsets.zero,
+                    activeThumbColor: Colors.blue,
+                    activeTrackColor: Colors.blue.withValues(alpha: 0.35),
+                    value: exportLockedClipsToGallery,
+                    title: const Text(
+                      'Copy locked clips to gallery',
+                      style: TextStyle(color: Colors.white),
+                    ),
+                    subtitle: const Text(
+                      'When a ride stops, locked clips are copied to '
+                      'Movies/MotoCam/Recordings. Gallery copies are visible '
+                      'to other apps and are not deleted by MotoCam.',
+                      style: TextStyle(color: Colors.white70),
+                    ),
+                    onChanged: (value) {
+                      setState(() => exportLockedClipsToGallery = value);
+                    },
+                  ),
                 const SizedBox(height: 8),
                 SizedBox(
                   width: double.infinity,
@@ -547,16 +624,18 @@ class _RecordingSettingsSheetState extends State<RecordingSettingsSheet> {
                           audioEnabled: audioEnabled,
                           speedRefreshMs: speedRefreshMs,
                           cameraName: selectedCameraName,
-                          segmentDurationSeconds:
-                              segmentDurationSeconds,
+                          segmentDurationSeconds: segmentDurationSeconds,
                           loopSegmentCount: loopSegmentCount,
                           incidentSensitivity: incidentSensitivity,
+                          exportLockedClipsToGallery:
+                              exportLockedClipsToGallery,
                         ),
                       );
                     },
                     style: ElevatedButton.styleFrom(
                       minimumSize: const Size(double.infinity, 52),
-                      backgroundColor: Colors.blue,
+                      backgroundColor: recordingStartButtonColor,
+                      foregroundColor: recordingButtonLabelColor,
                     ),
                     child: const Text(
                       'SAVE SETTINGS',

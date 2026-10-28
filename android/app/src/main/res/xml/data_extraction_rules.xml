@@ -2,8 +2,12 @@
 <data-extraction-rules>
     <cloud-backup>
         <exclude domain="root" path="." />
+        <!-- getExternalFilesDir(): every recording and ride telemetry file. -->
+        <exclude domain="external" path="." />
     </cloud-backup>
     <device-transfer>
         <exclude domain="root" path="." />
+        <!-- getExternalFilesDir(): every recording and ride telemetry file. -->
+        <exclude domain="external" path="." />
     </device-transfer>
 </data-extraction-rules>

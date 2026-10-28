@@ -1,25 +1,70 @@
 import 'package:flutter/material.dart';
 
-enum StartPreflightStatus { ok, warning, failed }
+import '../recording_screen_logic.dart';
 
+/// Outcome of one start-preflight check.
+enum StartPreflightStatus {
+  /// The requirement is met.
+  ok,
+
+  /// Recommended but not required; recording can still start.
+  warning,
+
+  /// The requirement is not met.
+  failed,
+}
+
+/// One row of the start-preflight checklist.
 class StartPreflightCheck {
+  /// Creates a check row.
   const StartPreflightCheck({
     required this.title,
     required this.detail,
     required this.status,
     required this.isBlocking,
+    this.opensSheet = true,
   });
 
+  /// Short name of the check.
   final String title;
+
+  /// Explanation of the current state.
   final String detail;
+
+  /// Result of the check.
   final StartPreflightStatus status;
+
+  /// Whether a [StartPreflightStatus.failed] result prevents recording.
   final bool isBlocking;
+
+  /// Whether a result other than [StartPreflightStatus.ok] opens the sheet
+  /// on its own. When `false`, the row is only listed if the sheet opens
+  /// for another check.
+  final bool opensSheet;
 }
 
+/// Whether START must show the checklist sheet: a blocking check failed, or
+/// a check that is not OK opens the sheet on its own
+/// ([StartPreflightCheck.opensSheet]).
+bool startPreflightNeedsSheet(Iterable<StartPreflightCheck> checks) {
+  return checks.any(
+    (check) =>
+        (check.isBlocking && check.status == StartPreflightStatus.failed) ||
+        (check.opensSheet && check.status != StartPreflightStatus.ok),
+  );
+}
+
+/// Bottom sheet that lists the start-preflight checks and pops `true` when
+/// the rider chooses Start Recording (disabled while [hasBlockingIssue]) or
+/// `false` on Cancel.
 class StartPreflightSheet extends StatelessWidget {
+  /// Checks to display, in order.
   final List<StartPreflightCheck> checks;
+
+  /// Whether any blocking check failed.
   final bool hasBlockingIssue;
 
+  /// Creates the checklist sheet.
   const StartPreflightSheet({
     super.key,
     required this.checks,
@@ -71,9 +116,7 @@ class StartPreflightSheet extends StatelessWidget {
                   ? 'Fix blocking checks before recording.'
                   : 'Preflight checks look good. Start when ready.',
               style: TextStyle(
-                color: hasBlockingIssue
-                    ? Colors.redAccent
-                    : Colors.white70,
+                color: hasBlockingIssue ? Colors.redAccent : Colors.white70,
                 fontSize: 13,
               ),
             ),
@@ -83,7 +126,7 @@ class StartPreflightSheet extends StatelessWidget {
               child: ListView.separated(
                 shrinkWrap: true,
                 itemCount: checks.length,
-                separatorBuilder: (_, __) => Divider(
+                separatorBuilder: (_, _) => Divider(
                   color: Colors.white.withValues(alpha: 0.08),
                   height: 1,
                 ),
@@ -109,8 +152,7 @@ class StartPreflightSheet extends StatelessWidget {
                     ),
                     subtitle: Text(
                       check.detail,
-                      style: TextStyle(
-                          color: color.withValues(alpha: 0.95)),
+                      style: TextStyle(color: color.withValues(alpha: 0.95)),
                     ),
                   );
                 },
@@ -137,7 +179,8 @@ class StartPreflightSheet extends StatelessWidget {
                         ? null
                         : () => Navigator.of(context).pop(true),
                     style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.blue,
+                      backgroundColor: recordingStartButtonColor,
+                      foregroundColor: recordingButtonLabelColor,
                       disabledBackgroundColor: Colors.grey.shade800,
                     ),
                     child: const Text('Start Recording'),

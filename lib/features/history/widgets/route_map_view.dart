@@ -1,12 +1,29 @@
+import 'dart:async';
+
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 
 import '../../map/map_source_config.dart';
+import '../../map/route_points.dart';
 import '../../map/widgets/static_map_viewer.dart';
 import '../../telemetry/models/telemetry_data.dart';
 
-class RouteMapView extends StatelessWidget {
+/// Online route map for ride playback.
+///
+/// Plots the GPS route of [telemetryData] over OpenStreetMap tiles (see
+/// [MapSourceConfig]) with start, end and current-position markers. Building
+/// this widget fetches tiles from the tile server, so callers should build it
+/// only while the rider is looking at it. Rides with fewer than two GPS fixes
+/// fall back to [StaticMapViewer], which needs no network.
+///
+/// The route, its bounds and the tile and polyline layers are computed once
+/// per [telemetryData] list, so frequent rebuilds that only move
+/// [currentSample] stay cheap.
+class RouteMapView extends StatefulWidget {
+  /// Creates a route map for [telemetryData].
   const RouteMapView({
     super.key,
     required this.telemetryData,
@@ -14,31 +31,167 @@ class RouteMapView extends StatelessWidget {
     this.height = 180,
   });
 
+  /// Telemetry samples of the ride, in recording order.
   final List<TelemetryData> telemetryData;
+
+  /// Sample at the current playback position, drawn as a cyan marker.
   final TelemetryData? currentSample;
+
+  /// Height of the map.
   final double height;
 
   @override
-  Widget build(BuildContext context) {
-    final routePoints = _downsample(_extractPoints(telemetryData));
-    if (routePoints.length < 2) {
-      return StaticMapViewer(
-        telemetryData: telemetryData,
-        width: double.infinity,
-        height: height,
+  State<RouteMapView> createState() => _RouteMapViewState();
+}
+
+class _RouteMapViewState extends State<RouteMapView> {
+  static bool _osmLicenceRegistered = false;
+
+  List<LatLng> _routePoints = const <LatLng>[];
+  int _gpsFixCount = 0;
+  LatLngBounds? _bounds;
+  PolylineLayer? _polylineLayer;
+  TileLayer? _tileLayer;
+  StaticMapViewer? _fallbackView;
+  bool _tileLoadFailed = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _computeRoute();
+  }
+
+  @override
+  void didUpdateWidget(covariant RouteMapView oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!identical(oldWidget.telemetryData, widget.telemetryData)) {
+      _computeRoute();
+    }
+  }
+
+  void _computeRoute() {
+    _fallbackView = null;
+    final fixes = routePointsFromSamples(widget.telemetryData);
+    _gpsFixCount = fixes.length;
+    _routePoints = downsampleRoute(fixes);
+    if (_routePoints.length < 2) {
+      _bounds = null;
+      _polylineLayer = null;
+      return;
+    }
+    _bounds = LatLngBounds.fromPoints(_routePoints);
+    _polylineLayer = PolylineLayer(
+      polylines: [
+        Polyline(
+          points: _routePoints,
+          strokeWidth: 4,
+          color: Colors.lightBlueAccent,
+        ),
+      ],
+    );
+  }
+
+  /// Returns the tile layer, creating it (and its single tile provider) on
+  /// first use. The same instance is reused for every rebuild so flutter_map
+  /// keeps one HTTP client; TileLayer's State disposes the provider when the
+  /// map is removed.
+  TileLayer _obtainTileLayer() {
+    return _tileLayer ??= TileLayer(
+      urlTemplate: MapSourceConfig.tileUrlTemplate,
+      userAgentPackageName: MapSourceConfig.userAgentPackageName,
+      maxNativeZoom: MapSourceConfig.maxNativeZoom,
+      tileProvider: NetworkTileProvider(
+        headers: <String, String>{'User-Agent': MapSourceConfig.userAgent},
+        cachingProvider: BuiltInMapCachingProvider.getOrCreateInstance(
+          maxCacheSize: MapSourceConfig.maxTileCacheBytes,
+        ),
+      ),
+      errorTileCallback: _onTileLoadError,
+    );
+  }
+
+  void _onTileLoadError(TileImage tile, Object error, StackTrace? stackTrace) {
+    if (!mounted || _tileLoadFailed) {
+      return;
+    }
+    setState(() {
+      _tileLoadFailed = true;
+    });
+  }
+
+  Future<void> _showAttributionDetails() async {
+    if (!_osmLicenceRegistered) {
+      _osmLicenceRegistered = true;
+      LicenseRegistry.addLicense(
+        () => Stream<LicenseEntry>.value(
+          const LicenseEntryWithLineBreaks(<String>[
+            'OpenStreetMap',
+          ], MapSourceConfig.licenceSummary),
+        ),
       );
     }
 
-    final bounds = LatLngBounds.fromPoints(routePoints);
-    final center = LatLng(
-      (bounds.south + bounds.north) / 2,
-      (bounds.west + bounds.east) / 2,
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Map data'),
+        content: const Text(MapSourceConfig.licenceSummary),
+        actions: [
+          TextButton(
+            onPressed: () {
+              unawaited(
+                Clipboard.setData(
+                  const ClipboardData(text: MapSourceConfig.copyrightUrl),
+                ),
+              );
+              Navigator.of(dialogContext).pop();
+              ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+                const SnackBar(content: Text('Copyright link copied')),
+              );
+            },
+            child: const Text('Copy link'),
+          ),
+          TextButton(
+            onPressed: () {
+              Navigator.of(dialogContext).pop();
+              showLicensePage(context: context, applicationName: 'MotoCam');
+            },
+            child: const Text('Licences'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('Close'),
+          ),
+        ],
+      ),
     );
+  }
 
-    final currentPoint = _toLatLng(currentSample);
+  @override
+  Widget build(BuildContext context) {
+    final bounds = _bounds;
+    final polylineLayer = _polylineLayer;
+    if (bounds == null || polylineLayer == null) {
+      // The map subtree (if any) is being removed, and its TileLayer State
+      // disposes the tile provider, so a later map must create a new one.
+      _tileLayer = null;
+      // Reusing the same widget instance lets Flutter skip rebuilding it (and
+      // re-filtering every sample) on each playback tick.
+      final cached = _fallbackView;
+      if (cached != null && cached.height == widget.height) {
+        return cached;
+      }
+      return _fallbackView = StaticMapViewer(
+        telemetryData: widget.telemetryData,
+        width: double.infinity,
+        height: widget.height,
+      );
+    }
+
+    final currentPoint = latLngFromSample(widget.currentSample);
 
     return Container(
-      height: height,
+      height: widget.height,
       decoration: BoxDecoration(
         color: Colors.grey[900],
         borderRadius: BorderRadius.circular(8),
@@ -50,10 +203,16 @@ class RouteMapView extends StatelessWidget {
           children: [
             FlutterMap(
               options: MapOptions(
-                initialCenter: center,
-                initialZoom: _initialZoomForBounds(bounds),
+                initialCameraFit: CameraFit.bounds(
+                  bounds: bounds,
+                  padding: const EdgeInsets.all(20),
+                  maxZoom: 16,
+                ),
+                maxZoom: MapSourceConfig.maxZoom,
+                backgroundColor: Colors.grey.shade900,
                 interactionOptions: const InteractionOptions(
-                  flags: InteractiveFlag.pinchZoom |
+                  flags:
+                      InteractiveFlag.pinchZoom |
                       InteractiveFlag.drag |
                       InteractiveFlag.doubleTapZoom |
                       InteractiveFlag.flingAnimation |
@@ -61,25 +220,12 @@ class RouteMapView extends StatelessWidget {
                 ),
               ),
               children: [
-                TileLayer(
-                  urlTemplate: MapSourceConfig.tileUrlTemplate,
-                  userAgentPackageName: MapSourceConfig.userAgentPackageName,
-                  maxNativeZoom: MapSourceConfig.maxNativeZoom,
-                  maxZoom: MapSourceConfig.maxZoom,
-                ),
-                PolylineLayer(
-                  polylines: [
-                    Polyline(
-                      points: routePoints,
-                      strokeWidth: 4,
-                      color: Colors.lightBlueAccent,
-                    ),
-                  ],
-                ),
+                _obtainTileLayer(),
+                polylineLayer,
                 MarkerLayer(
                   markers: [
                     Marker(
-                      point: routePoints.first,
+                      point: _routePoints.first,
                       width: 26,
                       height: 26,
                       child: const _RouteMarker(
@@ -88,7 +234,7 @@ class RouteMapView extends StatelessWidget {
                       ),
                     ),
                     Marker(
-                      point: routePoints.last,
+                      point: _routePoints.last,
                       width: 26,
                       height: 26,
                       child: const _RouteMarker(
@@ -117,23 +263,57 @@ class RouteMapView extends StatelessWidget {
                   borderRadius: BorderRadius.circular(4),
                 ),
                 child: Text(
-                  'Points: ${routePoints.length}',
+                  'GPS fixes: $_gpsFixCount',
                   style: const TextStyle(color: Colors.white70, fontSize: 10),
                 ),
               ),
             ),
+            if (_tileLoadFailed)
+              Positioned(
+                left: 8,
+                bottom: 8,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 8,
+                    vertical: 4,
+                  ),
+                  decoration: BoxDecoration(
+                    color: Colors.black.withValues(alpha: 0.6),
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                  child: const Text(
+                    'Map tiles unavailable (offline?)',
+                    style: TextStyle(color: Colors.white70, fontSize: 10),
+                  ),
+                ),
+              ),
             Positioned(
               right: 8,
               bottom: 8,
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                decoration: BoxDecoration(
-                  color: Colors.black.withValues(alpha: 0.6),
-                  borderRadius: BorderRadius.circular(4),
-                ),
-                child: const Text(
-                  MapSourceConfig.attribution,
-                  style: TextStyle(color: Colors.white70, fontSize: 10),
+              child: Semantics(
+                button: true,
+                label: 'Map data attribution and licence',
+                child: GestureDetector(
+                  onTap: _showAttributionDetails,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 8,
+                      vertical: 4,
+                    ),
+                    decoration: BoxDecoration(
+                      color: Colors.black.withValues(alpha: 0.6),
+                      borderRadius: BorderRadius.circular(4),
+                    ),
+                    child: const Text(
+                      '${MapSourceConfig.attribution}  ⓘ',
+                      style: TextStyle(
+                        color: Colors.white70,
+                        fontSize: 10,
+                        decoration: TextDecoration.underline,
+                        decorationColor: Colors.white70,
+                      ),
+                    ),
+                  ),
                 ),
               ),
             ),
@@ -141,64 +321,6 @@ class RouteMapView extends StatelessWidget {
         ),
       ),
     );
-  }
-
-  static List<LatLng> _extractPoints(List<TelemetryData> samples) {
-    final points = <LatLng>[];
-    for (final sample in samples) {
-      final point = _toLatLng(sample);
-      if (point != null) {
-        points.add(point);
-      }
-    }
-    return points;
-  }
-
-  static LatLng? _toLatLng(TelemetryData? sample) {
-    if (sample == null) {
-      return null;
-    }
-
-    final lat = sample.latitude;
-    final lon = sample.longitude;
-    if (lat == 0 && lon == 0) {
-      return null;
-    }
-    if (lat < -90 || lat > 90 || lon < -180 || lon > 180) {
-      return null;
-    }
-    return LatLng(lat, lon);
-  }
-
-  static List<LatLng> _downsample(List<LatLng> points) {
-    const maxPoints = 1800;
-    if (points.length <= maxPoints) {
-      return points;
-    }
-
-    final sampled = <LatLng>[];
-    final step = (points.length / maxPoints).ceil();
-    for (var i = 0; i < points.length; i += step) {
-      sampled.add(points[i]);
-    }
-
-    if (sampled.isEmpty || sampled.last != points.last) {
-      sampled.add(points.last);
-    }
-    return sampled;
-  }
-
-  static double _initialZoomForBounds(LatLngBounds bounds) {
-    final latSpan = (bounds.north - bounds.south).abs();
-    final lonSpan = (bounds.east - bounds.west).abs();
-    final span = latSpan > lonSpan ? latSpan : lonSpan;
-
-    if (span <= 0.002) return 16;
-    if (span <= 0.01) return 14;
-    if (span <= 0.05) return 12;
-    if (span <= 0.2) return 10;
-    if (span <= 1.0) return 8;
-    return 6;
   }
 }
 

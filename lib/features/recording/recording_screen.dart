@@ -4,6 +4,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:camera/camera.dart';
 import 'package:geolocator/geolocator.dart';
@@ -16,10 +17,18 @@ import '../../core/services/pip_service.dart';
 import '../camera/providers/camera_provider.dart';
 import '../telemetry/providers/telemetry_provider.dart';
 import '../history/rides_list_screen.dart';
+import 'recording_screen_logic.dart';
 import 'widgets/recording_settings_sheet.dart';
 import 'widgets/start_preflight_sheet.dart';
 
+/// The app's home screen: camera preview, live telemetry and the controls
+/// that start, stop and lock recordings.
+///
+/// It coordinates the recording session across [CameraProvider],
+/// [TelemetryProvider], [AppSettingsProvider], the Android foreground
+/// service and Picture-in-Picture.
 class RecordingScreen extends StatefulWidget {
+  /// Creates the recording screen.
   const RecordingScreen({super.key});
 
   @override
@@ -28,11 +37,8 @@ class RecordingScreen extends StatefulWidget {
 
 class _RecordingScreenState extends State<RecordingScreen>
     with WidgetsBindingObserver {
-  static const Duration _stallRecoveryBackgroundThreshold =
-      Duration(seconds: 8);
-
   DateTime? _lastHandledIncidentAt;
-  DateTime? _lastBackgroundedAt;
+  final BackgroundStallTracker _stallTracker = BackgroundStallTracker();
   final BackgroundRecordingService _backgroundRecordingService =
       BackgroundRecordingService.instance;
   final PipService _pipService = PipService.instance;
@@ -42,8 +48,20 @@ class _RecordingScreenState extends State<RecordingScreen>
   StreamSubscription<Duration>? _recordingTimerSubscription;
   StreamSubscription<bool>? _pipModeSubscription;
   Timer? _deviceStatusTimer;
+  bool _isStartingRecording = false;
   bool _isStoppingRecording = false;
   bool _isApplyingSettings = false;
+  bool _isBootstrapping = false;
+  // Set once a camera initialization attempt (or the bootstrap) finished, so
+  // a failure state is not shown while the first attempt is still pending.
+  bool _cameraInitAttempted = false;
+  // Camera settings saved while recording; applied before the next START.
+  bool _hasPendingCameraSettings = false;
+  // Whether LOCK or an auto-lock was used in the current recording.
+  bool _hasLockedThisSession = false;
+  // Completed on the next AppLifecycleState.resumed after a system settings
+  // screen was opened.
+  Completer<void>? _resumeWaiter;
   bool _isInPipMode = false;
   bool _isRecoveringFromStall = false;
   bool _isFetchingDeviceStatus = false;
@@ -54,18 +72,22 @@ class _RecordingScreenState extends State<RecordingScreen>
   Timer? _inAppNoticeTimer;
   Timer? _blackoutExitHoldTimer;
   bool _blackoutExitTriggered = false;
-  final Stream<int> _pipBlinkStream = Stream<int>.periodic(
-    const Duration(milliseconds: 700),
-    (tick) => tick,
-  ).asBroadcastStream();
   TelemetryProvider? _telemetryProvider;
+  CameraProvider? _cameraProvider;
+  // Recording failure already reacted to (see _onCameraChanged).
+  String? _handledRecordingError;
+  // Gallery export summary already shown.
+  String? _shownGalleryExportMessage;
+  // Segment and lock state of the last ride checkpoint.
+  final RideCheckpointTracker _checkpointTracker = RideCheckpointTracker();
+  bool _isOfferingBatteryExemption = false;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _initializePipBridge();
-    _initializeBackgroundRecordingBridge();
+    unawaited(_initializePipBridge());
+    unawaited(_initializeBackgroundRecordingBridge());
     _startDeviceStatusPolling();
     unawaited(_bootstrapRuntimePrerequisites());
   }
@@ -79,6 +101,104 @@ class _RecordingScreenState extends State<RecordingScreen>
       _telemetryProvider = telemetry;
       _telemetryProvider?.addListener(_onTelemetryChanged);
     }
+    final camera = Provider.of<CameraProvider>(context, listen: false);
+    if (_cameraProvider != camera) {
+      _cameraProvider?.removeListener(_onCameraChanged);
+      _cameraProvider = camera;
+      _cameraProvider?.addListener(_onCameraChanged);
+    }
+  }
+
+  /// Reacts to camera-provider state that needs more than a rebuild: a
+  /// recording failure while recording (stop and save the ride once, then
+  /// tell the rider) and a finished gallery export.
+  void _onCameraChanged() {
+    final camera = _cameraProvider;
+    if (!mounted || camera == null) {
+      return;
+    }
+
+    final error = camera.lastRecordingError;
+    if (error != null &&
+        camera.isRecording &&
+        !camera.isStoppingRecording &&
+        !_isStoppingRecording &&
+        error != _handledRecordingError) {
+      _handledRecordingError = error;
+      // Not tied to frames: this also runs while the app is in the
+      // background, where post-frame callbacks do not.
+      unawaited(Future<void>.microtask(() => _stopAfterRecordingFault(error)));
+    }
+
+    // The provider keeps its last summary and builds a new String for each
+    // export run, so identity (not equality) tells a new run from the one
+    // already shown, including a later run with the same wording.
+    final exportMessage = camera.lastGalleryExportMessage;
+    if (exportMessage != null &&
+        !identical(exportMessage, _shownGalleryExportMessage)) {
+      _shownGalleryExportMessage = exportMessage;
+      unawaited(
+        Future<void>.microtask(() {
+          if (!mounted) {
+            return;
+          }
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(exportMessage),
+              duration: const Duration(seconds: 5),
+            ),
+          );
+        }),
+      );
+    }
+  }
+
+  /// Stops and saves the ride after the camera reported that recording
+  /// cannot continue (failed segment restart, stop failure or low storage),
+  /// then tells the rider why it stopped.
+  Future<void> _stopAfterRecordingFault(String error) async {
+    if (!mounted) {
+      return;
+    }
+    final camera = context.read<CameraProvider>();
+    if (!camera.isRecording) {
+      return;
+    }
+    final telemetry = context.read<TelemetryProvider>();
+    final messenger = ScaffoldMessenger.of(context);
+    final outcome = await _stopRecordingFlow(
+      camera: camera,
+      telemetry: telemetry,
+      messenger: messenger,
+      showSuccessMessage: false,
+    );
+    if (!mounted || outcome == _StopOutcome.skipped) {
+      return;
+    }
+    // A failed save or stop already has its own SnackBar (with Retry for
+    // the telemetry save), so only claim what actually happened.
+    final String result;
+    switch (outcome) {
+      case _StopOutcome.saved:
+        result = ' The ride so far was saved.';
+        break;
+      case _StopOutcome.videoOnly:
+        result = ' The video recorded so far was kept.';
+        break;
+      case _StopOutcome.saveFailed:
+      case _StopOutcome.stopFailed:
+      case _StopOutcome.nothingSaved:
+      case _StopOutcome.skipped:
+        result = '';
+        break;
+    }
+    _showInAppNotice('Recording stopped', duration: const Duration(seconds: 4));
+    messenger.showSnackBar(
+      SnackBar(
+        content: Text('Recording stopped: $error$result'),
+        duration: const Duration(seconds: 10),
+      ),
+    );
   }
 
   void _onTelemetryChanged() {
@@ -89,26 +209,121 @@ class _RecordingScreenState extends State<RecordingScreen>
   }
 
   Future<void> _bootstrapRuntimePrerequisites() async {
-    final settings = context.read<AppSettingsProvider>();
-    if (!settings.isLoaded) {
-      await settings.load();
+    if (_isBootstrapping) {
+      return;
     }
 
-    final permissionAudit = await _permissionService.ensureRequiredPermissions(
-      audioEnabled: settings.audioEnabled,
-    );
+    _isBootstrapping = true;
+    try {
+      final settings = context.read<AppSettingsProvider>();
+      if (!settings.isLoaded) {
+        await settings.load();
+      }
+      if (!mounted) {
+        return;
+      }
+
+      final permissionAudit = await _permissionService
+          .ensureRequiredPermissions(
+            audioEnabled: settings.audioEnabled,
+            galleryExportEnabled: settings.exportLockedClipsToGallery,
+          );
+      if (!mounted) {
+        return;
+      }
+
+      final resolvedAudit = await _handlePermissionAuditResult(
+        permissionAudit,
+        audioEnabled: settings.audioEnabled,
+      );
+      if (!mounted || resolvedAudit.hasBlockingIssues) {
+        return;
+      }
+
+      await _initializeCamera();
+    } finally {
+      _isBootstrapping = false;
+      if (mounted) {
+        setState(() {
+          _cameraInitAttempted = true;
+        });
+      }
+    }
+  }
+
+  /// Retries the permission audit and camera initialization (Retry button
+  /// of the camera-unavailable state).
+  void _retryCameraSetup() {
+    if (_isBootstrapping) {
+      return;
+    }
+    unawaited(_bootstrapRuntimePrerequisites());
+    // The bootstrap sets _isBootstrapping synchronously; rebuild to show the
+    // spinner instead of the failure state.
+    setState(() {});
+  }
+
+  Future<void> _openAppSettingsAndRetry() async {
+    await _openSystemSettingsAndWaitForReturn(openAppSettings);
     if (!mounted) {
       return;
     }
+    _retryCameraSetup();
+  }
 
-    final resolvedAudit = await _handlePermissionAuditResult(
-      permissionAudit,
-      audioEnabled: settings.audioEnabled,
-    );
-    if (!mounted || resolvedAudit.hasBlockingIssues) {
-      return;
+  /// Opens a system settings screen with [open] and waits until the app is
+  /// resumed again (or two minutes pass), so callers re-check permissions or
+  /// location services only after the rider has come back.
+  Future<void> _openSystemSettingsAndWaitForReturn(
+    Future<bool> Function() open,
+  ) async {
+    final waiter = Completer<void>();
+    _resumeWaiter = waiter;
+
+    var opened = false;
+    try {
+      opened = await open();
+    } catch (e) {
+      debugPrint('Opening system settings failed: $e');
     }
 
+    if (opened) {
+      await waiter.future.timeout(const Duration(minutes: 2), onTimeout: () {});
+    }
+    if (identical(_resumeWaiter, waiter)) {
+      _resumeWaiter = null;
+    }
+  }
+
+  /// Re-initializes the camera after the app returns to the foreground while
+  /// idle, when it is not initialized and the permissions it needs are now
+  /// granted (for example after the rider granted them in system settings).
+  void _retryCameraInitAfterResume(CameraProvider camera) {
+    if (_isBootstrapping ||
+        _isStartingRecording ||
+        _isStoppingRecording ||
+        _isApplyingSettings ||
+        _isNavigatingHistory ||
+        camera.isInitialized ||
+        camera.isInitializing ||
+        camera.isStartingRecording ||
+        camera.isStoppingRecording) {
+      return;
+    }
+    unawaited(_initializeCameraIfPermitted());
+  }
+
+  Future<void> _initializeCameraIfPermitted() async {
+    final settings = context.read<AppSettingsProvider>();
+    final cameraStatus = await Permission.camera.status;
+    var granted = AppPermissionService.isPermissionGranted(cameraStatus);
+    if (granted && settings.audioEnabled) {
+      final micStatus = await Permission.microphone.status;
+      granted = AppPermissionService.isPermissionGranted(micStatus);
+    }
+    if (!mounted || !granted) {
+      return;
+    }
     await _initializeCamera();
   }
 
@@ -124,7 +339,7 @@ class _RecordingScreenState extends State<RecordingScreen>
         builder: (dialogContext) {
           final missing = resolvedAudit.missingRequired.join(', ');
           final permanentNote = resolvedAudit.hasPermanentlyDenied
-              ? '\n\nSome permissions are permanently denied. Use Open Settings to enable them.'
+              ? '\n\nPermanently denied: ${resolvedAudit.permanentlyDeniedRequired.join(', ')}. Use Open Settings to enable them.'
               : '';
           return AlertDialog(
             title: const Text('Permissions Required'),
@@ -133,18 +348,21 @@ class _RecordingScreenState extends State<RecordingScreen>
             ),
             actions: [
               TextButton(
-                onPressed: () => Navigator.of(dialogContext)
-                    .pop(_PermissionRecoveryAction.dismiss),
+                onPressed: () => Navigator.of(
+                  dialogContext,
+                ).pop(_PermissionRecoveryAction.dismiss),
                 child: const Text('Later'),
               ),
               TextButton(
-                onPressed: () => Navigator.of(dialogContext)
-                    .pop(_PermissionRecoveryAction.retryRequest),
+                onPressed: () => Navigator.of(
+                  dialogContext,
+                ).pop(_PermissionRecoveryAction.retryRequest),
                 child: const Text('Request Again'),
               ),
               TextButton(
-                onPressed: () => Navigator.of(dialogContext)
-                    .pop(_PermissionRecoveryAction.openSettings),
+                onPressed: () => Navigator.of(
+                  dialogContext,
+                ).pop(_PermissionRecoveryAction.openSettings),
                 child: const Text('Open Settings'),
               ),
             ],
@@ -163,7 +381,7 @@ class _RecordingScreenState extends State<RecordingScreen>
           );
           break;
         case _PermissionRecoveryAction.openSettings:
-          await openAppSettings();
+          await _openSystemSettingsAndWaitForReturn(openAppSettings);
           if (!mounted) {
             return resolvedAudit;
           }
@@ -181,19 +399,31 @@ class _RecordingScreenState extends State<RecordingScreen>
       return resolvedAudit;
     }
 
-    final issues = <String>[
-      ...resolvedAudit.missingRequired,
-      ...resolvedAudit.missingRecommended,
-    ];
+    // The battery-optimization exemption is never requested automatically;
+    // it is offered once, after a saved ride. Stop listing it once that offer
+    // was made.
+    final batteryOffered = await _backgroundRecordingService
+        .hasOfferedBatteryOptimizationExemption();
+    if (!mounted) {
+      return resolvedAudit;
+    }
+    final recommended = resolvedAudit.missingRecommended
+        .where(
+          (issue) =>
+              !(batteryOffered && issue == _batteryOptimizationIssueLabel),
+        )
+        .toList();
+    if (!resolvedAudit.hasBlockingIssues && recommended.isEmpty) {
+      return resolvedAudit;
+    }
+
+    final issues = <String>[...resolvedAudit.missingRequired, ...recommended];
     final message = resolvedAudit.hasBlockingIssues
         ? 'Required permissions missing: ${resolvedAudit.missingRequired.join(', ')}'
         : 'Recommended for reliable background recording: ${issues.join(', ')}';
 
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(message),
-        duration: const Duration(seconds: 4),
-      ),
+      SnackBar(content: Text(message), duration: const Duration(seconds: 4)),
     );
 
     return resolvedAudit;
@@ -234,30 +464,38 @@ class _RecordingScreenState extends State<RecordingScreen>
     }
 
     final camera = context.read<CameraProvider>();
-    if (state == AppLifecycleState.inactive ||
-        state == AppLifecycleState.paused ||
-        state == AppLifecycleState.hidden) {
-      if (_isBlackoutMode) {
-        unawaited(_exitBlackoutMode(camera: camera));
+    if (_isBlackoutMode &&
+        (state == AppLifecycleState.inactive ||
+            state == AppLifecycleState.paused ||
+            state == AppLifecycleState.hidden)) {
+      unawaited(_exitBlackoutMode(camera: camera));
+    }
+
+    final backgroundDuration = _stallTracker.onLifecycleChanged(
+      state,
+      isRecording: camera.isRecording,
+      now: DateTime.now(),
+    );
+    if (state != AppLifecycleState.resumed) {
+      return;
+    }
+
+    final resumeWaiter = _resumeWaiter;
+    if (resumeWaiter != null) {
+      // The flow that opened a system settings screen re-checks itself.
+      _resumeWaiter = null;
+      if (!resumeWaiter.isCompleted) {
+        resumeWaiter.complete();
       }
-      if (camera.isRecording) {
-        _lastBackgroundedAt = DateTime.now();
-      }
       return;
     }
 
-    if (state != AppLifecycleState.resumed || !camera.isRecording) {
+    if (!camera.isRecording) {
+      _retryCameraInitAfterResume(camera);
       return;
     }
 
-    final backgroundedAt = _lastBackgroundedAt;
-    _lastBackgroundedAt = null;
-    if (backgroundedAt == null) {
-      return;
-    }
-
-    final backgroundDuration = DateTime.now().difference(backgroundedAt);
-    if (backgroundDuration < _stallRecoveryBackgroundThreshold) {
+    if (backgroundDuration == null) {
       return;
     }
 
@@ -291,7 +529,7 @@ class _RecordingScreenState extends State<RecordingScreen>
         messenger.showSnackBar(
           SnackBar(
             content: Text(
-              'Video feed may have stalled while screen was off. Recording was auto-recovered after ${backgroundDuration.inSeconds}s in background.',
+              'Recording was restarted after ${backgroundDuration.inSeconds}s in the background in case the video feed stalled.',
             ),
             duration: const Duration(seconds: 4),
           ),
@@ -314,7 +552,7 @@ class _RecordingScreenState extends State<RecordingScreen>
   Future<void> _initializePipBridge() async {
     await _pipService.initialize();
     _isInPipMode = _pipService.isInPipMode;
-    _pipModeSubscription?.cancel();
+    await _pipModeSubscription?.cancel();
     _pipModeSubscription = _pipService.pipModeStream.listen((inPip) {
       if (!mounted) {
         return;
@@ -340,9 +578,10 @@ class _RecordingScreenState extends State<RecordingScreen>
 
   Future<void> _initializeBackgroundRecordingBridge() async {
     await _backgroundRecordingService.initialize();
-    _backgroundEventSubscription?.cancel();
-    _backgroundEventSubscription =
-        _backgroundRecordingService.events.listen((event) async {
+    await _backgroundEventSubscription?.cancel();
+    _backgroundEventSubscription = _backgroundRecordingService.events.listen((
+      event,
+    ) async {
       if (event != BackgroundRecordingEvent.stopRequested || !mounted) {
         return;
       }
@@ -364,9 +603,41 @@ class _RecordingScreenState extends State<RecordingScreen>
     required TelemetryProvider telemetry,
     required ScaffoldMessengerState messenger,
   }) async {
+    if (_isStartingRecording ||
+        _isStoppingRecording ||
+        camera.isRecording ||
+        camera.isStartingRecording ||
+        camera.isStoppingRecording ||
+        telemetry.isPersistingRide) {
+      return;
+    }
+
+    setState(() {
+      _isStartingRecording = true;
+    });
+    try {
+      await _runStartRecordingFlow(
+        camera: camera,
+        telemetry: telemetry,
+        messenger: messenger,
+      );
+    } finally {
+      _isStartingRecording = false;
+      if (mounted) {
+        setState(() {});
+      }
+    }
+  }
+
+  Future<void> _runStartRecordingFlow({
+    required CameraProvider camera,
+    required TelemetryProvider telemetry,
+    required ScaffoldMessengerState messenger,
+  }) async {
     final settings = context.read<AppSettingsProvider>();
     final permissionAudit = await _permissionService.ensureRequiredPermissions(
       audioEnabled: settings.audioEnabled,
+      galleryExportEnabled: settings.exportLockedClipsToGallery,
     );
     if (!mounted) {
       return;
@@ -387,6 +658,17 @@ class _RecordingScreenState extends State<RecordingScreen>
       return;
     }
 
+    if (_hasPendingCameraSettings && !camera.isRecording) {
+      // Settings saved during the previous recording. If they cannot be
+      // applied the camera is left uninitialized and the preflight's
+      // Camera Ready check reports it.
+      _hasPendingCameraSettings = false;
+      await _applySavedCameraSettings(camera: camera, settings: settings);
+      if (!mounted) {
+        return;
+      }
+    }
+
     final preflightApproved = await _showStartPreflightChecklist(
       camera: camera,
       settings: settings,
@@ -400,23 +682,45 @@ class _RecordingScreenState extends State<RecordingScreen>
       return;
     }
 
+    // Gallery export of locked clips is opt-in (off by default).
+    camera.autoExportLockedClipsToGallery = settings.exportLockedClipsToGallery;
     final started = await camera.startRecording();
+    var backgroundProtected = true;
     if (started && camera.isRecording) {
       if (!mounted) {
         return;
       }
-      await _syncSettingsWithCameraCapabilities(
-        settings: settings,
-        camera: camera,
-      );
+      setState(() {
+        _hasLockedThisSession = false;
+      });
+      _handledRecordingError = null;
+      // The previous ride's export summary stays in the provider; mark it as
+      // shown so it is not repeated during this ride.
+      _shownGalleryExportMessage = camera.lastGalleryExportMessage;
+      _checkpointTracker.reset();
 
-      telemetry.startRideSession();
-      await _backgroundRecordingService.startForegroundRecording(
-        elapsed: Duration.zero,
-      );
-      _recordingTimerSubscription?.cancel();
+      // One zero point for the video segment timeline and the telemetry
+      // samples.
+      telemetry.startRideSession(startedAt: camera.recordingStartedAt);
+      try {
+        backgroundProtected = await _backgroundRecordingService
+            .startForegroundRecording(elapsed: Duration.zero);
+      } catch (e) {
+        backgroundProtected = false;
+        debugPrint('Starting the foreground recording service failed: $e');
+      }
+      await _recordingTimerSubscription?.cancel();
       _recordingTimerSubscription = camera.timerStream.listen((elapsed) {
-        _backgroundRecordingService.updateForegroundRecording(elapsed: elapsed);
+        unawaited(
+          _backgroundRecordingService
+              .updateForegroundRecording(elapsed: elapsed)
+              .catchError((Object e) {
+                debugPrint('Updating the recording notification failed: $e');
+              }),
+        );
+        // Segment registration does not notify listeners, so new segments
+        // and locks are picked up here, about once per second.
+        _checkpointRideIfChanged(camera);
       });
     }
 
@@ -424,8 +728,89 @@ class _RecordingScreenState extends State<RecordingScreen>
       return;
     }
 
-    _showInAppNotice(
-      started ? 'REC started' : 'Start failed. Try lower quality.',
+    if (!started) {
+      final reason = camera.lastRecordingError;
+      if (reason != null) {
+        messenger.showSnackBar(
+          SnackBar(
+            content: Text('Recording did not start: $reason'),
+            duration: const Duration(seconds: 6),
+          ),
+        );
+      }
+      _showInAppNotice(
+        reason != null ? 'Start refused' : 'Start failed. Try lower quality.',
+      );
+      return;
+    }
+
+    _showInAppNotice('REC started');
+    if (!backgroundProtected) {
+      messenger.showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Background protection unavailable: recording may stop if the '
+            'app is in the background or the screen turns off.',
+          ),
+          duration: Duration(seconds: 6),
+        ),
+      );
+    }
+  }
+
+  /// The recording settings stored with the ride: what the rider requested
+  /// and what the camera applied.
+  Map<String, dynamic> _recordingSettingsSnapshot({
+    required CameraProvider camera,
+    required AppSettingsProvider settings,
+  }) {
+    return <String, dynamic>{
+      'requestedResolution': settings.recordingResolution,
+      'requestedFps': settings.recordingFps,
+      'requestedBitrateMbps': settings.videoBitrateMbps,
+      'requestedSegmentDurationSeconds': settings.segmentDurationSeconds,
+      'requestedLoopSegmentCount': settings.loopSegmentCount,
+      'requestedAudioEnabled': settings.audioEnabled,
+      'requestedCameraName': settings.selectedCameraName,
+      'requestedIncidentSensitivity': settings.incidentSensitivity.name,
+      'requestedSpeedRefreshMs': settings.speedRefreshMs,
+      'appliedResolution': CameraProvider.resolutionForPreset(
+        camera.resolutionPreset,
+      ),
+      'appliedFps': camera.recordingFps,
+      // null where the platform ignores the requested bitrate (Android).
+      'appliedBitrateMbps': camera.appliedVideoBitrateMbps,
+      'appliedAudioEnabled': camera.audioEnabled,
+      'appliedSegmentDurationSeconds': camera.segmentDurationSeconds,
+      'appliedLoopSegmentCount': camera.maxRollingSegments,
+      'appliedCameraName': camera.activeCameraName,
+    };
+  }
+
+  /// Writes a ride checkpoint when the session gained a segment or a lock
+  /// since the last one, so a crash or kill mid-ride keeps the ride JSON.
+  void _checkpointRideIfChanged(CameraProvider camera) {
+    if (!mounted || !camera.isRecording || camera.isStoppingRecording) {
+      return;
+    }
+    final segmentPaths = camera.lastSessionSegmentPaths;
+    if (!_checkpointTracker.shouldCheckpoint(
+      segmentPaths,
+      camera.lockedSegmentCount,
+    )) {
+      return;
+    }
+    final telemetry = context.read<TelemetryProvider>();
+    unawaited(
+      telemetry.checkpointRideSession(
+        segmentPaths: segmentPaths,
+        lockedSegmentPaths: camera.lockedSegmentPaths,
+        segmentTimeline: camera.lastSessionSegmentTimeline,
+        recordingSettings: _recordingSettingsSnapshot(
+          camera: camera,
+          settings: context.read<AppSettingsProvider>(),
+        ),
+      ),
     );
   }
 
@@ -451,9 +836,7 @@ class _RecordingScreenState extends State<RecordingScreen>
     });
   }
 
-  Future<void> _enterBlackoutMode({
-    required CameraProvider camera,
-  }) async {
+  Future<void> _enterBlackoutMode({required CameraProvider camera}) async {
     if (_isBlackoutMode || !camera.isRecording) {
       return;
     }
@@ -474,9 +857,7 @@ class _RecordingScreenState extends State<RecordingScreen>
     _showInAppNotice('Blackout on. Hold 2s anywhere to exit.');
   }
 
-  Future<void> _exitBlackoutMode({
-    required CameraProvider camera,
-  }) async {
+  Future<void> _exitBlackoutMode({required CameraProvider camera}) async {
     if (!_isBlackoutMode) {
       return;
     }
@@ -505,6 +886,7 @@ class _RecordingScreenState extends State<RecordingScreen>
     _blackoutExitTriggered = false;
     _blackoutExitHoldTimer = Timer(const Duration(seconds: 2), () {
       _blackoutExitTriggered = true;
+      unawaited(HapticFeedback.mediumImpact());
       unawaited(_exitBlackoutMode(camera: camera));
     });
   }
@@ -536,14 +918,12 @@ class _RecordingScreenState extends State<RecordingScreen>
       (check) =>
           check.isBlocking && check.status == StartPreflightStatus.failed,
     );
-    final allRequirementsMet = checks.every(
-      (check) => check.status == StartPreflightStatus.ok,
-    );
-    if (allRequirementsMet && !hasBlockingIssue) {
+    if (!startPreflightNeedsSheet(checks)) {
       return true;
     }
 
-    final proceed = await showModalBottomSheet<bool>(
+    final proceed =
+        await showModalBottomSheet<bool>(
           context: context,
           isScrollControlled: true,
           backgroundColor: const Color(0xFF111111),
@@ -573,13 +953,15 @@ class _RecordingScreenState extends State<RecordingScreen>
     final checks = <StartPreflightCheck>[];
 
     final cameraPermissionStatus = await Permission.camera.status;
-    final hasCameraPermission =
-        cameraPermissionStatus.isGranted || cameraPermissionStatus.isLimited;
+    final hasCameraPermission = AppPermissionService.isPermissionGranted(
+      cameraPermissionStatus,
+    );
     checks.add(
       StartPreflightCheck(
         title: 'Camera Permission',
-        detail:
-            hasCameraPermission ? 'Granted' : 'Camera permission is required',
+        detail: hasCameraPermission
+            ? 'Granted'
+            : 'Camera permission is required',
         status: hasCameraPermission
             ? StartPreflightStatus.ok
             : StartPreflightStatus.failed,
@@ -589,7 +971,7 @@ class _RecordingScreenState extends State<RecordingScreen>
 
     if (settings.audioEnabled) {
       final micStatus = await Permission.microphone.status;
-      final micGranted = micStatus.isGranted || micStatus.isLimited;
+      final micGranted = AppPermissionService.isPermissionGranted(micStatus);
       checks.add(
         StartPreflightCheck(
           title: 'Microphone Permission',
@@ -603,8 +985,9 @@ class _RecordingScreenState extends State<RecordingScreen>
     }
 
     final locationPermissionStatus = await Permission.locationWhenInUse.status;
-    final hasLocationPermission = locationPermissionStatus.isGranted ||
-        locationPermissionStatus.isLimited;
+    final hasLocationPermission = AppPermissionService.isPermissionGranted(
+      locationPermissionStatus,
+    );
     checks.add(
       StartPreflightCheck(
         title: 'Location Permission',
@@ -632,7 +1015,8 @@ class _RecordingScreenState extends State<RecordingScreen>
       ),
     );
 
-    final cameraReady = camera.isInitialized &&
+    final cameraReady =
+        camera.isInitialized &&
         camera.controller != null &&
         camera.controller!.value.isInitialized;
     checks.add(
@@ -663,8 +1047,9 @@ class _RecordingScreenState extends State<RecordingScreen>
     );
 
     if (Platform.isAndroid) {
-      final notificationsGranted =
-          (await Permission.notification.status).isGranted;
+      final notificationsGranted = AppPermissionService.isPermissionGranted(
+        await Permission.notification.status,
+      );
       checks.add(
         StartPreflightCheck(
           title: 'Foreground Notification',
@@ -678,8 +1063,14 @@ class _RecordingScreenState extends State<RecordingScreen>
         ),
       );
 
-      final ignoresBatteryOptimization =
-          await _backgroundRecordingService.isIgnoringBatteryOptimizations();
+      final ignoresBatteryOptimization = await _backgroundRecordingService
+          .isIgnoringBatteryOptimizations();
+      // After the one-time exemption offer the rider has decided, so the row
+      // is still listed but no longer opens the sheet on every START.
+      final batteryOfferShown =
+          !ignoresBatteryOptimization &&
+          await _backgroundRecordingService
+              .hasOfferedBatteryOptimizationExemption();
       checks.add(
         StartPreflightCheck(
           title: 'Battery Optimization Exemption',
@@ -689,6 +1080,21 @@ class _RecordingScreenState extends State<RecordingScreen>
           status: ignoresBatteryOptimization
               ? StartPreflightStatus.ok
               : StartPreflightStatus.warning,
+          isBlocking: false,
+          opensSheet: !batteryOfferShown,
+        ),
+      );
+    }
+
+    if (mounted &&
+        !context.read<TelemetryProvider>().isIncidentDetectionAvailable) {
+      checks.add(
+        const StartPreflightCheck(
+          title: 'Incident Detection',
+          detail:
+              'Unavailable: no motion sensor. Clips are not auto-locked; '
+              'use LOCK.',
+          status: StartPreflightStatus.warning,
           isBlocking: false,
         ),
       );
@@ -769,7 +1175,8 @@ class _RecordingScreenState extends State<RecordingScreen>
       return false;
     }
 
-    final shouldOpenSettings = await showDialog<bool>(
+    final shouldOpenSettings =
+        await showDialog<bool>(
           context: context,
           builder: (dialogContext) {
             return AlertDialog(
@@ -804,7 +1211,7 @@ class _RecordingScreenState extends State<RecordingScreen>
       return false;
     }
 
-    await Geolocator.openLocationSettings();
+    await _openSystemSettingsAndWaitForReturn(Geolocator.openLocationSettings);
     if (!mounted) {
       return false;
     }
@@ -825,76 +1232,257 @@ class _RecordingScreenState extends State<RecordingScreen>
     return false;
   }
 
-  Future<void> _stopRecordingFlow({
+  /// Stops the recording, saves the ride and reports what was saved.
+  Future<_StopOutcome> _stopRecordingFlow({
     required CameraProvider camera,
     required TelemetryProvider telemetry,
     required ScaffoldMessengerState messenger,
     bool showSuccessMessage = true,
   }) async {
     if (_isStoppingRecording) {
-      return;
+      return _StopOutcome.skipped;
     }
 
-    _isStoppingRecording = true;
+    if (!camera.isRecording) {
+      // Nothing to save, e.g. a notification Stop that arrives after the
+      // ride was already stopped; only make sure the service is gone.
+      await _stopForegroundServiceSafely();
+      return _StopOutcome.skipped;
+    }
+
+    // Taken before stopping (and before the stopping flag is set) so the
+    // fallback save below keeps it as well.
+    final recordingSettings = _recordingSettingsSnapshot(
+      camera: camera,
+      settings: context.read<AppSettingsProvider>(),
+    );
+    setState(() {
+      _isStoppingRecording = true;
+    });
+    String? telemetryPath;
+    var persistAttempted = false;
+    Object? stopError;
     try {
-      final settings = context.read<AppSettingsProvider>();
-      final recordingSettings = <String, dynamic>{
-        'requestedResolution': settings.recordingResolution,
-        'requestedFps': settings.recordingFps,
-        'requestedBitrateMbps': settings.videoBitrateMbps,
-        'requestedSegmentDurationSeconds': settings.segmentDurationSeconds,
-        'requestedLoopSegmentCount': settings.loopSegmentCount,
-        'requestedAudioEnabled': settings.audioEnabled,
-        'requestedCameraName': settings.selectedCameraName,
-        'requestedIncidentSensitivity': settings.incidentSensitivity.name,
-        'requestedSpeedRefreshMs': settings.speedRefreshMs,
-        'appliedResolution':
-            AppSettingsProvider.fromResolutionPreset(camera.resolutionPreset),
-        'appliedFps': camera.recordingFps,
-        'appliedBitrateMbps': camera.videoBitrateMbps,
-        'appliedAudioEnabled': camera.audioEnabled,
-        'appliedSegmentDurationSeconds': camera.segmentDurationSeconds,
-        'appliedLoopSegmentCount': camera.maxRollingSegments,
-        'appliedCameraName': camera.activeCameraName,
-      };
-
-      _recordingTimerSubscription?.cancel();
+      await _recordingTimerSubscription?.cancel();
       _recordingTimerSubscription = null;
-      await _backgroundRecordingService.stopForegroundRecording();
 
+      // The foreground service (and its wake lock) stays up until the ride
+      // is saved; it is stopped in the finally block below.
       final videoPath = await camera.stopRecording();
       final sessionSegmentPaths = camera.lastSessionSegmentPaths;
-      final resolvedVideoPath = videoPath ??
+      final resolvedVideoPath =
+          videoPath ??
           (sessionSegmentPaths.isNotEmpty ? sessionSegmentPaths.last : null);
-      if (!mounted) {
-        return;
-      }
 
       if (resolvedVideoPath != null) {
-        final telemetryPath = await telemetry.stopRideSessionAndPersist(
+        persistAttempted = true;
+        telemetryPath = await telemetry.stopRideSessionAndPersist(
           resolvedVideoPath,
           segmentPaths: sessionSegmentPaths,
           lockedSegmentPaths: camera.lockedSegmentPaths,
           segmentTimeline: camera.lastSessionSegmentTimeline,
           recordingSettings: recordingSettings,
         );
-        if (!mounted || !showSuccessMessage) {
-          return;
-        }
-
-        _showInAppNotice(
-          telemetryPath == null ? 'Recording saved' : 'Recording + telemetry saved',
-        );
       } else {
         telemetry.cancelRideSession();
       }
-
-      if (_isBlackoutMode) {
-        await _exitBlackoutMode(camera: camera);
+    } catch (e) {
+      stopError = e;
+      debugPrint('Stopping the recording failed: $e');
+      // Do not leave the telemetry ride active (the next START would
+      // discard it): save it with whatever segments were registered.
+      if (telemetry.isRideActive) {
+        final segments = camera.lastSessionSegmentPaths;
+        if (segments.isNotEmpty) {
+          persistAttempted = true;
+          try {
+            telemetryPath = await telemetry.stopRideSessionAndPersist(
+              segments.last,
+              segmentPaths: segments,
+              lockedSegmentPaths: camera.lockedSegmentPaths,
+              segmentTimeline: camera.lastSessionSegmentTimeline,
+              recordingSettings: recordingSettings,
+            );
+          } catch (persistError) {
+            debugPrint(
+              'Saving the ride after a stop failure failed: '
+              '$persistError',
+            );
+          }
+        } else {
+          telemetry.cancelRideSession();
+        }
       }
     } finally {
+      await _stopForegroundServiceSafely();
+      // Always leave blackout, also after an error or a notification Stop.
+      if (_isBlackoutMode && mounted) {
+        try {
+          await _exitBlackoutMode(camera: camera);
+        } catch (e) {
+          debugPrint('Leaving blackout after stop failed: $e');
+        }
+      }
       _isStoppingRecording = false;
+      if (mounted) {
+        setState(() {});
+      }
     }
+
+    final saveFailed =
+        persistAttempted &&
+        telemetryPath == null &&
+        telemetry.lastPersistError != null;
+    final _StopOutcome outcome;
+    if (telemetryPath != null) {
+      outcome = _StopOutcome.saved;
+    } else if (saveFailed) {
+      outcome = _StopOutcome.saveFailed;
+    } else if (stopError != null) {
+      outcome = _StopOutcome.stopFailed;
+    } else if (persistAttempted) {
+      outcome = _StopOutcome.videoOnly;
+    } else {
+      outcome = _StopOutcome.nothingSaved;
+    }
+
+    if (!mounted) {
+      return outcome;
+    }
+
+    if (stopError != null) {
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text('Stopping the recording failed: $stopError'),
+          duration: const Duration(seconds: 6),
+        ),
+      );
+      return outcome;
+    }
+
+    if (saveFailed) {
+      _showTelemetrySaveFailure(telemetry: telemetry, messenger: messenger);
+      return outcome;
+    }
+
+    if (!showSuccessMessage || !persistAttempted) {
+      return outcome;
+    }
+    _showInAppNotice(
+      telemetryPath == null ? 'Recording saved' : 'Recording + telemetry saved',
+    );
+    if (telemetryPath != null) {
+      unawaited(_maybeOfferBatteryOptimizationExemption());
+    }
+    return outcome;
+  }
+
+  /// Tells the rider the ride JSON could not be saved and offers a retry.
+  /// The video segments are already on disk; the provider keeps the ride in
+  /// memory for [TelemetryProvider.retryPendingPersist].
+  void _showTelemetrySaveFailure({
+    required TelemetryProvider telemetry,
+    required ScaffoldMessengerState messenger,
+  }) {
+    messenger.showSnackBar(
+      SnackBar(
+        content: const Text(
+          'Telemetry could not be saved. The video was kept.',
+        ),
+        duration: const Duration(seconds: 20),
+        action: SnackBarAction(
+          label: 'Retry',
+          onPressed: () {
+            unawaited(() async {
+              final path = await telemetry.retryPendingPersist();
+              if (path != null) {
+                messenger.showSnackBar(
+                  const SnackBar(content: Text('Telemetry saved')),
+                );
+              } else if (telemetry.lastPersistError != null) {
+                _showTelemetrySaveFailure(
+                  telemetry: telemetry,
+                  messenger: messenger,
+                );
+              }
+            }());
+          },
+        ),
+      ),
+    );
+  }
+
+  /// Offers the battery-optimization exemption at most once ever, after a
+  /// saved ride, behind a dialog the rider can decline.
+  Future<void> _maybeOfferBatteryOptimizationExemption() async {
+    if (_isOfferingBatteryExemption) {
+      return;
+    }
+    _isOfferingBatteryExemption = true;
+    try {
+      final shouldOffer = await _backgroundRecordingService
+          .shouldOfferBatteryOptimizationExemption();
+      if (!shouldOffer || !mounted) {
+        return;
+      }
+      await _backgroundRecordingService
+          .markBatteryOptimizationExemptionOffered();
+      if (!mounted) {
+        return;
+      }
+      final accepted =
+          await showDialog<bool>(
+            context: context,
+            builder: (dialogContext) {
+              return AlertDialog(
+                title: const Text('Keep recording with the screen off?'),
+                content: const Text(
+                  'Android battery optimization can stop MotoCam while the '
+                  'screen is off or the app is in the background. You can '
+                  'exempt MotoCam so long rides keep recording. This uses '
+                  'more battery, and you can change it later in system '
+                  'settings. MotoCam asks only once.',
+                ),
+                actions: [
+                  TextButton(
+                    onPressed: () => Navigator.of(dialogContext).pop(false),
+                    child: const Text('Not now'),
+                  ),
+                  TextButton(
+                    onPressed: () => Navigator.of(dialogContext).pop(true),
+                    child: const Text('Open setting'),
+                  ),
+                ],
+              );
+            },
+          ) ??
+          false;
+      if (!accepted || !mounted) {
+        return;
+      }
+      await _backgroundRecordingService.requestIgnoreBatteryOptimizations();
+    } catch (e) {
+      debugPrint('Battery optimization offer failed: $e');
+    } finally {
+      _isOfferingBatteryExemption = false;
+    }
+  }
+
+  Future<void> _stopForegroundServiceSafely() async {
+    try {
+      await _backgroundRecordingService.stopForegroundRecording();
+    } catch (e) {
+      debugPrint('Stopping the foreground recording service failed: $e');
+    }
+  }
+
+  void _markLockedThisSession() {
+    if (_hasLockedThisSession || !mounted) {
+      return;
+    }
+    setState(() {
+      _hasLockedThisSession = true;
+    });
   }
 
   void _handleIncidentAutoLock({
@@ -912,17 +1500,29 @@ class _RecordingScreenState extends State<RecordingScreen>
     }
 
     _lastHandledIncidentAt = detectedAt;
+    // Lock immediately: frames (and post-frame callbacks) stop while the app
+    // is hidden or paused, but recording and incident detection continue.
+    final registeredSegments = camera.lastSessionSegmentPaths.length;
+    camera.markIncident(
+      protectPastSegments: 2,
+      protectCurrentSegment: true,
+      reason: 'auto-crash',
+    );
+    _markLockedThisSession();
+    _checkpointRideIfChanged(camera);
+
+    // Only the feedback waits for the next frame.
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || !camera.isRecording) {
+      if (!mounted) {
         return;
       }
-
-      camera.markIncident(
-        protectPastSegments: 2,
-        protectCurrentSegment: true,
-        reason: 'auto-crash',
+      unawaited(HapticFeedback.heavyImpact());
+      _showInAppNotice(
+        incidentLockNotice(
+          registeredSegments: registeredSegments,
+          automatic: true,
+        ),
       );
-      _showInAppNotice('Incident detected. Segments locked.');
     });
   }
 
@@ -935,6 +1535,8 @@ class _RecordingScreenState extends State<RecordingScreen>
       await settingsProvider.load();
     }
 
+    // Initialization applies every saved camera setting.
+    _hasPendingCameraSettings = false;
     await cameraProvider.initializeCamera(
       resolutionPreset: cameraProvider.resolvePresetForRequestedResolution(
         settingsProvider.recordingResolution,
@@ -947,10 +1549,11 @@ class _RecordingScreenState extends State<RecordingScreen>
       maxRollingSegments: settingsProvider.loopSegmentCount,
     );
 
-    await _syncSettingsWithCameraCapabilities(
-      settings: settingsProvider,
-      camera: cameraProvider,
-    );
+    if (mounted) {
+      setState(() {
+        _cameraInitAttempted = true;
+      });
+    }
 
     telemetryProvider.setSpeedUiRefreshInterval(
       Duration(milliseconds: settingsProvider.speedRefreshMs),
@@ -967,22 +1570,24 @@ class _RecordingScreenState extends State<RecordingScreen>
     await telemetryProvider.initialize();
   }
 
-  Future<void> _syncSettingsWithCameraCapabilities({
-    required AppSettingsProvider settings,
+  // Re-initializes the camera with the saved settings. The rider's saved
+  // resolution and FPS are never overwritten with what the device
+  // negotiated; the profile bar shows the applied values when they differ.
+  Future<bool> _applySavedCameraSettings({
     required CameraProvider camera,
-  }) async {
-    if (!camera.isInitialized) {
-      return;
-    }
-
-    final activeResolution =
-        AppSettingsProvider.fromResolutionPreset(camera.resolutionPreset);
-    if (settings.recordingResolution != activeResolution) {
-      await settings.updateRecordingResolution(activeResolution);
-    }
-    if (settings.recordingFps != camera.recordingFps) {
-      await settings.updateRecordingFps(camera.recordingFps);
-    }
+    required AppSettingsProvider settings,
+  }) {
+    return camera.applyRecordingSettings(
+      resolutionPreset: camera.resolvePresetForRequestedResolution(
+        settings.recordingResolution,
+      ),
+      recordingFps: settings.recordingFps,
+      videoBitrateBps: settings.videoBitrateMbps * 1000 * 1000,
+      audioEnabled: settings.audioEnabled,
+      preferredCameraName: settings.selectedCameraName,
+      segmentDurationSeconds: settings.segmentDurationSeconds,
+      maxRollingSegments: settings.loopSegmentCount,
+    );
   }
 
   Future<void> _handleBackPressWhileRecording() async {
@@ -994,9 +1599,7 @@ class _RecordingScreenState extends State<RecordingScreen>
     _showInAppNotice('Recording active. Stop first to exit.');
   }
 
-  Future<void> _openRideHistory({
-    required CameraProvider camera,
-  }) async {
+  Future<void> _openRideHistory({required CameraProvider camera}) async {
     if (_isNavigatingHistory || camera.isRecording) {
       return;
     }
@@ -1007,12 +1610,13 @@ class _RecordingScreenState extends State<RecordingScreen>
       if (!mounted) {
         return;
       }
+      // GPS and sensors are not needed while history is open; the
+      // _initializeCamera call on return resumes tracking.
+      context.read<TelemetryProvider>().pauseTracking();
 
-      await Navigator.of(context).push(
-        MaterialPageRoute(
-          builder: (_) => const RidesListScreen(),
-        ),
-      );
+      await Navigator.of(
+        context,
+      ).push(MaterialPageRoute(builder: (_) => const RidesListScreen()));
 
       if (!mounted || camera.isRecording) {
         return;
@@ -1021,6 +1625,11 @@ class _RecordingScreenState extends State<RecordingScreen>
       await _initializeCamera();
     } finally {
       _isNavigatingHistory = false;
+      // The preview hides the camera-unavailable state while history is
+      // open; rebuild so a failed re-initialization shows Retry.
+      if (mounted) {
+        setState(() {});
+      }
     }
   }
 
@@ -1052,9 +1661,10 @@ class _RecordingScreenState extends State<RecordingScreen>
                             _buildControls(),
                           ],
                         ),
-                        _buildInAppNoticeOverlay(),
                         if (_isBlackoutMode)
                           _buildBlackoutOverlay(camera: camera),
+                        // Drawn last so notices stay visible in blackout.
+                        _buildInAppNoticeOverlay(),
                       ],
                     ),
                   ),
@@ -1097,17 +1707,69 @@ class _RecordingScreenState extends State<RecordingScreen>
     );
   }
 
-  Widget _buildBlackoutOverlay({
-    required CameraProvider camera,
-  }) {
+  Widget _buildBlackoutOverlay({required CameraProvider camera}) {
+    final dimTextStyle = TextStyle(
+      color: Colors.white.withValues(alpha: 0.3),
+      fontSize: 11,
+      fontWeight: FontWeight.w600,
+    );
+
     return Positioned.fill(
-      child: GestureDetector(
-        behavior: HitTestBehavior.opaque,
-        onTapDown: (_) => _startBlackoutExitHold(camera: camera),
-        onTapUp: (_) => _endBlackoutExitHold(),
-        onTapCancel: _endBlackoutExitHold,
-        child: Container(
-          color: Colors.black,
+      child: Semantics(
+        label: 'Blackout mode. Recording continues.',
+        hint: 'Touch and hold for 2 seconds to exit blackout',
+        onLongPress: () => unawaited(_exitBlackoutMode(camera: camera)),
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTapDown: (_) => _startBlackoutExitHold(camera: camera),
+          onTapUp: (_) => _endBlackoutExitHold(),
+          onTapCancel: _endBlackoutExitHold,
+          child: ColoredBox(
+            color: Colors.black,
+            child: Align(
+              alignment: Alignment.bottomCenter,
+              child: Padding(
+                padding: const EdgeInsets.only(bottom: 24),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Container(
+                          width: 6,
+                          height: 6,
+                          margin: const EdgeInsets.only(right: 6),
+                          decoration: BoxDecoration(
+                            color: Colors.red.withValues(alpha: 0.5),
+                            shape: BoxShape.circle,
+                          ),
+                        ),
+                        StreamBuilder<Duration>(
+                          stream: camera.timerStream,
+                          initialData: camera.elapsedTime,
+                          builder: (context, snapshot) {
+                            return Text(
+                              'REC ${formatRecordingElapsed(snapshot.data ?? Duration.zero)}',
+                              style: dimTextStyle,
+                            );
+                          },
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      'Hold 2 s anywhere to exit',
+                      style: dimTextStyle.copyWith(
+                        fontSize: 10,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
         ),
       ),
     );
@@ -1120,35 +1782,15 @@ class _RecordingScreenState extends State<RecordingScreen>
         child: Center(
           child: Padding(
             padding: const EdgeInsets.all(12),
-            child: Consumer2<CameraProvider, TelemetryProvider>(
-              builder: (context, camera, telemetry, _) {
+            child: Consumer<CameraProvider>(
+              builder: (context, camera, _) {
                 return Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        if (camera.isRecording)
-                          StreamBuilder<int>(
-                            stream: _pipBlinkStream,
-                            builder: (context, snapshot) {
-                              final tick = snapshot.data ?? 0;
-                              final opacity = tick.isEven ? 1.0 : 0.25;
-                              return AnimatedOpacity(
-                                opacity: opacity,
-                                duration: const Duration(milliseconds: 180),
-                                child: Container(
-                                  width: 8,
-                                  height: 8,
-                                  margin: const EdgeInsets.only(right: 6),
-                                  decoration: const BoxDecoration(
-                                    color: Colors.redAccent,
-                                    shape: BoxShape.circle,
-                                  ),
-                                ),
-                              );
-                            },
-                          ),
+                        if (camera.isRecording) const _BlinkingRecDot(),
                         Text(
                           camera.isRecording ? 'REC' : 'IDLE',
                           style: TextStyle(
@@ -1167,12 +1809,9 @@ class _RecordingScreenState extends State<RecordingScreen>
                       stream: camera.timerStream,
                       initialData: camera.elapsedTime,
                       builder: (context, snapshot) {
-                        final duration = snapshot.data ?? Duration.zero;
-                        final hours = duration.inHours;
-                        final minutes = duration.inMinutes.remainder(60);
-                        final seconds = duration.inSeconds.remainder(60);
-                        final text =
-                            '${hours.toString().padLeft(2, '0')}:${minutes.toString().padLeft(2, '0')}:${seconds.toString().padLeft(2, '0')}';
+                        final text = formatRecordingElapsed(
+                          snapshot.data ?? Duration.zero,
+                        );
                         return Text(
                           text,
                           style: const TextStyle(
@@ -1236,7 +1875,15 @@ class _RecordingScreenState extends State<RecordingScreen>
               ),
               IconButton(
                 icon: const Icon(Icons.settings, color: Colors.white),
-                onPressed: _isApplyingSettings ? null : _openSettingsSheet,
+                tooltip: 'Settings',
+                onPressed:
+                    _isApplyingSettings ||
+                        _isStartingRecording ||
+                        _isStoppingRecording ||
+                        camera.isStartingRecording ||
+                        camera.isStoppingRecording
+                    ? null
+                    : _openSettingsSheet,
               ),
             ],
           ),
@@ -1260,14 +1907,15 @@ class _RecordingScreenState extends State<RecordingScreen>
       return;
     }
 
-    final initialFpsOptions =
-        await cameraProvider.getSupportedFpsOptionsForPreset(
-      preset: cameraProvider.resolvePresetForRequestedResolution(
-        settings.recordingResolution,
-      ),
+    final initialFpsOptions = await cameraProvider
+        .getSupportedFpsOptionsForPreset(
+          preset: cameraProvider.resolvePresetForRequestedResolution(
+            settings.recordingResolution,
+          ),
+        );
+    final initialCameraOptions = await cameraProvider.getAvailableCameras(
+      refresh: true,
     );
-    final initialCameraOptions =
-        await cameraProvider.getAvailableCameras(refresh: true);
     final initialUnsupportedPresets =
         cameraProvider.knownUnsupportedResolutionPresets;
 
@@ -1320,6 +1968,9 @@ class _RecordingScreenState extends State<RecordingScreen>
       );
       await settings.updateLoopSegmentCount(result.loopSegmentCount);
       await settings.updateIncidentSensitivity(result.incidentSensitivity);
+      await settings.updateExportLockedClipsToGallery(
+        result.exportLockedClipsToGallery,
+      );
 
       if (!mounted) {
         return;
@@ -1337,8 +1988,9 @@ class _RecordingScreenState extends State<RecordingScreen>
       final camera = context.read<CameraProvider>();
       final wasRecording = camera.isRecording;
       final applied = await camera.applyRecordingSettings(
-        resolutionPreset:
-            camera.resolvePresetForRequestedResolution(result.resolution),
+        resolutionPreset: camera.resolvePresetForRequestedResolution(
+          result.resolution,
+        ),
         recordingFps: result.fps,
         videoBitrateBps: result.bitrateMbps * 1000 * 1000,
         audioEnabled: result.audioEnabled,
@@ -1347,33 +1999,31 @@ class _RecordingScreenState extends State<RecordingScreen>
         maxRollingSegments: result.loopSegmentCount,
       );
 
-      if (applied) {
-        await _syncSettingsWithCameraCapabilities(
-          settings: settings,
-          camera: camera,
-        );
+      if (!applied && wasRecording) {
+        _hasPendingCameraSettings = true;
       }
 
       if (!mounted) {
         return;
       }
 
-      final appliedResolution =
-          AppSettingsProvider.fromResolutionPreset(camera.resolutionPreset);
+      final appliedResolution = CameraProvider.resolutionForPreset(
+        camera.resolutionPreset,
+      );
       final segmentDurationLabel = AppSettingsProvider.segmentDurationLabel(
         result.segmentDurationSeconds,
       );
       final message = applied
           ? (appliedResolution != result.resolution
-              ? 'Requested ${result.resolution}p is not supported on this device. Applied ${appliedResolution}p at ${camera.recordingFps} FPS, ${result.bitrateMbps}Mbps, $segmentDurationLabel, loop ${result.loopSegmentCount} segments'
-              : 'Settings applied: ${appliedResolution}p, ${camera.recordingFps} FPS, ${result.bitrateMbps}Mbps, $segmentDurationLabel, loop ${result.loopSegmentCount} segments')
+                ? 'Requested ${result.resolution}p is not supported on this device. Applied ${appliedResolution}p at ${camera.recordingFps} FPS, ${result.bitrateMbps}Mbps, $segmentDurationLabel, loop ${result.loopSegmentCount} segments'
+                : 'Settings applied: ${appliedResolution}p, ${camera.recordingFps} FPS, ${result.bitrateMbps}Mbps, $segmentDurationLabel, loop ${result.loopSegmentCount} segments')
           : (wasRecording
-              ? 'Stop recording first to apply camera settings'
-              : 'Unable to initialize camera with the selected settings on this device.');
+                ? 'Camera settings saved. They apply to the next recording.'
+                : 'Unable to initialize camera with the selected settings on this device.');
 
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(message)),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(message)));
     } finally {
       if (mounted) {
         setState(() {
@@ -1384,19 +2034,35 @@ class _RecordingScreenState extends State<RecordingScreen>
   }
 
   Widget _buildActiveProfileBar() {
-    return Consumer<AppSettingsProvider>(
-      builder: (context, settings, _) {
+    return Consumer2<AppSettingsProvider, CameraProvider>(
+      builder: (context, settings, camera, _) {
+        // Saved values are the rider's request; when the camera negotiated
+        // something else, show the applied value next to the request.
+        final showApplied = camera.isInitialized && !_hasPendingCameraSettings;
+        final appliedResolution = CameraProvider.resolutionForPreset(
+          camera.resolutionPreset,
+        );
+        final resolutionLabel =
+            showApplied && appliedResolution != settings.recordingResolution
+            ? '${appliedResolution}p (set ${settings.recordingResolution}p)'
+            : '${settings.recordingResolution}p';
+        final fpsLabel =
+            showApplied && camera.recordingFps != settings.recordingFps
+            ? '${camera.recordingFps} FPS (set ${settings.recordingFps})'
+            : '${settings.recordingFps} FPS';
         final chips = <Widget>[
           if (settings.selectedCameraName.isNotEmpty)
             _buildProfileChip('Cam ${settings.selectedCameraName}'),
-          _buildProfileChip('${settings.recordingResolution}p'),
-          _buildProfileChip('${settings.recordingFps} FPS'),
+          _buildProfileChip(resolutionLabel),
+          _buildProfileChip(fpsLabel),
           _buildProfileChip('${settings.videoBitrateMbps} Mbps'),
           _buildProfileChip(settings.audioEnabled ? 'Audio On' : 'Audio Off'),
           _buildProfileChip(
-              '${AppSettingsProvider.segmentDurationLabel(settings.segmentDurationSeconds)} x ${settings.loopSegmentCount} loop'),
+            '${AppSettingsProvider.segmentDurationLabel(settings.segmentDurationSeconds)} x ${settings.loopSegmentCount} loop',
+          ),
           _buildProfileChip(
-              'Incident ${settings.incidentSensitivity.name.toUpperCase()}'),
+            'Incident ${settings.incidentSensitivity.name.toUpperCase()}',
+          ),
           _buildProfileChip('Speed ${settings.speedRefreshMs}ms'),
         ];
 
@@ -1421,9 +2087,50 @@ class _RecordingScreenState extends State<RecordingScreen>
                 child: ListView.separated(
                   scrollDirection: Axis.horizontal,
                   itemCount: chips.length,
-                  separatorBuilder: (_, __) => const SizedBox(width: 8),
+                  separatorBuilder: (_, _) => const SizedBox(width: 8),
                   itemBuilder: (_, index) => chips[index],
                 ),
+              ),
+              Selector<TelemetryProvider, bool>(
+                selector: (_, telemetry) =>
+                    !telemetry.isIncidentDetectionAvailable,
+                builder: (context, unavailable, _) {
+                  if (!unavailable) {
+                    return const SizedBox.shrink();
+                  }
+                  return Padding(
+                    padding: const EdgeInsets.only(top: 6),
+                    child: Text(
+                      'Incident detection unavailable (no motion sensor): '
+                      'clips are not auto-locked. Use LOCK.',
+                      style: TextStyle(
+                        color: Colors.orange.withValues(alpha: 0.9),
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  );
+                },
+              ),
+              Selector<TelemetryProvider, bool>(
+                selector: (_, telemetry) =>
+                    telemetry.isTracking && !telemetry.isLocationServiceEnabled,
+                builder: (context, locationOff, _) {
+                  if (!locationOff) {
+                    return const SizedBox.shrink();
+                  }
+                  return Padding(
+                    padding: const EdgeInsets.only(top: 6),
+                    child: Text(
+                      'Location is off: no speed, distance or route is recorded.',
+                      style: TextStyle(
+                        color: Colors.orange.withValues(alpha: 0.9),
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  );
+                },
               ),
               if (showHighSensitivityWarning)
                 Padding(
@@ -1462,7 +2169,6 @@ class _RecordingScreenState extends State<RecordingScreen>
     );
   }
 
-
   Widget _buildCameraPreview() {
     return Consumer<CameraProvider>(
       builder: (context, camera, _) {
@@ -1471,6 +2177,15 @@ class _RecordingScreenState extends State<RecordingScreen>
         }
 
         if (!camera.isInitialized || camera.controller == null) {
+          final initFailed =
+              _cameraInitAttempted &&
+              !_isBootstrapping &&
+              !_isNavigatingHistory &&
+              !camera.isInitializing &&
+              !camera.isRecording;
+          if (initFailed) {
+            return _buildCameraUnavailable();
+          }
           return const Center(
             child: CircularProgressIndicator(color: Colors.white),
           );
@@ -1486,8 +2201,9 @@ class _RecordingScreenState extends State<RecordingScreen>
         final safeAspectRatio = rawAspectRatio.isFinite && rawAspectRatio > 0
             ? rawAspectRatio
             : (16 / 9);
-        final portraitAspectRatio =
-            safeAspectRatio > 1 ? (1 / safeAspectRatio) : safeAspectRatio;
+        final portraitAspectRatio = safeAspectRatio > 1
+            ? (1 / safeAspectRatio)
+            : safeAspectRatio;
 
         return Stack(
           key: ValueKey(
@@ -1513,8 +2229,10 @@ class _RecordingScreenState extends State<RecordingScreen>
                 top: 12,
                 left: 12,
                 child: Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 8,
+                  ),
                   decoration: BoxDecoration(
                     color: Colors.red,
                     borderRadius: BorderRadius.circular(20),
@@ -1538,6 +2256,18 @@ class _RecordingScreenState extends State<RecordingScreen>
                           fontWeight: FontWeight.bold,
                         ),
                       ),
+                      if (_hasLockedThisSession) ...[
+                        const SizedBox(width: 10),
+                        const Icon(Icons.lock, color: Colors.white, size: 14),
+                        const SizedBox(width: 4),
+                        const Text(
+                          'LOCKED',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ],
                     ],
                   ),
                 ),
@@ -1545,6 +2275,63 @@ class _RecordingScreenState extends State<RecordingScreen>
           ],
         );
       },
+    );
+  }
+
+  Widget _buildCameraUnavailable() {
+    return Center(
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.videocam_off, color: Colors.white54, size: 40),
+            const SizedBox(height: 12),
+            const Text(
+              'Camera not available',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 16,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 6),
+            const Text(
+              'Allow camera access (and microphone while audio recording is '
+              'on), or close other apps using the camera, then retry.',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: Colors.white70, fontSize: 13),
+            ),
+            const SizedBox(height: 16),
+            Wrap(
+              alignment: WrapAlignment.center,
+              spacing: 12,
+              runSpacing: 8,
+              children: [
+                ElevatedButton(
+                  onPressed: _retryCameraSetup,
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: recordingStartButtonColor,
+                    foregroundColor: recordingButtonLabelColor,
+                  ),
+                  child: const Text('Retry'),
+                ),
+                OutlinedButton(
+                  onPressed: () => unawaited(_openAppSettingsAndRetry()),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: Colors.white,
+                    side: BorderSide(
+                      color: Colors.white.withValues(alpha: 0.4),
+                    ),
+                  ),
+                  child: const Text('Open Settings'),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
     );
   }
 
@@ -1583,12 +2370,9 @@ class _RecordingScreenState extends State<RecordingScreen>
                   stream: camera.timerStream,
                   initialData: camera.elapsedTime,
                   builder: (context, snapshot) {
-                    final duration = snapshot.data ?? Duration.zero;
-                    final hours = duration.inHours;
-                    final minutes = duration.inMinutes.remainder(60);
-                    final seconds = duration.inSeconds.remainder(60);
-                    final formattedTime =
-                        '${hours.toString().padLeft(2, '0')}:${minutes.toString().padLeft(2, '0')}:${seconds.toString().padLeft(2, '0')}';
+                    final formattedTime = formatRecordingElapsed(
+                      snapshot.data ?? Duration.zero,
+                    );
 
                     return _buildStatItem(
                       icon: Icons.timer,
@@ -1660,12 +2444,16 @@ class _RecordingScreenState extends State<RecordingScreen>
       children: [
         Icon(icon, color: Colors.blue, size: iconSize),
         SizedBox(height: compact ? 2 : 4),
-        Text(
-          value,
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-          textAlign: TextAlign.center,
-          style: valueStyle,
+        // Scales the value down instead of ellipsizing it at large system
+        // font sizes.
+        FittedBox(
+          fit: BoxFit.scaleDown,
+          child: Text(
+            value,
+            maxLines: 1,
+            textAlign: TextAlign.center,
+            style: valueStyle,
+          ),
         ),
         Text(
           label,
@@ -1684,130 +2472,183 @@ class _RecordingScreenState extends State<RecordingScreen>
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Consumer3<CameraProvider, TelemetryProvider, AppSettingsProvider>(
-            builder: (context, camera, telemetry, settings, _) {
-              final selectedPreset = CameraProvider.presetForResolution(
-                settings.recordingResolution,
-              );
-              final resolvedPreset = camera.resolvePresetForRequestedResolution(
-                settings.recordingResolution,
-              );
-              final isPresetUnsupported = !camera.isRecording &&
-                  camera.knownUnsupportedResolutionPresets.contains(
-                    selectedPreset,
-                  );
-              final willAutoFallback =
-                  isPresetUnsupported && resolvedPreset != selectedPreset;
-              final supportedResolutions = AppSettingsProvider.resolutionOptions
-                  .where(
-                    (resolution) =>
-                        !camera.knownUnsupportedResolutionPresets.contains(
-                      CameraProvider.presetForResolution(resolution),
-                    ),
-                  )
-                  .toList();
-              final suggestedResolution = supportedResolutions.isEmpty
-                  ? null
-                  : supportedResolutions.last;
-
-              return Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  ElevatedButton(
-                    onPressed: _isApplyingSettings
+          Selector<TelemetryProvider, bool>(
+            selector: (_, telemetry) => telemetry.isPersistingRide,
+            builder: (context, isPersistingRide, _) =>
+                Consumer2<CameraProvider, AppSettingsProvider>(
+                  builder: (context, camera, settings, _) {
+                    final selectedPreset = CameraProvider.presetForResolution(
+                      settings.recordingResolution,
+                    );
+                    final resolvedPreset = camera
+                        .resolvePresetForRequestedResolution(
+                          settings.recordingResolution,
+                        );
+                    final unsupportedPresets =
+                        camera.knownUnsupportedResolutionPresets;
+                    final isPresetUnsupported =
+                        !camera.isRecording &&
+                        unsupportedPresets.contains(selectedPreset);
+                    final willAutoFallback =
+                        isPresetUnsupported && resolvedPreset != selectedPreset;
+                    final supportedResolutions = AppSettingsProvider
+                        .resolutionOptions
+                        .where(
+                          (resolution) => !unsupportedPresets.contains(
+                            CameraProvider.presetForResolution(resolution),
+                          ),
+                        )
+                        .toList();
+                    final isStarting =
+                        _isStartingRecording || camera.isStartingRecording;
+                    // A ride is still being saved (also a Retry of a failed save):
+                    // START waits for it.
+                    final isStopping =
+                        _isStoppingRecording ||
+                        camera.isStoppingRecording ||
+                        (isPersistingRide && !camera.isRecording);
+                    final isPreparingCamera =
+                        !camera.isRecording && camera.isInitializing;
+                    final isBusy =
+                        _isApplyingSettings ||
+                        isStarting ||
+                        isStopping ||
+                        isPreparingCamera;
+                    final String buttonLabel;
+                    if (_isApplyingSettings) {
+                      buttonLabel = 'APPLYING SETTINGS...';
+                    } else if (isStopping) {
+                      buttonLabel = 'SAVING RECORDING...';
+                    } else if (isStarting) {
+                      buttonLabel = 'STARTING...';
+                    } else if (isPreparingCamera) {
+                      buttonLabel = 'PREPARING CAMERA...';
+                    } else {
+                      buttonLabel = camera.isRecording
+                          ? 'STOP RECORDING'
+                          : 'START RECORDING';
+                    }
+                    final suggestedResolution = supportedResolutions.isEmpty
                         ? null
-                        : () async {
-                            final messenger = ScaffoldMessenger.of(context);
-                            if (camera.isRecording) {
-                              await _stopRecordingFlow(
-                                camera: camera,
-                                telemetry: telemetry,
-                                messenger: messenger,
-                              );
-                            } else {
-                              await _startRecordingFlow(
-                                camera: camera,
-                                telemetry: telemetry,
-                                messenger: messenger,
-                              );
-                            }
-                          },
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor:
-                          camera.isRecording ? Colors.red : Colors.blue,
-                      disabledBackgroundColor: Colors.grey.shade800,
-                      minimumSize: const Size(double.infinity, 52),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                    ),
-                    child: Text(
-                      _isApplyingSettings
-                          ? 'APPLYING SETTINGS...'
-                          : (camera.isRecording
-                              ? 'STOP RECORDING'
-                              : 'START RECORDING'),
-                      style: const TextStyle(
-                        fontSize: 16,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                  ),
-                  if (_isApplyingSettings)
-                    const Padding(
-                      padding: EdgeInsets.only(top: 8),
-                      child: Text(
-                        'Applying settings... camera controls are temporarily locked.',
-                        textAlign: TextAlign.center,
-                        style: TextStyle(
-                          color: Colors.white70,
-                          fontSize: 12,
-                          fontWeight: FontWeight.w600,
+                        : supportedResolutions.last;
+
+                    return Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        ElevatedButton(
+                          onPressed: isBusy
+                              ? null
+                              : () async {
+                                  final messenger = ScaffoldMessenger.of(
+                                    context,
+                                  );
+                                  final telemetry = context
+                                      .read<TelemetryProvider>();
+                                  if (camera.isRecording) {
+                                    await _stopRecordingFlow(
+                                      camera: camera,
+                                      telemetry: telemetry,
+                                      messenger: messenger,
+                                    );
+                                  } else {
+                                    await _startRecordingFlow(
+                                      camera: camera,
+                                      telemetry: telemetry,
+                                      messenger: messenger,
+                                    );
+                                  }
+                                },
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: camera.isRecording
+                                ? recordingStopButtonColor
+                                : recordingStartButtonColor,
+                            foregroundColor: recordingButtonLabelColor,
+                            disabledBackgroundColor: Colors.grey.shade800,
+                            disabledForegroundColor: Colors.white70,
+                            minimumSize: const Size(double.infinity, 52),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                          ),
+                          child: Text(
+                            buttonLabel,
+                            style: const TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
                         ),
-                      ),
-                    ),
-                  if (isPresetUnsupported)
-                    Padding(
-                      padding: const EdgeInsets.only(top: 8),
-                      child: Text(
-                        willAutoFallback
-                            ? 'Current ${settings.recordingResolution}p is unstable on this device. Recording will auto-fallback to ${CameraProvider.resolutionForPreset(resolvedPreset)}p.'
-                            : (suggestedResolution == null
-                                ? 'Current ${settings.recordingResolution}p is known unstable on this device. Choose a lower resolution in Settings.'
-                                : 'Current ${settings.recordingResolution}p is known unstable on this device. Choose ${suggestedResolution}p or lower in Settings.'),
-                        textAlign: TextAlign.center,
-                        style: const TextStyle(
-                          color: Colors.orange,
-                          fontSize: 12,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                    ),
-                ],
-              );
-            },
+                        if (_isApplyingSettings)
+                          const Padding(
+                            padding: EdgeInsets.only(top: 8),
+                            child: Text(
+                              'Applying settings... camera controls are temporarily locked.',
+                              textAlign: TextAlign.center,
+                              style: TextStyle(
+                                color: Colors.white70,
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ),
+                        if (isPresetUnsupported)
+                          Padding(
+                            padding: const EdgeInsets.only(top: 8),
+                            child: Text(
+                              willAutoFallback
+                                  ? 'Current ${settings.recordingResolution}p is unstable on this device. Recording will auto-fallback to ${CameraProvider.resolutionForPreset(resolvedPreset)}p.'
+                                  : (suggestedResolution == null
+                                        ? 'Current ${settings.recordingResolution}p is known unstable on this device. Choose a lower resolution in Settings.'
+                                        : 'Current ${settings.recordingResolution}p is known unstable on this device. Choose ${suggestedResolution}p or lower in Settings.'),
+                              textAlign: TextAlign.center,
+                              style: const TextStyle(
+                                color: Colors.orange,
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ),
+                      ],
+                    );
+                  },
+                ),
           ),
           const SizedBox(height: 8),
           Consumer<CameraProvider>(
             builder: (context, camera, _) {
+              final isStopping =
+                  _isStoppingRecording || camera.isStoppingRecording;
+              final isBusy =
+                  _isApplyingSettings ||
+                  _isStartingRecording ||
+                  camera.isStartingRecording ||
+                  isStopping;
+              // While recording this button minimises into PiP instead of
+              // opening history, so it says so.
+              final historyLabel = camera.isRecording ? 'MINIMISE' : 'HISTORY';
+              final historyIcon = camera.isRecording
+                  ? Icons.picture_in_picture_alt
+                  : Icons.video_library_outlined;
               return Row(
                 children: [
                   Expanded(
                     child: OutlinedButton.icon(
-                      onPressed: _isApplyingSettings
+                      onPressed: isBusy
                           ? null
                           : (camera.isRecording
-                              ? () {
-                                  unawaited(_handleBackPressWhileRecording());
-                                }
-                              : () async {
-                                  await _openRideHistory(camera: camera);
-                                }),
-                      icon: const Icon(Icons.video_library_outlined,
-                          color: Colors.blue),
-                      label: const Text(
-                        'HISTORY',
-                        style: TextStyle(fontSize: 14, color: Colors.blue),
+                                ? () {
+                                    unawaited(_handleBackPressWhileRecording());
+                                  }
+                                : () async {
+                                    await _openRideHistory(camera: camera);
+                                  }),
+                      icon: Icon(historyIcon, color: Colors.blue),
+                      label: Text(
+                        historyLabel,
+                        style: const TextStyle(
+                          fontSize: 14,
+                          color: Colors.blue,
+                        ),
                       ),
                       style: OutlinedButton.styleFrom(
                         minimumSize: const Size.fromHeight(44),
@@ -1821,20 +2662,29 @@ class _RecordingScreenState extends State<RecordingScreen>
                   const SizedBox(width: 10),
                   Expanded(
                     child: OutlinedButton.icon(
-                      onPressed: camera.isRecording
+                      onPressed: camera.isRecording && !isStopping
                           ? () {
+                              final registeredSegments =
+                                  camera.lastSessionSegmentPaths.length;
                               camera.markIncident(
                                 protectPastSegments: 2,
                                 protectCurrentSegment: true,
                                 reason: 'manual-emergency',
                               );
+                              _markLockedThisSession();
+                              _checkpointRideIfChanged(camera);
+                              unawaited(HapticFeedback.heavyImpact());
                               _showInAppNotice(
-                                'Emergency lock enabled (${camera.lockedSegmentCount})',
+                                incidentLockNotice(
+                                  registeredSegments: registeredSegments,
+                                ),
                               );
                             }
                           : null,
-                      icon: const Icon(Icons.warning_amber_rounded,
-                          color: Colors.orange),
+                      icon: const Icon(
+                        Icons.warning_amber_rounded,
+                        color: Colors.orange,
+                      ),
                       label: const Text(
                         'LOCK',
                         style: TextStyle(fontSize: 14, color: Colors.orange),
@@ -1864,16 +2714,97 @@ class _RecordingScreenState extends State<RecordingScreen>
   @override
   void dispose() {
     _telemetryProvider?.removeListener(_onTelemetryChanged);
+    _cameraProvider?.removeListener(_onCameraChanged);
     WidgetsBinding.instance.removeObserver(this);
     _blackoutExitHoldTimer?.cancel();
     _inAppNoticeTimer?.cancel();
-    _recordingTimerSubscription?.cancel();
-    _backgroundEventSubscription?.cancel();
-    _pipModeSubscription?.cancel();
+    unawaited(_recordingTimerSubscription?.cancel());
+    unawaited(_backgroundEventSubscription?.cancel());
+    unawaited(_pipModeSubscription?.cancel());
     _deviceStatusTimer?.cancel();
-    _backgroundRecordingService.stopForegroundRecording();
+    final resumeWaiter = _resumeWaiter;
+    _resumeWaiter = null;
+    if (resumeWaiter != null && !resumeWaiter.isCompleted) {
+      resumeWaiter.complete();
+    }
+    unawaited(_stopForegroundServiceSafely());
     super.dispose();
   }
 }
 
+/// Blinking red dot shown next to REC in the Picture-in-Picture view. Owns
+/// its timer, so the timer stops when the dot leaves the tree.
+class _BlinkingRecDot extends StatefulWidget {
+  const _BlinkingRecDot();
+
+  @override
+  State<_BlinkingRecDot> createState() => _BlinkingRecDotState();
+}
+
+class _BlinkingRecDotState extends State<_BlinkingRecDot> {
+  Timer? _timer;
+  bool _visible = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _timer = Timer.periodic(const Duration(milliseconds: 700), (_) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _visible = !_visible;
+      });
+    });
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedOpacity(
+      opacity: _visible ? 1.0 : 0.25,
+      duration: const Duration(milliseconds: 180),
+      child: Container(
+        width: 8,
+        height: 8,
+        margin: const EdgeInsets.only(right: 6),
+        decoration: const BoxDecoration(
+          color: Colors.redAccent,
+          shape: BoxShape.circle,
+        ),
+      ),
+    );
+  }
+}
+
 enum _PermissionRecoveryAction { dismiss, retryRequest, openSettings }
+
+/// What `_stopRecordingFlow` managed to save.
+enum _StopOutcome {
+  /// The ride JSON (telemetry sidecar) was written.
+  saved,
+
+  /// Segments were kept but no ride JSON was written, without an error.
+  videoOnly,
+
+  /// Writing the ride JSON failed; a Retry SnackBar was shown.
+  saveFailed,
+
+  /// Stopping the camera failed.
+  stopFailed,
+
+  /// The session had no segment to save.
+  nothingSaved,
+
+  /// Nothing was done: a stop was already running or nothing was recording.
+  skipped,
+}
+
+// Label AppPermissionService uses for a missing battery-optimization
+// exemption in PermissionAuditResult.missingRecommended.
+const String _batteryOptimizationIssueLabel = 'Ignore battery optimizations';

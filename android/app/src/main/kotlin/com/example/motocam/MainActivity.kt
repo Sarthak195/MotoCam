@@ -1,20 +1,24 @@
 package com.example.motocam
 
+import android.Manifest
 import android.app.PictureInPictureParams
 import android.content.BroadcastReceiver
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.media.MediaScannerConnection
 import android.net.Uri
 import android.os.BatteryManager
 import android.os.Build
+import android.os.Bundle
 import android.os.Environment
 import android.os.PowerManager
 import android.provider.Settings
 import android.provider.MediaStore
+import android.util.Log
 import android.util.Rational
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -32,6 +36,17 @@ class MainActivity: FlutterActivity() {
     private var pipMethodChannel: MethodChannel? = null
     private var backgroundRecordingMethodChannel: MethodChannel? = null
     private var isRecordingActive = false
+
+    // Wall-clock start time implied by the last elapsed value sent to the
+    // foreground service. The notification renders the elapsed time with a
+    // chronometer, so updates are only forwarded when Dart's clock drifts.
+    private var foregroundStartWallMs = 0L
+
+    // True only after the foreground service was actually asked to start for
+    // the current recording. isRecordingActive alone also covers a recording
+    // whose service could not start, which must not get update intents (each
+    // would create a plain, non-foreground service).
+    private var isForegroundServiceStarted = false
 
     private val backgroundStopReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -62,32 +77,62 @@ class MainActivity: FlutterActivity() {
                     "startForegroundRecording" -> {
                         isRecordingActive = true
                         val elapsedMs = call.argument<Number>("elapsedMs")?.toLong() ?: 0L
+                        // On API 34+ a foreground service must start with at
+                        // least one type whose permission is granted; starting
+                        // without one would crash the app inside the service.
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE &&
+                            BackgroundRecordingService.grantedForegroundServiceTypes(this) == 0
+                        ) {
+                            result.success(false)
+                            return@setMethodCallHandler
+                        }
                         val serviceIntent = Intent(this, BackgroundRecordingService::class.java).apply {
                             action = BackgroundRecordingService.ACTION_START
                             putExtra(BackgroundRecordingService.EXTRA_ELAPSED_MS, elapsedMs)
                         }
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                            startForegroundService(serviceIntent)
-                        } else {
-                            startService(serviceIntent)
+                        try {
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                                startForegroundService(serviceIntent)
+                            } else {
+                                startService(serviceIntent)
+                            }
+                            foregroundStartWallMs = System.currentTimeMillis() - elapsedMs
+                            isForegroundServiceStarted = true
+                            result.success(true)
+                        } catch (e: Exception) {
+                            // e.g. ForegroundServiceStartNotAllowedException (API 31+)
+                            // when the app is not in the foreground.
+                            Log.e("MotoCam", "startForegroundService failed", e)
+                            result.success(false)
                         }
-                        result.success(true)
                     }
                     "updateForegroundRecording" -> {
                         val elapsedMs = call.argument<Number>("elapsedMs")?.toLong() ?: 0L
+                        val impliedStartWallMs = System.currentTimeMillis() - elapsedMs
+                        if (!isRecordingActive ||
+                            !isForegroundServiceStarted ||
+                            Math.abs(impliedStartWallMs - foregroundStartWallMs) <= 2000L
+                        ) {
+                            result.success(true)
+                            return@setMethodCallHandler
+                        }
                         val serviceIntent = Intent(this, BackgroundRecordingService::class.java).apply {
                             action = BackgroundRecordingService.ACTION_UPDATE
                             putExtra(BackgroundRecordingService.EXTRA_ELAPSED_MS, elapsedMs)
                         }
-                        startService(serviceIntent)
-                        result.success(true)
+                        try {
+                            startService(serviceIntent)
+                            foregroundStartWallMs = impliedStartWallMs
+                            result.success(true)
+                        } catch (_: Exception) {
+                            // Background start restrictions (API 26+).
+                            result.success(false)
+                        }
                     }
                     "stopForegroundRecording" -> {
                         isRecordingActive = false
-                        val serviceIntent = Intent(this, BackgroundRecordingService::class.java).apply {
-                            action = BackgroundRecordingService.ACTION_STOP
-                        }
-                        startService(serviceIntent)
+                        isForegroundServiceStarted = false
+                        stopBackgroundRecordingService()
                         result.success(true)
                     }
                     "isIgnoringBatteryOptimizations" -> {
@@ -124,15 +169,21 @@ class MainActivity: FlutterActivity() {
             ?.setMethodCallHandler { call, result ->
                 when (call.method) {
                     "isPipSupported" -> {
-                        result.success(Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
+                        result.success(isPipSupported())
                     }
                     "enterPipMode" -> {
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        if (isPipSupported()) {
                             val params = PictureInPictureParams.Builder()
                                 .setAspectRatio(Rational(9, 16))
                                 .build()
-                            enterPictureInPictureMode(params)
-                            result.success(true)
+                            // false when the system refuses PiP, for example
+                            // when the rider has turned PiP off for the app.
+                            val entered = try {
+                                enterPictureInPictureMode(params)
+                            } catch (_: Exception) {
+                                false
+                            }
+                            result.success(entered)
                         } else {
                             result.success(false)
                         }
@@ -144,6 +195,18 @@ class MainActivity: FlutterActivity() {
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, MEDIA_CHANNEL)
             .setMethodCallHandler { call, result ->
                 when (call.method) {
+                    "getAvailableStorageBytes" -> {
+                        // Free bytes on the volume holding the recordings
+                        // directory (Dart's low-storage check before START
+                        // and at each segment roll).
+                        val path = call.argument<String>("path")
+                        try {
+                            val target = if (path.isNullOrBlank()) filesDir.path else path
+                            result.success(android.os.StatFs(target).availableBytes)
+                        } catch (e: Exception) {
+                            result.error("STORAGE_QUERY_FAILED", e.message, null)
+                        }
+                    }
                     "scanMediaFile" -> {
                         val path = call.argument<String>("path")
                         if (path != null) {
@@ -165,6 +228,16 @@ class MainActivity: FlutterActivity() {
 
                         if (sourcePath.isNullOrBlank() || displayName.isNullOrBlank()) {
                             result.error("INVALID_ARGS", "sourcePath and displayName are required", null)
+                            return@setMethodCallHandler
+                        }
+
+                        // Below API 29 the public Movies directory is written
+                        // directly, which needs WRITE_EXTERNAL_STORAGE.
+                        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q &&
+                            checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) !=
+                            PackageManager.PERMISSION_GRANTED
+                        ) {
+                            result.error("PERMISSION_DENIED", "Storage permission not granted", null)
                             return@setMethodCallHandler
                         }
 
@@ -191,19 +264,31 @@ class MainActivity: FlutterActivity() {
                                     val itemUri = resolver.insert(collection, values)
                                         ?: throw IllegalStateException("Failed to create MediaStore item")
 
-                                    resolver.openOutputStream(itemUri)?.use { outStream ->
-                                        sourceFile.inputStream().use { inStream ->
-                                            inStream.copyTo(outStream)
-                                        }
-                                    } ?: throw IllegalStateException("Failed to open output stream")
+                                    try {
+                                        resolver.openOutputStream(itemUri)?.use { outStream ->
+                                            sourceFile.inputStream().use { inStream ->
+                                                inStream.copyTo(outStream)
+                                            }
+                                        } ?: throw IllegalStateException("Failed to open output stream")
 
-                                    values.clear()
-                                    values.put(MediaStore.Video.Media.IS_PENDING, 0)
-                                    resolver.update(itemUri, values, null, null)
+                                        values.clear()
+                                        values.put(MediaStore.Video.Media.IS_PENDING, 0)
+                                        resolver.update(itemUri, values, null, null)
+                                    } catch (e: Exception) {
+                                        // Do not leave a partial pending item behind.
+                                        try {
+                                            resolver.delete(itemUri, null, null)
+                                        } catch (_: Exception) {
+                                        }
+                                        throw e
+                                    }
                                     itemUri.toString()
                                 } else {
-                                    val moviesDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES)
-                                    val targetDir = File(moviesDir, "MotoCam/Videos")
+                                    // Same relative path as the MediaStore branch,
+                                    // resolved against the shared storage root.
+                                    @Suppress("DEPRECATION")
+                                    val storageRoot = Environment.getExternalStorageDirectory()
+                                    val targetDir = File(storageRoot, relativePath)
                                     if (!targetDir.exists()) {
                                         targetDir.mkdirs()
                                     }
@@ -255,7 +340,8 @@ class MainActivity: FlutterActivity() {
         val batteryTemperatureC = batteryIntent
             ?.let {
                 val tempTenthsC = it.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, Int.MIN_VALUE)
-                if (tempTenthsC != Int.MIN_VALUE && tempTenthsC > 0) {
+                // Signed tenths of a degree C: 0 and below are valid readings.
+                if (tempTenthsC != Int.MIN_VALUE) {
                     tempTenthsC / 10.0
                 } else {
                     null
@@ -273,6 +359,9 @@ class MainActivity: FlutterActivity() {
             "batteryLevelPercent" to batteryLevelPercent,
             "batteryTemperatureC" to batteryTemperatureC,
             "thermalStatus" to thermalStatus,
+            // Optional key: lets Dart request legacy storage permission for
+            // gallery export only on Android 9 and lower.
+            "sdkInt" to Build.VERSION.SDK_INT,
         )
     }
 
@@ -286,6 +375,26 @@ class MainActivity: FlutterActivity() {
             PowerManager.THERMAL_STATUS_EMERGENCY -> "emergency"
             PowerManager.THERMAL_STATUS_SHUTDOWN -> "shutdown"
             else -> "unknown"
+        }
+    }
+
+    private fun isPipSupported(): Boolean =
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+            packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE)
+
+    /**
+     * Stops the recording foreground service. ACTION_STOP is queued behind any
+     * pending ACTION_START so startForeground always runs first; stopService
+     * is the fallback when a background start restriction rejects startService.
+     */
+    private fun stopBackgroundRecordingService() {
+        val serviceIntent = Intent(this, BackgroundRecordingService::class.java).apply {
+            action = BackgroundRecordingService.ACTION_STOP
+        }
+        try {
+            startService(serviceIntent)
+        } catch (_: Exception) {
+            stopService(Intent(this, BackgroundRecordingService::class.java))
         }
     }
 
@@ -327,8 +436,11 @@ class MainActivity: FlutterActivity() {
         }
     }
 
-    override fun onStart() {
-        super.onStart()
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        // Registered for the whole activity lifetime (not onStart/onStop) so a
+        // Stop tapped in the notification while the screen is off or the app
+        // is in the background still reaches Dart.
         val filter = IntentFilter(BackgroundRecordingService.ACTION_STOP_REQUESTED)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             registerReceiver(
@@ -349,11 +461,19 @@ class MainActivity: FlutterActivity() {
         }
     }
 
-    override fun onStop() {
-        super.onStop()
+    override fun onDestroy() {
         try {
             unregisterReceiver(backgroundStopReceiver)
         } catch (_: IllegalArgumentException) {
         }
+        // The Flutter engine and the camera go away with this activity, so the
+        // foreground service (wake lock and ongoing notification) must not
+        // outlive it.
+        isRecordingActive = false
+        if (isForegroundServiceStarted) {
+            isForegroundServiceStarted = false
+            stopBackgroundRecordingService()
+        }
+        super.onDestroy()
     }
 }

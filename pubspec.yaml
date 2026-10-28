@@ -1,9 +1,12 @@
 name: motocam
-description: Navigation-enabled dashcam app for riders
+description: Motorcycle dashcam app with GPS route logging
 version: 1.0.1+13
 
 environment:
-  sdk: '>=3.0.0 <4.0.0'
+  # Floor taken from the `sdks` section of pubspec.lock; the project is
+  # developed and tested on Flutter 3.41.2 / Dart 3.11.0.
+  sdk: ^3.11.0
+  flutter: ">=3.41.0"
 
 dependencies:
   flutter:

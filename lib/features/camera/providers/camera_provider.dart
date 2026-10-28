@@ -5,52 +5,102 @@ import 'package:flutter/services.dart';
 import 'package:camera/camera.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:path_provider/path_provider.dart';
+import '../../../core/services/app_permission_service.dart';
+import '../../../core/utils/integrity_utils.dart' as integrity_utils;
 import '../../../core/utils/path_utils.dart' as path_utils;
+import 'recording_retention.dart';
 import 'dart:io';
 import 'dart:async';
-import 'dart:convert';
+import 'dart:isolate';
 
-enum RecordingState { idle, recording, paused, stopped }
+/// Lifecycle state of the segmented recording session.
+enum RecordingState {
+  /// No session has run yet, the last start was refused (low storage or the
+  /// camera did not start), or [CameraProvider.releaseCameraIfIdle] released
+  /// the camera.
+  idle,
 
+  /// A session is running (also while it is in a recording fault, see
+  /// [CameraProvider.lastRecordingError]).
+  recording,
+
+  /// Not used: the provider never sets this state.
+  paused,
+
+  /// [CameraProvider.stopRecording] ended the session.
+  stopped,
+}
+
+/// One recorded segment's position on the ride timeline.
+///
+/// [startMs] and [endMs] are milliseconds since the ride's recording start
+/// ([CameraProvider.recordingStartedAt]): [startMs] is when the segment's
+/// recording started and [endMs] is when it stopped.
 class SegmentTimelineEntry {
+  /// Creates a timeline entry for the segment stored at [path].
   const SegmentTimelineEntry({
     required this.path,
     required this.startMs,
     required this.endMs,
   });
 
+  /// Absolute path of the persisted segment file.
   final String path;
+
+  /// Segment start, in milliseconds since the ride's recording start.
   final int startMs;
+
+  /// Segment end, in milliseconds since the ride's recording start.
   final int endMs;
 
+  /// Serialises the entry as stored in the ride's telemetry sidecar.
   Map<String, dynamic> toJson() => {
-        'path': path,
-        'startMs': startMs,
-        'endMs': endMs,
-      };
+    'path': path,
+    'startMs': startMs,
+    'endMs': endMs,
+  };
 }
 
 /// Manages the device camera lifecycle, segmented video recording, rolling
 /// retention, gallery export, and resolution/FPS fallback negotiation.
 ///
-/// This provider is intended to be instantiated once via [ChangeNotifierProvider]
-/// at the root of the widget tree.  It exposes the active [CameraController],
-/// recording state, and session segment metadata to the UI layer.
+/// This provider is intended to be instantiated once via
+/// `ChangeNotifierProvider` at the root of the widget tree. It exposes the
+/// active [CameraController], recording state, and session segment metadata
+/// to the UI layer.
+///
+/// Rolling retention applies only to the current session's unlocked
+/// segments: locked segments and earlier rides' videos are never deleted
+/// automatically. After a stop, telemetry sidecars of unlocked rides whose
+/// videos are all gone are deleted.
 class CameraProvider extends ChangeNotifier {
+  /// Creates the provider; [enableDebugLogging] turns on verbose
+  /// `[MotoCam]` logs (warnings and errors are always logged).
   CameraProvider({this.enableDebugLogging = false});
 
+  /// Native media channel (Android) used for gallery export and free-space
+  /// queries.
   static const platform = MethodChannel('com.example.motocam/media');
   static const String _galleryRelativePath = 'Movies/MotoCam/Recordings';
   static const String _recordingsDirectoryName = 'MotoCam Recordings';
-  static const String _androidPublicExportDirectory =
-      '/storage/emulated/0/Movies/MotoCam/Recordings';
+  static const Duration _rollWaitTimeout = Duration(seconds: 60);
 
   CameraController? _controller;
   RecordingState _state = RecordingState.idle;
   String? _currentVideoPath;
   bool _isInitialized = false;
   String? _recordingsDirectory;
+
+  /// Whether verbose `[MotoCam]` logs (timings, state) are printed.
   bool enableDebugLogging;
+
+  /// Whether locked segments are copied to the shared gallery
+  /// (`Movies/MotoCam/Recordings`, Android only) when a ride stops.
+  ///
+  /// Defaults to `false`: exported copies are public to every gallery app
+  /// and are never removed by MotoCam, so export is opt-in.
+  bool autoExportLockedClipsToGallery = false;
+
   ResolutionPreset _resolutionPreset = ResolutionPreset.medium;
   int _recordingFps = 30;
   int _videoBitrateBps = 8 * 1000 * 1000;
@@ -69,12 +119,30 @@ class CameraProvider extends ChangeNotifier {
   final List<String> _pendingGalleryExports = <String>[];
   Timer? _segmentTimer;
   Timer? _deferredMaintenanceTimer;
-  bool _isRollingSegment = false;
+  Future<void>? _initInFlight;
+  Future<void>? _rollInFlight;
+  bool _isStartingRecording = false;
   bool _isStoppingRecording = false;
   bool _isExportingToGallery = false;
   bool _isDeferredMaintenanceRunning = false;
-  int _pendingIncidentSegmentLocks = 0;
-  int _lastSegmentEndMs = 0;
+  bool _hasPrunedTelemetryTempFiles = false;
+  String? _lastGalleryExportMessage;
+  String? _lastRecordingError;
+  int _consecutiveRollStopFailures = 0;
+  bool _isDisposed = false;
+
+  /// Sequence number of the segment currently being recorded (1-based per
+  /// session; 0 before the first segment starts).
+  int _activeSegmentSequence = 0;
+
+  /// Highest segment sequence whose registration has finished.
+  int _lastSettledSegmentSequence = 0;
+
+  /// Segment sequences an incident asked to lock once they are registered.
+  final Set<int> _pendingLockSequences = <int>{};
+
+  /// Ride-timeline start of the segment currently being recorded.
+  int _currentSegmentStartMs = 0;
   int _recordingRecoveryCount = 0;
   DateTime? _lastRecordingRecoveryAt;
   String? _lastRecordingRecoveryReason;
@@ -102,42 +170,161 @@ class CameraProvider extends ChangeNotifier {
   final _timerController = StreamController<Duration>.broadcast();
 
   // Getters
+
+  /// The active camera controller, or `null` while uninitialized.
   CameraController? get controller => _controller;
+
+  /// Current recording state.
   RecordingState get state => _state;
+
+  /// Path of the most recently registered segment of this session.
   String? get currentVideoPath => _currentVideoPath;
+
+  /// Whether a camera controller is initialized and ready.
   bool get isInitialized => _isInitialized;
+
+  /// Whether a camera initialization is in progress.
+  bool get isInitializing => _initInFlight != null;
+
+  /// Whether a recording session is active.
   bool get isRecording => _state == RecordingState.recording;
+
+  /// Whether [startRecording] is in progress.
+  bool get isStartingRecording => _isStartingRecording;
+
+  /// Whether [stopRecording] is in progress (camera stop and final segment
+  /// registration).
+  bool get isStoppingRecording => _isStoppingRecording;
+
+  /// Rider-facing description of the last recording failure, or `null`.
+  ///
+  /// Set when [startRecording] refuses to start because storage is almost
+  /// full, and when recording could not continue after a segment roll or a
+  /// pipeline recovery (restart failure, a segment stop that failed twice or
+  /// left the camera not recording, or low storage). In the second case
+  /// nothing is recorded from then on, although [isRecording] stays `true`
+  /// until [stopRecording] is called, so the session's segments, locks and
+  /// timeline can still be saved. Cleared by the next [startRecording].
+  String? get lastRecordingError => _lastRecordingError;
+
+  /// Rider-facing result of the last gallery export of locked clips (see
+  /// [autoExportLockedClipsToGallery]), e.g. how many clips were copied or
+  /// that storage permission was denied; `null` until an export ran.
+  /// Listeners are notified when it changes.
+  String? get lastGalleryExportMessage => _lastGalleryExportMessage;
+
+  /// Directory that holds this app's segments and telemetry sidecars.
   String? get recordingsDirectory => _recordingsDirectory;
+
+  /// Elapsed time of the active session, updated about once per second.
+  /// After [stopRecording] it keeps the finished session's value until the
+  /// next [startRecording] or [releaseCameraIfIdle].
   Duration get elapsedTime => _elapsedTime;
+
+  /// Emits [elapsedTime] about once per second while recording.
   Stream<Duration> get timerStream => _timerController.stream;
+
+  /// Wall-clock time at which the active session's first segment started
+  /// recording; the zero point of [lastSessionSegmentTimeline]. `null` when
+  /// no session is recording.
+  DateTime? get recordingStartedAt => _recordingStartTime;
+
+  /// Resolution preset the active controller was initialized with.
   ResolutionPreset get resolutionPreset => _resolutionPreset;
+
+  /// Target recording frame rate.
   int get recordingFps => _recordingFps;
+
+  /// Requested video bitrate in bits per second.
   int get videoBitrateBps => _videoBitrateBps;
+
+  /// Requested video bitrate in Mbps (rounded).
   int get videoBitrateMbps => (_videoBitrateBps / 1000000).round();
+
+  /// Whether the camera plugin applies the requested bitrate.
+  ///
+  /// `false` on Android: camera_android_camerax (0.7.1 and the locked 0.7.2)
+  /// never passes the bitrate to the CameraX Recorder, which uses its default
+  /// for the quality.
+  bool get supportsVideoBitrateControl => !Platform.isAndroid;
+
+  /// The bitrate actually applied in Mbps, or `null` when the platform
+  /// ignores the requested bitrate (see [supportsVideoBitrateControl]).
+  int? get appliedVideoBitrateMbps =>
+      supportsVideoBitrateControl ? videoBitrateMbps : null;
+
+  /// Whether audio is recorded with the video.
   bool get audioEnabled => _audioEnabled;
+
+  /// Name of the camera the user prefers.
   String get preferredCameraName => _preferredCameraName;
+
+  /// Name of the camera currently in use.
   String get activeCameraName => _activeCameraName;
+
+  /// Cameras discovered by the last [getAvailableCameras] call.
   List<CameraDescription> get discoveredCameras =>
       List.unmodifiable(_availableCameras);
+
+  /// Segment length in seconds.
   int get segmentDurationSeconds => _segmentDuration.inSeconds;
+
+  /// Segment length in whole minutes.
   int get segmentDurationMinutes => _segmentDuration.inMinutes;
+
+  /// Number of unlocked segments the rolling loop keeps per session.
   int get maxRollingSegments => _maxRollingSegments;
+
+  /// Segment paths of the current or last session, in recording order.
   List<String> get lastSessionSegmentPaths =>
       List.unmodifiable(_sessionSegmentPaths);
+
+  /// Timeline entries (see [SegmentTimelineEntry.toJson]) of the current or
+  /// last session, in recording order.
   List<Map<String, dynamic>> get lastSessionSegmentTimeline =>
       List.unmodifiable(_sessionSegmentTimeline.map((entry) => entry.toJson()));
+
+  /// Locked segment paths of the current or last session, sorted.
   List<String> get lockedSegmentPaths =>
       List.unmodifiable(_lockedSegmentPaths.toList()..sort());
+
+  /// Number of locked segments in the current or last session.
   int get lockedSegmentCount => _lockedSegmentPaths.length;
+
+  /// Number of successful [recoverRecordingPipeline] calls this session.
   int get recordingRecoveryCount => _recordingRecoveryCount;
+
+  /// Time of the last successful pipeline recovery.
   DateTime? get lastRecordingRecoveryAt => _lastRecordingRecoveryAt;
+
+  /// Reason given for the last successful pipeline recovery.
   String? get lastRecordingRecoveryReason => _lastRecordingRecoveryReason;
+
+  /// Milliseconds the stop step of the last segment roll took. Pipeline
+  /// recoveries count as rolls for these metrics.
   int get lastRollStopMs => _lastRollStopMs;
+
+  /// Milliseconds the restart step of the last segment roll took (0 when no
+  /// restart was attempted).
   int get lastRollRestartMs => _lastRollRestartMs;
+
+  /// Milliseconds the registration step (persist and loop trim) of the last
+  /// segment roll took.
   int get lastRollRegisterMs => _lastRollRegisterMs;
+
+  /// Total milliseconds the last segment roll took.
   int get lastRollTotalMs => _lastRollTotalMs;
+
+  /// Wall-clock time the last segment roll finished, or `null` before the
+  /// first roll.
   DateTime? get lastRollAt => _lastRollAt;
+
+  /// Total durations in milliseconds of the last (up to) 10 segment rolls,
+  /// oldest first.
   List<int> get recentRollTotalMs => List.unmodifiable(_recentRollTotalMs);
+
+  /// Average of [recentRollTotalMs] in milliseconds, or 0 when no roll
+  /// happened yet.
   int get averageRollTotalMs {
     if (_recentRollTotalMs.isEmpty) {
       return 0;
@@ -145,18 +332,26 @@ class CameraProvider extends ChangeNotifier {
     final total = _recentRollTotalMs.reduce((a, b) => a + b);
     return (total / _recentRollTotalMs.length).round();
   }
+
+  /// FPS options not yet known to fail at the current preset.
   List<int> get knownSupportedFpsOptions =>
       List.unmodifiable(_supportedFpsOptionsForPreset(_resolutionPreset));
+
+  /// Resolution options (in lines) not yet known to fail on the active
+  /// camera.
   List<int> get knownSupportedResolutionOptions {
     final unsupported = knownUnsupportedResolutionPresets;
     return List.unmodifiable(
       _safeResolutionOptions
-          .where((resolution) =>
-              !unsupported.contains(presetForResolution(resolution)))
+          .where(
+            (resolution) =>
+                !unsupported.contains(presetForResolution(resolution)),
+          )
           .toList(),
     );
   }
 
+  /// Presets that failed to initialize or record on the active camera.
   Set<ResolutionPreset> get knownUnsupportedResolutionPresets {
     if (_activeCameraName.isEmpty) {
       return const <ResolutionPreset>{};
@@ -167,13 +362,26 @@ class CameraProvider extends ChangeNotifier {
     );
   }
 
-  // Debug logging helper
+  // Verbose (timing, state) logging; only with [enableDebugLogging].
   void _log(String message) {
     if (enableDebugLogging) {
       debugPrint('[MotoCam] $message');
     }
   }
 
+  // Warnings and errors: logged in every build mode. Uses
+  // debugPrintSynchronously, which the release-mode debugPrint no-op in
+  // main.dart does not silence.
+  void _logError(String message) {
+    if (enableDebugLogging) {
+      debugPrint('[MotoCam] $message');
+    } else {
+      debugPrintSynchronously('[MotoCam] $message');
+    }
+  }
+
+  // Records diagnostics only; does not notify, so a roll does not rebuild
+  // the UI.
   void _recordRollMetrics({
     required int stopMs,
     required int restartMs,
@@ -189,16 +397,15 @@ class CameraProvider extends ChangeNotifier {
     if (_recentRollTotalMs.length > 10) {
       _recentRollTotalMs.removeAt(0);
     }
-    notifyListeners();
   }
 
-  bool _isPermissionGranted(PermissionStatus status) {
-    return status.isGranted || status.isLimited;
-  }
-
+  /// Maps a resolution in lines (480, 720, 1080, 2160) to a camera preset.
+  ///
+  /// 480 maps to [ResolutionPreset.medium] (~480p); [ResolutionPreset.low]
+  /// is ~240p on Android and 352x288 on iOS.
   static ResolutionPreset presetForResolution(int resolution) {
     if (resolution <= 480) {
-      return ResolutionPreset.low;
+      return ResolutionPreset.medium;
     }
     if (resolution <= 720) {
       return ResolutionPreset.high;
@@ -209,6 +416,7 @@ class CameraProvider extends ChangeNotifier {
     return ResolutionPreset.ultraHigh;
   }
 
+  /// Maps a camera preset back to the resolution in lines shown in the UI.
   static int resolutionForPreset(ResolutionPreset preset) {
     switch (preset) {
       case ResolutionPreset.low:
@@ -224,18 +432,22 @@ class CameraProvider extends ChangeNotifier {
     }
   }
 
+  /// Returns the preset for [requestedResolution], or the nearest lower (then
+  /// higher) preset when it is known to be unsupported on the active camera.
   ResolutionPreset resolvePresetForRequestedResolution(
-      int requestedResolution) {
+    int requestedResolution,
+  ) {
     final requestedPreset = presetForResolution(requestedResolution);
     final unsupported = knownUnsupportedResolutionPresets;
     if (!unsupported.contains(requestedPreset)) {
       return requestedPreset;
     }
 
-    final lowerOrEqual = _safeResolutionOptions
-        .where((resolution) => resolution <= requestedResolution)
-        .toList()
-      ..sort((a, b) => b.compareTo(a));
+    final lowerOrEqual =
+        _safeResolutionOptions
+            .where((resolution) => resolution <= requestedResolution)
+            .toList()
+          ..sort((a, b) => b.compareTo(a));
     for (final candidateResolution in lowerOrEqual) {
       final preset = presetForResolution(candidateResolution);
       if (!unsupported.contains(preset)) {
@@ -255,12 +467,15 @@ class CameraProvider extends ChangeNotifier {
     return requestedPreset;
   }
 
+  /// Resolution in lines that [resolvePresetForRequestedResolution] would
+  /// apply for [requestedResolution].
   int resolveAppliedResolutionForRequested(int requestedResolution) {
     return resolutionForPreset(
       resolvePresetForRequestedResolution(requestedResolution),
     );
   }
 
+  /// Human-readable label such as `Back (0)` for [camera].
   String cameraLabel(CameraDescription camera) {
     final lens = switch (camera.lensDirection) {
       CameraLensDirection.front => 'Front',
@@ -274,6 +489,8 @@ class CameraProvider extends ChangeNotifier {
     return '$lens ($name)';
   }
 
+  /// Returns the device cameras, querying the plugin on first use or when
+  /// [refresh] is set.
   Future<List<CameraDescription>> getAvailableCameras({
     bool refresh = false,
   }) async {
@@ -287,7 +504,7 @@ class CameraProvider extends ChangeNotifier {
         ..clear()
         ..addAll(cameras);
     } catch (e) {
-      _log('Failed to query cameras: $e');
+      _logError('Failed to query cameras: $e');
     }
 
     return List.unmodifiable(_availableCameras);
@@ -311,8 +528,53 @@ class CameraProvider extends ChangeNotifier {
     return cameras.first;
   }
 
-  // Initialize camera
+  /// Initializes (or re-initializes) the camera with the given settings,
+  /// falling back to lower presets and frame rates the device supports.
+  ///
+  /// Calls are serialized: a call made while another initialization is in
+  /// progress waits for it to finish and then runs with its own settings.
+  /// Does nothing while a recording is starting, active or stopping, since
+  /// re-initializing would dispose the recording controller.
+  /// Requests camera (and, with audio, microphone) permission but not
+  /// notifications. On failure [isInitialized] stays `false`.
   Future<void> initializeCamera({
+    ResolutionPreset? resolutionPreset,
+    int? recordingFps,
+    int? videoBitrateBps,
+    bool? audioEnabled,
+    String? preferredCameraName,
+    int? segmentDurationSeconds,
+    int? segmentDurationMinutes,
+    int? maxRollingSegments,
+  }) async {
+    while (_initInFlight != null) {
+      await _initInFlight;
+    }
+    if (isRecording || _isStartingRecording || _isStoppingRecording) {
+      _log('Camera init skipped: a recording session is active');
+      return;
+    }
+
+    final completer = Completer<void>();
+    _initInFlight = completer.future;
+    try {
+      await _initializeCameraNow(
+        resolutionPreset: resolutionPreset,
+        recordingFps: recordingFps,
+        videoBitrateBps: videoBitrateBps,
+        audioEnabled: audioEnabled,
+        preferredCameraName: preferredCameraName,
+        segmentDurationSeconds: segmentDurationSeconds,
+        segmentDurationMinutes: segmentDurationMinutes,
+        maxRollingSegments: maxRollingSegments,
+      );
+    } finally {
+      _initInFlight = null;
+      completer.complete();
+    }
+  }
+
+  Future<void> _initializeCameraNow({
     ResolutionPreset? resolutionPreset,
     int? recordingFps,
     int? videoBitrateBps,
@@ -342,11 +604,13 @@ class CameraProvider extends ChangeNotifier {
         _preferredCameraName = preferredCameraName.trim();
       }
       if (segmentDurationSeconds != null) {
-        _segmentDuration =
-            Duration(seconds: segmentDurationSeconds.clamp(5, 600));
+        _segmentDuration = Duration(
+          seconds: segmentDurationSeconds.clamp(5, 600),
+        );
       } else if (segmentDurationMinutes != null) {
-        _segmentDuration =
-            Duration(minutes: segmentDurationMinutes.clamp(1, 10));
+        _segmentDuration = Duration(
+          minutes: segmentDurationMinutes.clamp(1, 10),
+        );
       }
       if (maxRollingSegments != null) {
         _maxRollingSegments = maxRollingSegments.clamp(1, 120);
@@ -368,17 +632,16 @@ class CameraProvider extends ChangeNotifier {
         _isInitialized = false;
       }
 
-      // Request camera permission
+      // Camera and microphone are required here (a no-op prompt when
+      // already granted). Notifications are left to the permission audit so
+      // the rider is not prompted twice.
       final cameraStatus = await Permission.camera.request();
       final microphoneStatus = _audioEnabled
           ? await Permission.microphone.request()
           : PermissionStatus.granted;
-      if (Platform.isAndroid) {
-        await Permission.notification.request();
-      }
 
-      if (!_isPermissionGranted(cameraStatus) ||
-          !_isPermissionGranted(microphoneStatus)) {
+      if (!AppPermissionService.isPermissionGranted(cameraStatus) ||
+          !AppPermissionService.isPermissionGranted(microphoneStatus)) {
         _log('Camera or microphone permission denied');
         _isInitialized = false;
         notifyListeners();
@@ -386,8 +649,7 @@ class CameraProvider extends ChangeNotifier {
       }
 
       // Set up recordings directory
-      await _setupRecordingsDirectory();
-      if (_recordingsDirectory == null || _recordingsDirectory!.isEmpty) {
+      if (!await _setupRecordingsDirectory()) {
         _log('Recordings directory is unavailable; camera init aborted.');
         _isInitialized = false;
         notifyListeners();
@@ -413,14 +675,15 @@ class CameraProvider extends ChangeNotifier {
       ResolutionPreset? initializedPreset;
       var initializedFps = requestedFps;
 
-      for (final candidatePreset
-          in _resolutionFallbackCandidates(requestedPreset)) {
+      for (final candidatePreset in _resolutionFallbackCandidates(
+        requestedPreset,
+      )) {
         var presetInitialized = false;
         final supportedFps = _supportedFpsOptionsForPreset(candidatePreset);
-        var candidateFps = initializedFps;
-        if (!supportedFps.contains(candidateFps)) {
-          candidateFps = supportedFps.last;
-        }
+        final candidateFps = nearestSupportedFps(
+          requested: initializedFps,
+          options: supportedFps,
+        );
 
         final firstAttempt = await _tryInitializeController(
           camera: selectedCamera,
@@ -461,7 +724,11 @@ class CameraProvider extends ChangeNotifier {
 
       if (initializedController == null || initializedPreset == null) {
         _isInitialized = false;
-        _log('Unable to initialize camera for any preset on this device.');
+        _logError('Unable to initialize camera for any preset on this device.');
+        // Every preset failing means the camera is busy or unavailable, not
+        // that each preset is unsupported; forget this attempt's marks so
+        // the next init retries the rider's request.
+        _clearCapabilityCachesForCamera(selectedCamera.name);
         notifyListeners();
         return;
       }
@@ -474,7 +741,8 @@ class CameraProvider extends ChangeNotifier {
       _log('Camera initialized successfully');
       if (_resolutionPreset != requestedPreset) {
         _log(
-            'Requested preset $requestedPreset is not supported; downgraded to $_resolutionPreset.');
+          'Requested preset $requestedPreset is not supported; downgraded to $_resolutionPreset.',
+        );
       }
       if (_recordingFps != requestedFps) {
         _log('Requested FPS $requestedFps adjusted to $_recordingFps.');
@@ -489,10 +757,15 @@ class CameraProvider extends ChangeNotifier {
     } catch (e) {
       _isInitialized = false;
       notifyListeners();
-      _log('Error initializing camera: $e');
+      _logError('Error initializing camera: $e');
     }
   }
 
+  /// Applies new recording settings by re-initializing the camera.
+  ///
+  /// Returns `false` without changing anything while a recording is
+  /// starting, active or stopping; otherwise returns [isInitialized] after
+  /// the re-initialization (or `true` when nothing changed).
   Future<bool> applyRecordingSettings({
     required ResolutionPreset resolutionPreset,
     required int recordingFps,
@@ -502,12 +775,13 @@ class CameraProvider extends ChangeNotifier {
     required int segmentDurationSeconds,
     required int maxRollingSegments,
   }) async {
-    if (isRecording) {
+    if (isRecording || _isStartingRecording || _isStoppingRecording) {
       _log('Cannot apply recording settings while recording is active');
       return false;
     }
 
-    final hasChanged = _resolutionPreset != resolutionPreset ||
+    final hasChanged =
+        _resolutionPreset != resolutionPreset ||
         _recordingFps != recordingFps ||
         _videoBitrateBps != videoBitrateBps ||
         _audioEnabled != audioEnabled ||
@@ -519,17 +793,20 @@ class CameraProvider extends ChangeNotifier {
       return true;
     }
 
-    _resolutionPreset = resolutionPreset;
-    _recordingFps = recordingFps;
-    _videoBitrateBps = videoBitrateBps;
-    _audioEnabled = audioEnabled;
-    _preferredCameraName = preferredCameraName.trim();
-    _segmentDuration = Duration(seconds: segmentDurationSeconds.clamp(5, 600));
-    _maxRollingSegments = maxRollingSegments.clamp(1, 120);
-    await initializeCamera();
+    await initializeCamera(
+      resolutionPreset: resolutionPreset,
+      recordingFps: recordingFps,
+      videoBitrateBps: videoBitrateBps,
+      audioEnabled: audioEnabled,
+      preferredCameraName: preferredCameraName,
+      segmentDurationSeconds: segmentDurationSeconds,
+      maxRollingSegments: maxRollingSegments,
+    );
     return _isInitialized;
   }
 
+  /// FPS options not yet known to fail at [preset] (all candidates when the
+  /// preset has not been tried).
   Future<List<int>> getSupportedFpsOptionsForPreset({
     required ResolutionPreset preset,
   }) async {
@@ -549,7 +826,7 @@ class CameraProvider extends ChangeNotifier {
       return const <ResolutionPreset>[
         ResolutionPreset.high,
         ResolutionPreset.medium,
-        ResolutionPreset.low
+        ResolutionPreset.low,
       ];
     }
     return _resolutionFallbackOrder.sublist(startIndex);
@@ -565,7 +842,8 @@ class CameraProvider extends ChangeNotifier {
   void _markResolutionUnsupported(String cameraName, ResolutionPreset preset) {
     final key = _resolutionSupportCacheKey(cameraName);
     final unsupported = Set<ResolutionPreset>.from(
-        _unsupportedResolutionCache[key] ?? <ResolutionPreset>{});
+      _unsupportedResolutionCache[key] ?? <ResolutionPreset>{},
+    );
     unsupported.add(preset);
     _unsupportedResolutionCache[key] = unsupported;
   }
@@ -573,7 +851,8 @@ class CameraProvider extends ChangeNotifier {
   void _markResolutionSupported(String cameraName, ResolutionPreset preset) {
     final key = _resolutionSupportCacheKey(cameraName);
     final unsupported = Set<ResolutionPreset>.from(
-        _unsupportedResolutionCache[key] ?? <ResolutionPreset>{});
+      _unsupportedResolutionCache[key] ?? <ResolutionPreset>{},
+    );
     if (unsupported.remove(preset)) {
       _unsupportedResolutionCache[key] = unsupported;
     }
@@ -597,18 +876,47 @@ class CameraProvider extends ChangeNotifier {
     return options.last;
   }
 
+  /// Picks the frame rate to try from [options]: [requested] when offered,
+  /// else 30, else the highest rate below [requested], else the lowest
+  /// offered rate.
+  @visibleForTesting
+  static int nearestSupportedFps({
+    required int requested,
+    required List<int> options,
+  }) {
+    if (options.isEmpty || options.contains(requested)) {
+      return requested;
+    }
+    if (options.contains(30)) {
+      return 30;
+    }
+    final sorted = List<int>.from(options)..sort();
+    final lower = sorted.where((fps) => fps < requested);
+    return lower.isNotEmpty ? lower.last : sorted.first;
+  }
+
+  // FPS support is cached per camera, preset and audio setting.
   String _fpsCacheKeyForPreset(ResolutionPreset preset) =>
-      '${preset.name}_${_audioEnabled ? 1 : 0}';
+      '${_activeCameraName}_${preset.name}_${_audioEnabled ? 1 : 0}';
+
+  void _clearCapabilityCachesForCamera(String cameraName) {
+    _unsupportedResolutionCache.remove(_resolutionSupportCacheKey(cameraName));
+    final prefix = '${cameraName}_';
+    _supportedFpsCache.removeWhere((key, _) => key.startsWith(prefix));
+  }
 
   Future<CameraController?> _tryInitializeController({
     required CameraDescription camera,
     required ResolutionPreset preset,
     required int fps,
   }) async {
-    final controller = _buildController(
-      camera: camera,
-      preset: preset,
+    final controller = CameraController(
+      camera,
+      preset,
+      enableAudio: _audioEnabled,
       fps: fps,
+      videoBitrate: _videoBitrateBps,
+      imageFormatGroup: ImageFormatGroup.jpeg,
     );
     try {
       await controller.initialize();
@@ -629,75 +937,91 @@ class CameraProvider extends ChangeNotifier {
     }
   }
 
-  CameraController _buildController({
-    required CameraDescription camera,
-    required ResolutionPreset preset,
-    required int fps,
-  }) {
+  // Resolves the recordings root once per process and keeps it: a later
+  // failure never switches rides to another root. Returns false when the
+  // root is unavailable.
+  Future<bool> _setupRecordingsDirectory() async {
     try {
-      return CameraController(
-        camera,
-        preset,
-        enableAudio: _audioEnabled,
-        fps: fps,
-        videoBitrate: _videoBitrateBps,
-        imageFormatGroup: ImageFormatGroup.jpeg,
-      );
-    } catch (e) {
-      _log(
-          'FPS-specific controller build failed for preset $preset at ${fps}fps, using default FPS. Error: $e');
-      return CameraController(
-        camera,
-        preset,
-        enableAudio: _audioEnabled,
-        imageFormatGroup: ImageFormatGroup.jpeg,
-      );
-    }
-  }
-
-  // Set up recordings directory
-  Future<void> _setupRecordingsDirectory() async {
-    try {
-      final Directory baseDirectory;
-      if (Platform.isAndroid) {
-        baseDirectory = (await getExternalStorageDirectory()) ??
-            await getApplicationDocumentsDirectory();
-      } else if (Platform.isIOS) {
-        baseDirectory = await getApplicationDocumentsDirectory();
-      } else {
-        baseDirectory = await getApplicationSupportDirectory();
+      var directoryPath = _recordingsDirectory;
+      if (directoryPath == null || directoryPath.isEmpty) {
+        final baseDirectory = await _resolveRecordingsBaseDirectory();
+        if (baseDirectory == null) {
+          _logError('Recordings storage is unavailable.');
+          return false;
+        }
+        directoryPath =
+            '${baseDirectory.path}${Platform.pathSeparator}$_recordingsDirectoryName';
       }
 
-      final recordingsDir = Directory(
-        '${baseDirectory.path}${Platform.pathSeparator}$_recordingsDirectoryName',
-      );
-
+      final recordingsDir = Directory(directoryPath);
       if (!await recordingsDir.exists()) {
         await recordingsDir.create(recursive: true);
         _log('Created recordings directory: ${recordingsDir.path}');
-      } else {
-        _log('Recordings directory already exists: ${recordingsDir.path}');
+      }
+      if (Platform.isAndroid) {
+        await _ensureNoMediaMarker(recordingsDir);
       }
 
       _recordingsDirectory = recordingsDir.path;
       _log('Recordings directory set to: $_recordingsDirectory');
+      if (!_hasPrunedTelemetryTempFiles) {
+        _hasPrunedTelemetryTempFiles = true;
+        // Temp files left by a process killed mid-write; errors are ignored.
+        unawaited(integrity_utils.pruneStaleTelemetryTempFiles(recordingsDir));
+      }
+      return true;
     } catch (e) {
-      _log('Error setting up recordings directory: $e');
-      // Fallback to app cache
+      _logError('Error setting up recordings directory: $e');
+      return false;
+    }
+  }
+
+  Future<Directory?> _resolveRecordingsBaseDirectory() async {
+    if (Platform.isAndroid) {
+      return getExternalStorageDirectory();
+    }
+    if (Platform.isIOS) {
+      return getApplicationDocumentsDirectory();
+    }
+    return getApplicationSupportDirectory();
+  }
+
+  // Keeps private loop footage out of the media index on Android versions
+  // whose scanner does not skip Android/data.
+  Future<void> _ensureNoMediaMarker(Directory recordingsDir) async {
+    try {
+      final marker = File(
+        '${recordingsDir.path}${Platform.pathSeparator}.nomedia',
+      );
+      if (!await marker.exists()) {
+        await marker.create();
+      }
+    } catch (e) {
+      _log('Could not create .nomedia marker: $e');
+    }
+  }
+
+  // Roots that earlier builds fell back to when the primary root was
+  // unavailable. Only scanned so rides stored there stay visible.
+  Future<List<String>> _legacyFallbackRecordingsDirectories() async {
+    if (!Platform.isAndroid) {
+      return const <String>[];
+    }
+    final roots = <String>[];
+    for (final resolve in <Future<Directory> Function()>[
+      getApplicationDocumentsDirectory,
+      getApplicationCacheDirectory,
+    ]) {
       try {
-        final cacheDir = await getApplicationCacheDirectory();
-        final fallbackDir = Directory(
-          '${cacheDir.path}${Platform.pathSeparator}$_recordingsDirectoryName',
+        final base = await resolve();
+        roots.add(
+          '${base.path}${Platform.pathSeparator}$_recordingsDirectoryName',
         );
-        if (!await fallbackDir.exists()) {
-          await fallbackDir.create(recursive: true);
-        }
-        _recordingsDirectory = fallbackDir.path;
-        _log('Fallback to cache directory: $_recordingsDirectory');
-      } catch (fallbackError) {
-        _log('Error setting up fallback cache directory: $fallbackError');
+      } catch (_) {
+        // Root unavailable on this device.
       }
     }
+    return roots;
   }
 
   // Path utilities delegate to shared module.
@@ -714,14 +1038,16 @@ class CameraProvider extends ChangeNotifier {
         ? 'segment_${DateTime.now().millisecondsSinceEpoch}.mp4'
         : fileName;
     final dotIndex = resolvedName.lastIndexOf('.');
-    final baseName =
-        dotIndex <= 0 ? resolvedName : resolvedName.substring(0, dotIndex);
+    final baseName = dotIndex <= 0
+        ? resolvedName
+        : resolvedName.substring(0, dotIndex);
     final extension = dotIndex <= 0 ? '' : resolvedName.substring(dotIndex);
 
     var suffix = 0;
     while (true) {
-      final candidateName =
-          suffix == 0 ? resolvedName : '${baseName}_$suffix$extension';
+      final candidateName = suffix == 0
+          ? resolvedName
+          : '${baseName}_$suffix$extension';
       final candidatePath =
           '$directoryPath${Platform.pathSeparator}$candidateName';
       if (!await File(candidatePath).exists()) {
@@ -757,6 +1083,8 @@ class CameraProvider extends ChangeNotifier {
       _fileNameFromPath(sourcePath),
     );
 
+    // On Android the plugin's cache dir and the recordings root are on
+    // different mounts, so the rename fails and the copy fallback runs.
     try {
       final movedFile = await sourceFile.rename(targetPath);
       final movedPath = movedFile.path;
@@ -766,7 +1094,8 @@ class CameraProvider extends ChangeNotifier {
       }
 
       _log(
-          'Moved segment failed readiness check, keeping source path: $movedPath');
+        'Moved segment failed readiness check, keeping source path: $movedPath',
+      );
       return sourcePath;
     } catch (renameError) {
       _log('Rename failed, falling back to copy/delete: $renameError');
@@ -779,11 +1108,24 @@ class CameraProvider extends ChangeNotifier {
           return copiedPath;
         }
         _log(
-            'Copied segment failed readiness check, keeping source path: $copiedPath');
+          'Copied segment failed readiness check, keeping source path: $copiedPath',
+        );
         await copiedFile.delete();
         return sourcePath;
       } catch (copyError) {
-        _log('Failed to persist segment into recordings directory: $copyError');
+        _logError(
+          'Failed to persist segment into recordings directory: $copyError',
+        );
+        // Remove a partial copy (for example after running out of space) so
+        // it does not show up in Ride History as a broken video.
+        try {
+          final partialCopy = File(targetPath);
+          if (await partialCopy.exists()) {
+            await partialCopy.delete();
+          }
+        } catch (_) {
+          // Best effort.
+        }
         return sourcePath;
       }
     }
@@ -847,44 +1189,158 @@ class CameraProvider extends ChangeNotifier {
     return candidates.first;
   }
 
-  // Start recording
+  /// Free bytes on the volume holding the recordings directory, or `null`
+  /// when the directory is not set up yet or the platform does not report
+  /// it (the native `getAvailableStorageBytes` method is missing, as on iOS,
+  /// or fails).
+  Future<int?> availableStorageBytes() async {
+    final directoryPath = _recordingsDirectory;
+    if (directoryPath == null || directoryPath.isEmpty) {
+      return null;
+    }
+    try {
+      return await platform.invokeMethod<int>('getAvailableStorageBytes', {
+        'path': directoryPath,
+      });
+    } catch (_) {
+      return null;
+    }
+  }
+
+  // Estimated size of one segment: its duration at the higher of the
+  // requested bitrate and 20 Mbps (Android ignores the requested bitrate).
+  int get _estimatedSegmentBytes {
+    const assumedMinimumBitrateBps = 20 * 1000 * 1000;
+    final bitrateBps = _videoBitrateBps > assumedMinimumBitrateBps
+        ? _videoBitrateBps
+        : assumedMinimumBitrateBps;
+    return _segmentDuration.inSeconds * bitrateBps ~/ 8;
+  }
+
+  // Margin for the sidecar and estimate error.
+  static const int _storageMarginBytes = 100 * 1024 * 1024;
+
+  // False only when the platform reports less free space than one more
+  // segment needs; unknown free space never blocks recording.
+  //
+  // [reclaimableBytes] is space the loop frees when the segment being
+  // recorded is registered. It only offsets the margin: the stopped segment
+  // is copied into the recordings directory before the loop deletes
+  // anything, so the copy needs a full segment of free space on its own.
+  Future<bool> _hasRoomForNextSegment({int reclaimableBytes = 0}) async {
+    final freeBytes = await availableStorageBytes();
+    if (freeBytes == null) {
+      return true;
+    }
+    final segmentBytes = _estimatedSegmentBytes;
+    final requiredBytes = segmentBytes + _storageMarginBytes;
+    final hasRoom =
+        freeBytes >= segmentBytes &&
+        freeBytes + reclaimableBytes >= requiredBytes;
+    if (!hasRoom) {
+      _logError(
+        'Low storage: $freeBytes bytes free '
+        '($reclaimableBytes reclaimable), $requiredBytes needed for the '
+        'next segment',
+      );
+    }
+    return hasRoom;
+  }
+
+  // Bytes of the unlocked session segments the loop deletes once the segment
+  // being recorded is registered.
+  Future<int> _bytesReclaimedByNextRegistration() async {
+    final evicted = segmentsEvictedByNextRegistration(
+      sessionPaths: _sessionSegmentPaths,
+      lockedPaths: _lockedSegmentPaths,
+      nextSegmentLocked: _pendingLockSequences.contains(_activeSegmentSequence),
+      maxUnlockedSegments: _maxRollingSegments,
+    );
+    var bytes = 0;
+    for (final path in evicted) {
+      try {
+        bytes += await File(path).length();
+      } catch (_) {
+        // A missing file frees nothing.
+      }
+    }
+    return bytes;
+  }
+
+  static const String _lowStorageMessage =
+      'Storage is almost full. Free up space on the phone to keep recording.';
+
+  int _elapsedRideMs() {
+    final startedAt = _recordingStartTime;
+    if (startedAt == null) {
+      return _currentSegmentStartMs;
+    }
+    return DateTime.now().difference(startedAt).inMilliseconds;
+  }
+
+  /// Starts a new segmented recording session.
+  ///
+  /// Returns `false` without side effects while a session is recording,
+  /// starting or stopping, or when the camera is not initialized. Otherwise
+  /// clears the previous session's segments, locks and timeline and returns
+  /// whether recording started.
   Future<bool> startRecording() async {
+    if (isRecording || _isStartingRecording || _isStoppingRecording) {
+      _log('Start ignored: a recording session is active or in transition');
+      return false;
+    }
     if (!_isInitialized ||
         _controller == null ||
         _recordingsDirectory == null) {
       _log('Camera not initialized or recordings directory not set');
       _log(
-          'isInitialized: $_isInitialized, controller: $_controller, recordingsDir: $_recordingsDirectory');
+        'isInitialized: $_isInitialized, controller: $_controller, recordingsDir: $_recordingsDirectory',
+      );
       return false;
     }
 
+    _isStartingRecording = true;
+    notifyListeners();
     try {
       _sessionSegmentPaths.clear();
       _sessionSegmentTimeline.clear();
       _lockedSegmentPaths.clear();
-      _pendingGalleryExports.clear();
-      _pendingIncidentSegmentLocks = 0;
-      _lastSegmentEndMs = 0;
+      _pendingLockSequences.clear();
+      _activeSegmentSequence = 0;
+      _lastSettledSegmentSequence = 0;
+      _currentSegmentStartMs = 0;
+      _currentVideoPath = null;
+      _lastRecordingError = null;
+      _consecutiveRollStopFailures = 0;
       _recordingRecoveryCount = 0;
       _lastRecordingRecoveryAt = null;
       _lastRecordingRecoveryReason = null;
-      _isStoppingRecording = false;
-      _recordingStartTime = DateTime.now();
+      _recordingStartTime = null;
       _elapsedTime = Duration.zero;
 
       _log('Starting recording...');
       _log(
-          'Recording segments will be captured every ${_segmentDuration.inSeconds}s');
+        'Recording segments will be captured every ${_segmentDuration.inSeconds}s',
+      );
+
+      if (!await _hasRoomForNextSegment()) {
+        _lastRecordingError = _lowStorageMessage;
+        _state = RecordingState.idle;
+        return false;
+      }
 
       final started = await _startVideoRecordingWithFallback();
       if (!started) {
         _state = RecordingState.idle;
         _recordingStartTime = null;
         _elapsedTime = Duration.zero;
-        notifyListeners();
         return false;
       }
 
+      // The ride timeline starts when the first segment starts recording.
+      _recordingStartTime = DateTime.now();
+      _activeSegmentSequence = 1;
+      _currentSegmentStartMs = 0;
       _state = RecordingState.recording;
       _armSegmentTimer();
 
@@ -898,12 +1354,14 @@ class CameraProvider extends ChangeNotifier {
       });
 
       _log('Recording started successfully');
-      notifyListeners();
       return true;
     } catch (e) {
-      _log('Error starting recording: $e');
+      _logError('Error starting recording: $e');
       _log('Stack trace: ${StackTrace.current}');
       return false;
+    } finally {
+      _isStartingRecording = false;
+      notifyListeners();
     }
   }
 
@@ -916,9 +1374,26 @@ class CameraProvider extends ChangeNotifier {
     try {
       await currentController.startVideoRecording();
       return true;
+    } on CameraException catch (e) {
+      _log(
+        'startVideoRecording failed at $_resolutionPreset/${_recordingFps}fps: $e',
+      );
+      if (currentController.value.isRecordingVideo ||
+          e.code == 'A video recording is already started.') {
+        // Not a preset problem: never tear down a controller that records.
+        return false;
+      }
     } catch (e) {
       _log(
-          'startVideoRecording failed at $_resolutionPreset/${_recordingFps}fps: $e');
+        'startVideoRecording failed at $_resolutionPreset/${_recordingFps}fps: $e',
+      );
+    }
+
+    final candidates = _resolutionFallbackCandidates(
+      _resolutionPreset,
+    ).skip(1).toList();
+    if (candidates.isEmpty) {
+      return false;
     }
 
     final activeCamera = await _resolveActiveCameraDescription();
@@ -927,7 +1402,10 @@ class CameraProvider extends ChangeNotifier {
       return false;
     }
 
-    final candidates = _resolutionFallbackCandidates(_resolutionPreset).skip(1);
+    // CameraX keeps one global camera state, so release the failed
+    // controller before initializing any candidate.
+    await _detachAndDisposeController();
+
     for (final candidatePreset in candidates) {
       final supportedFps = _supportedFpsOptionsForPreset(candidatePreset);
       var candidateFps = _recordingFps;
@@ -945,30 +1423,44 @@ class CameraProvider extends ChangeNotifier {
         continue;
       }
 
-      final previousController = _controller;
       _controller = candidateController;
+      _isInitialized = true;
       _resolutionPreset = candidatePreset;
       _recordingFps = candidateFps;
       _markResolutionSupported(activeCamera.name, candidatePreset);
-      if (previousController != null &&
-          !identical(previousController, candidateController)) {
-        await previousController.dispose();
-      }
       notifyListeners();
 
       try {
         await candidateController.startVideoRecording();
         _log(
-            'Recording fallback succeeded at $_resolutionPreset/${_recordingFps}fps.');
+          'Recording fallback succeeded at $_resolutionPreset/${_recordingFps}fps.',
+        );
         return true;
       } catch (e) {
         _log(
-            'Recording fallback failed at $candidatePreset/${candidateFps}fps: $e');
+          'Recording fallback failed at $candidatePreset/${candidateFps}fps: $e',
+        );
         _markResolutionUnsupported(activeCamera.name, candidatePreset);
+        await _detachAndDisposeController();
       }
     }
 
     return false;
+  }
+
+  Future<void> _detachAndDisposeController() async {
+    final previousController = _controller;
+    _controller = null;
+    _isInitialized = false;
+    notifyListeners();
+    if (previousController == null) {
+      return;
+    }
+    try {
+      await previousController.dispose();
+    } catch (e) {
+      _log('Error disposing camera controller: $e');
+    }
   }
 
   Future<CameraDescription?> _resolveActiveCameraDescription() async {
@@ -998,72 +1490,190 @@ class CameraProvider extends ChangeNotifier {
     });
   }
 
+  bool get _canCycleSegment =>
+      isRecording &&
+      _controller != null &&
+      _rollInFlight == null &&
+      !_isStoppingRecording &&
+      _lastRecordingError == null;
+
   Future<void> _rollSegmentIfNeeded() async {
-    if (!isRecording || _isRollingSegment || _isStoppingRecording) {
+    // The timer can fire while a pipeline recovery is cycling the segment.
+    // Wait for it; a restart there arms a new timer, which does the roll.
+    final inFlight = _rollInFlight;
+    if (inFlight != null) {
+      await inFlight;
+      if (_segmentTimer?.isActive ?? false) {
+        return;
+      }
+    }
+    if (!_canCycleSegment) {
       return;
     }
 
-    _isRollingSegment = true;
-    final rollStartedAt = DateTime.now();
+    final completer = Completer<void>();
+    _rollInFlight = completer.future;
     try {
       _log(
-          'Rolling recording segment after ${_segmentDuration.inSeconds} seconds');
-      final stopStartedAt = DateTime.now();
-      final file = await _controller!.stopVideoRecording();
-      final stopElapsedMs = DateTime.now().difference(stopStartedAt).inMilliseconds;
-      var restartElapsedMs = 0;
-
-      if (!_isStoppingRecording) {
-        final restartStartedAt = DateTime.now();
-        await _controller!.startVideoRecording();
-        _armSegmentTimer();
-        restartElapsedMs =
-            DateTime.now().difference(restartStartedAt).inMilliseconds;
-        _log('Segment roll restart completed in ${restartElapsedMs}ms');
-      }
-
-      final registerStartedAt = DateTime.now();
-      await _registerCompletedSegment(
-        file.path,
-        deferMaintenance: true,
+        'Rolling recording segment after ${_segmentDuration.inSeconds} seconds',
       );
-      final registerElapsedMs =
-          DateTime.now().difference(registerStartedAt).inMilliseconds;
-      final totalElapsedMs = DateTime.now().difference(rollStartedAt).inMilliseconds;
-      _recordRollMetrics(
-        stopMs: stopElapsedMs,
-        restartMs: restartElapsedMs,
-        registerMs: registerElapsedMs,
-        totalMs: totalElapsedMs,
-      );
-      _log('Segment roll timings: stop=${stopElapsedMs}ms, register=${registerElapsedMs}ms, total=${totalElapsedMs}ms');
+      await _cycleSegment();
+      _consecutiveRollStopFailures = 0;
     } catch (e) {
-      _log('Error while rolling segment: $e');
-      if (!_isStoppingRecording && isRecording) {
-        _armSegmentTimer();
-      }
+      _logError('Error while rolling segment: $e');
+      _handleSegmentStopFailure();
     } finally {
-      _isRollingSegment = false;
+      _rollInFlight = null;
+      completer.complete();
     }
   }
 
+  // A segment stop failed. Retry at the next boundary once; fail the session
+  // when the controller is no longer recording or the stop fails twice in a
+  // row.
+  void _handleSegmentStopFailure() {
+    _consecutiveRollStopFailures++;
+    if (_isStoppingRecording || !isRecording || _lastRecordingError != null) {
+      return;
+    }
+    final stillRecording = _controller?.value.isRecordingVideo ?? false;
+    if (!stillRecording || _consecutiveRollStopFailures >= 2) {
+      _enterRecordingFault(
+        'Recording stopped unexpectedly: the camera failed to end a '
+        'segment.',
+      );
+    } else {
+      _armSegmentTimer();
+    }
+  }
+
+  // Stops the current segment, restarts recording immediately, then
+  // registers the stopped file while the next segment records. Returns
+  // whether recording was restarted. Throws when the stop itself fails.
+  Future<bool> _cycleSegment() async {
+    final controller = _controller!;
+
+    // Checked before the stop so the platform call does not widen the gap
+    // between segments.
+    final hasRoom = await _hasRoomForNextSegment(
+      reclaimableBytes: await _bytesReclaimedByNextRegistration(),
+    );
+
+    final cycleStartedAt = DateTime.now();
+    final stoppedSequence = _activeSegmentSequence;
+    final stoppedStartMs = _currentSegmentStartMs;
+
+    final file = await controller.stopVideoRecording();
+    final stoppedEndMs = _elapsedRideMs();
+    final stopElapsedMs = DateTime.now()
+        .difference(cycleStartedAt)
+        .inMilliseconds;
+
+    var restarted = false;
+    var restartElapsedMs = 0;
+    var faultMessage =
+        'Recording stopped unexpectedly: the camera could not restart '
+        'after a segment ended (storage full or camera unavailable).';
+    if (!_isStoppingRecording && !hasRoom) {
+      faultMessage = _lowStorageMessage;
+    } else if (!_isStoppingRecording) {
+      final restartStartedAt = DateTime.now();
+      restarted = await _restartRecordingAfterSegmentStop(controller);
+      restartElapsedMs = DateTime.now()
+          .difference(restartStartedAt)
+          .inMilliseconds;
+      _log(
+        'Segment restart ${restarted ? 'completed' : 'failed'} in '
+        '${restartElapsedMs}ms',
+      );
+    }
+
+    final registerStartedAt = DateTime.now();
+    await _registerCompletedSegment(
+      file.path,
+      sequence: stoppedSequence,
+      startMs: stoppedStartMs,
+      endMs: stoppedEndMs,
+    );
+    final registerElapsedMs = DateTime.now()
+        .difference(registerStartedAt)
+        .inMilliseconds;
+    final totalElapsedMs = DateTime.now()
+        .difference(cycleStartedAt)
+        .inMilliseconds;
+    _recordRollMetrics(
+      stopMs: stopElapsedMs,
+      restartMs: restartElapsedMs,
+      registerMs: registerElapsedMs,
+      totalMs: totalElapsedMs,
+    );
+    _log(
+      'Segment roll timings: stop=${stopElapsedMs}ms, '
+      'register=${registerElapsedMs}ms, total=${totalElapsedMs}ms',
+    );
+
+    if (!restarted && !_isStoppingRecording && isRecording) {
+      _enterRecordingFault(faultMessage);
+    }
+    return restarted;
+  }
+
+  Future<bool> _restartRecordingAfterSegmentStop(
+    CameraController controller,
+  ) async {
+    for (var attempt = 1; attempt <= 2; attempt++) {
+      try {
+        await controller.startVideoRecording();
+        _activeSegmentSequence++;
+        _currentSegmentStartMs = _elapsedRideMs();
+        _armSegmentTimer();
+        return true;
+      } catch (e) {
+        _logError('Segment restart attempt $attempt failed: $e');
+        if (_isStoppingRecording) {
+          return false;
+        }
+        if (attempt == 1) {
+          await Future<void>.delayed(const Duration(milliseconds: 500));
+          if (_isStoppingRecording) {
+            return false;
+          }
+        }
+      }
+    }
+    return false;
+  }
+
+  void _enterRecordingFault(String message) {
+    _lastRecordingError = message;
+    _segmentTimer?.cancel();
+    _segmentTimer = null;
+    _logError(message);
+    notifyListeners();
+  }
+
+  /// Restarts the recording pipeline (stop, restart, then register the
+  /// stopped segment) to recover from a suspected video stall.
+  ///
+  /// Returns `false` when not recording, while a roll or stop is in progress,
+  /// after a recording failure, or when the recovery fails.
   Future<bool> recoverRecordingPipeline({
     String reason = 'suspected-video-stall',
   }) async {
-    if (!isRecording || _controller == null) {
-      return false;
-    }
-    if (_isRollingSegment || _isStoppingRecording) {
+    if (!_canCycleSegment) {
       return false;
     }
 
-    _isRollingSegment = true;
+    final completer = Completer<void>();
+    _rollInFlight = completer.future;
     try {
       _log('Attempting recording pipeline recovery: $reason');
-      final file = await _controller!.stopVideoRecording();
-      await _registerCompletedSegment(file.path);
-      await _controller!.startVideoRecording();
-      _armSegmentTimer();
+      final restarted = await _cycleSegment();
+      _consecutiveRollStopFailures = 0;
+      if (!restarted) {
+        _log('Recording pipeline recovery failed: restart failed');
+        return false;
+      }
       _recordingRecoveryCount++;
       _lastRecordingRecoveryAt = DateTime.now();
       _lastRecordingRecoveryReason = reason;
@@ -1071,232 +1681,140 @@ class CameraProvider extends ChangeNotifier {
       notifyListeners();
       return true;
     } catch (e) {
-      _log('Recording pipeline recovery failed: $e');
+      // The stop failed: same handling as a failed roll, so the segment
+      // timer is re-armed or the session enters a fault.
+      _logError('Recording pipeline recovery failed: $e');
+      _handleSegmentStopFailure();
       return false;
     } finally {
-      _isRollingSegment = false;
+      _rollInFlight = null;
+      completer.complete();
     }
   }
 
+  // Persists a stopped segment into the recordings directory and adds it to
+  // the session with its timeline entry, applies pending incident locks and
+  // trims the session's unlocked segments to the loop size. Never throws, so
+  // a storage error here is not mistaken for a failed segment stop.
   Future<void> _registerCompletedSegment(
     String videoPath, {
-    bool deferMaintenance = false,
+    required int sequence,
+    required int startMs,
+    required int endMs,
   }) async {
-    final persistedVideoPath =
-        await _persistSegmentToRecordingsDirectory(videoPath);
-    if (!await _isSegmentFileReady(persistedVideoPath)) {
-      _log('Skipping segment registration due to unreadable file: '
-          '$persistedVideoPath');
-      return;
-    }
-
-    _currentVideoPath = persistedVideoPath;
-    _recordingsDirectory ??= File(persistedVideoPath).parent.path;
-    _sessionSegmentPaths.add(persistedVideoPath);
-
-    final startMs = _lastSegmentEndMs;
-    final endMs = _recordingStartTime == null
-        ? startMs
-        : DateTime.now().difference(_recordingStartTime!).inMilliseconds;
-    final normalizedEndMs = endMs >= startMs ? endMs : startMs;
-    _sessionSegmentTimeline.add(
-      SegmentTimelineEntry(
-        path: persistedVideoPath,
-        startMs: startMs,
-        endMs: normalizedEndMs,
-      ),
-    );
-    _lastSegmentEndMs = normalizedEndMs;
-
-    if (_pendingIncidentSegmentLocks > 0) {
-      _lockedSegmentPaths.add(persistedVideoPath);
-      _pendingIncidentSegmentLocks--;
-      _log('Incident lock applied to new segment: $persistedVideoPath');
-    }
-
-    while (_sessionSegmentPaths.length > _maxRollingSegments) {
-      final removableIndex = _sessionSegmentPaths
-          .indexWhere((path) => !_lockedSegmentPaths.contains(path));
-      if (removableIndex < 0) {
-        _log(
-            'Loop limit exceeded, but all segments are locked. Skipping overwrite for safety.');
-        break;
+    try {
+      final persistedVideoPath = await _persistSegmentToRecordingsDirectory(
+        videoPath,
+      );
+      if (!await _isSegmentFileReady(persistedVideoPath)) {
+        _logError(
+          'Skipping segment registration due to unreadable file: '
+          '$persistedVideoPath',
+        );
+        _pendingLockSequences.remove(sequence);
+        return;
       }
 
-      final oldestPath = _sessionSegmentPaths.removeAt(removableIndex);
-      _lockedSegmentPaths.remove(oldestPath);
-      _sessionSegmentTimeline.removeWhere((entry) => entry.path == oldestPath);
-      try {
-        final oldestFile = File(oldestPath);
-        if (await oldestFile.exists()) {
-          await oldestFile.delete();
-          _log('Deleted oldest segment due to rolling limit: $oldestPath');
+      _currentVideoPath = persistedVideoPath;
+      _sessionSegmentPaths.add(persistedVideoPath);
+      _sessionSegmentTimeline.add(
+        SegmentTimelineEntry(
+          path: persistedVideoPath,
+          startMs: startMs,
+          endMs: endMs >= startMs ? endMs : startMs,
+        ),
+      );
+
+      if (_pendingLockSequences.remove(sequence)) {
+        _lockedSegmentPaths.add(persistedVideoPath);
+        _log('Incident lock applied to new segment: $persistedVideoPath');
+      }
+
+      final evicted = selectSegmentsToEvict(
+        sessionPaths: _sessionSegmentPaths,
+        lockedPaths: _lockedSegmentPaths,
+        maxUnlockedSegments: _maxRollingSegments,
+      );
+      for (final oldestPath in evicted) {
+        _sessionSegmentPaths.remove(oldestPath);
+        _sessionSegmentTimeline.removeWhere(
+          (entry) => entry.path == oldestPath,
+        );
+        try {
+          final oldestFile = File(oldestPath);
+          if (await oldestFile.exists()) {
+            await oldestFile.delete();
+            _log('Deleted oldest segment due to rolling limit: $oldestPath');
+          }
+        } catch (e) {
+          _log('Failed deleting old rolling segment: $e');
         }
-      } catch (e) {
-        _log('Failed deleting old rolling segment: $e');
       }
-    }
-
-    if (Platform.isAndroid) {
-      if (deferMaintenance) {
-        Future<void>.delayed(const Duration(milliseconds: 700), () {
-          unawaited(_scanMediaFile(persistedVideoPath));
-        });
-      } else {
-        unawaited(_scanMediaFile(persistedVideoPath));
+    } catch (e) {
+      _logError('Failed to register segment $videoPath: $e');
+    } finally {
+      if (sequence > _lastSettledSegmentSequence) {
+        _lastSettledSegmentSequence = sequence;
       }
-    }
-
-    if (deferMaintenance) {
-      _queueDeferredMaintenance();
-    } else {
-      await _enforceRecordingRetention(includeTelemetryPrune: true);
     }
   }
 
+  // Runs the orphan-sidecar prune shortly after a stop, off the stop path.
   void _queueDeferredMaintenance() {
     _deferredMaintenanceTimer?.cancel();
     _deferredMaintenanceTimer = Timer(const Duration(seconds: 2), () async {
-      if (_isDeferredMaintenanceRunning || _isStoppingRecording) {
+      if (_isDeferredMaintenanceRunning) {
         return;
       }
       _isDeferredMaintenanceRunning = true;
       try {
-        await _enforceRecordingRetention(includeTelemetryPrune: false);
+        await _pruneOrphanTelemetryFiles();
       } finally {
         _isDeferredMaintenanceRunning = false;
       }
     });
   }
 
-  bool _isVideoFilePath(String path) {
-    final lower = path.toLowerCase();
-    return lower.endsWith('.mp4') ||
-        lower.endsWith('.mov') ||
-        lower.endsWith('.mkv') ||
-        lower.endsWith('.avi');
+  // Static so the isolate closure cannot capture the provider.
+  static Future<List<String>> _findOrphanTelemetryFilesInBackground(
+    String directoryPath,
+  ) {
+    return Isolate.run(() => findOrphanTelemetryFiles(directoryPath));
   }
 
-  Future<void> _enforceRecordingRetention({
-    required bool includeTelemetryPrune,
-  }) async {
+  // Deletes unlocked telemetry sidecars whose videos are all gone. Parsing
+  // runs on a background isolate.
+  Future<void> _pruneOrphanTelemetryFiles() async {
     final recordingsDirectoryPath = _recordingsDirectory;
     if (recordingsDirectoryPath == null || recordingsDirectoryPath.isEmpty) {
       return;
     }
 
-    final recordingsDir = Directory(recordingsDirectoryPath);
-    if (!await recordingsDir.exists()) {
+    List<String> orphans;
+    try {
+      orphans = await _findOrphanTelemetryFilesInBackground(
+        recordingsDirectoryPath,
+      );
+    } catch (e) {
+      _log('Orphan telemetry scan failed: $e');
       return;
     }
 
-    if (_sessionSegmentPaths.length <= _maxRollingSegments) {
-      if (includeTelemetryPrune) {
-        await _pruneOrphanTelemetryFiles(recordingsDir);
-      }
-      return;
-    }
-
-    final videoFiles = <File>[];
-    await for (final entity
-        in recordingsDir.list(recursive: true, followLinks: false)) {
-      if (entity is! File || !_isVideoFilePath(entity.path)) {
-        continue;
-      }
-      videoFiles.add(entity);
-    }
-
-    if (videoFiles.length > _maxRollingSegments) {
-      // Pre-fetch modification times asynchronously to avoid blocking the
-      // UI thread with synchronous I/O.
-      final modTimes = <File, DateTime>{};
-      for (final file in videoFiles) {
-        modTimes[file] = (await file.stat()).modified;
-      }
-      videoFiles.sort((a, b) {
-        return modTimes[a]!.compareTo(modTimes[b]!);
-      });
-
-      final removeCount = videoFiles.length - _maxRollingSegments;
-      final removedPaths = <String>{};
-
-      for (final file in videoFiles.take(removeCount)) {
-        final path = file.path;
-        try {
-          if (await file.exists()) {
-            await file.delete();
-            removedPaths.add(path);
-            _log('Deleted old recording due to retention policy: $path');
-          }
-        } catch (e) {
-          _log('Failed deleting old recording $path: $e');
-        }
-      }
-
-      if (removedPaths.isNotEmpty) {
-        _sessionSegmentPaths.removeWhere((path) => removedPaths.contains(path));
-        _lockedSegmentPaths.removeWhere((path) => removedPaths.contains(path));
-        _sessionSegmentTimeline
-            .removeWhere((entry) => removedPaths.contains(entry.path));
-        _pendingGalleryExports
-            .removeWhere((path) => removedPaths.contains(path));
-
-        final currentPath = _currentVideoPath;
-        if (currentPath != null && removedPaths.contains(currentPath)) {
-          _currentVideoPath = _sessionSegmentPaths.isNotEmpty
-              ? _sessionSegmentPaths.last
-              : null;
-        }
-      }
-    }
-
-    if (includeTelemetryPrune) {
-      await _pruneOrphanTelemetryFiles(recordingsDir);
-    }
-  }
-
-  Future<void> _pruneOrphanTelemetryFiles(Directory recordingsDir) async {
-    await for (final entity
-        in recordingsDir.list(recursive: true, followLinks: false)) {
-      if (entity is! File ||
-          !entity.path.toLowerCase().endsWith('.telemetry.json')) {
-        continue;
-      }
-
+    for (final path in orphans) {
       try {
-        final raw = await entity.readAsString();
-        final json = jsonDecode(raw) as Map<String, dynamic>;
-        final segmentPaths =
-            (json['segmentPaths'] as List<dynamic>? ?? const <dynamic>[])
-                .map((value) => value.toString().trim())
-                .where((path) => path.isNotEmpty)
-                .toList();
-
-        if (segmentPaths.isEmpty) {
-          await entity.delete();
-          _log('Deleted telemetry with no segment paths: ${entity.path}');
-          continue;
-        }
-
-        var hasAnyExistingSegment = false;
-        for (final segmentPath in segmentPaths) {
-          if (await File(segmentPath).exists()) {
-            hasAnyExistingSegment = true;
-            break;
-          }
-        }
-
-        if (!hasAnyExistingSegment) {
-          await entity.delete();
-          _log(
-              'Deleted telemetry with no remaining segment files: ${entity.path}');
-        }
-      } catch (_) {
-        // Skip malformed telemetry cleanup to avoid accidental data loss.
+        await File(path).delete();
+        _log('Deleted telemetry with no remaining segment files: $path');
+      } catch (e) {
+        _log('Failed deleting orphan telemetry $path: $e');
       }
     }
   }
 
+  /// Locks the last [protectPastSegments] registered segments (clamped to
+  /// 0-10) and, when [protectCurrentSegment] is set while recording, every
+  /// segment not yet registered: the one being recorded and, during a roll,
+  /// the one still being saved. Repeated calls within one segment lock
+  /// nothing extra. Locked segments are exempt from loop deletion.
   void markIncident({
     int protectPastSegments = 2,
     bool protectCurrentSegment = true,
@@ -1312,12 +1830,19 @@ class CameraProvider extends ChangeNotifier {
       _lockedSegmentPaths.add(_sessionSegmentPaths[index]);
     }
 
-    if (protectCurrentSegment && isRecording) {
-      _pendingIncidentSegmentLocks++;
+    final lockUnsettled = protectCurrentSegment && isRecording;
+    if (lockUnsettled) {
+      _pendingLockSequences.addAll(
+        unsettledSegmentSequences(
+          lastSettledSequence: _lastSettledSegmentSequence,
+          activeSequence: _activeSegmentSequence,
+        ),
+      );
     }
 
     _log(
-        'Incident marked ($reason): locked $clampedPast previous segments, pending current lock: ${protectCurrentSegment && isRecording}');
+      'Incident marked ($reason): locked $clampedPast previous segments, pending current lock: $lockUnsettled',
+    );
     notifyListeners();
   }
 
@@ -1342,13 +1867,8 @@ class CameraProvider extends ChangeNotifier {
 
     for (final rawPath in segmentPaths) {
       final sourcePath = rawPath.trim();
-      if (sourcePath.isEmpty) {
-        continue;
-      }
-
-      if (_isPathInsideDirectory(sourcePath, _androidPublicExportDirectory)) {
-        unawaited(_scanMediaFile(sourcePath));
-      } else {
+      if (sourcePath.isNotEmpty &&
+          !_pendingGalleryExports.contains(sourcePath)) {
         _pendingGalleryExports.add(sourcePath);
       }
     }
@@ -1372,6 +1892,20 @@ class CameraProvider extends ChangeNotifier {
   }
 
   Future<void> _drainGalleryExportQueue() async {
+    var exported = 0;
+    var failed = 0;
+    var permissionDenied = false;
+    // Requested at most once per drain.
+    bool? storageGranted;
+
+    Future<void> export(String sourcePath, String fileName) {
+      return platform.invokeMethod<String>('exportVideoToGallery', {
+        'sourcePath': sourcePath,
+        'displayName': fileName,
+        'relativePath': _galleryRelativePath,
+      });
+    }
+
     while (_pendingGalleryExports.isNotEmpty) {
       final sourcePath = _pendingGalleryExports.removeAt(0);
       final sourceFile = File(sourcePath);
@@ -1380,97 +1914,133 @@ class CameraProvider extends ChangeNotifier {
         continue;
       }
 
-      final fileName = sourcePath.split(Platform.pathSeparator).last;
+      final fileName = _fileNameFromPath(sourcePath);
       try {
-        await platform.invokeMethod<String>('exportVideoToGallery', {
-          'sourcePath': sourcePath,
-          'displayName': fileName,
-          'relativePath': _galleryRelativePath,
-        });
+        await export(sourcePath, fileName);
+        exported++;
         _log('Deferred gallery export completed: $fileName');
-      } catch (e) {
-        _log('Deferred export failed, trying media scan fallback: $e');
-        final fallbackPath =
-            await _copySegmentToAndroidPublicGallery(sourcePath);
-        if (fallbackPath != null) {
-          await _scanMediaFile(fallbackPath);
-        } else {
-          await _scanMediaFile(sourcePath);
+      } on PlatformException catch (e) {
+        if (e.code != 'PERMISSION_DENIED') {
+          failed++;
+          _logError('Deferred gallery export failed for $fileName: $e');
+          continue;
         }
+        // Android 9 and lower: the native side needs WRITE_EXTERNAL_STORAGE
+        // (Permission.storage). Ask once per drain, then retry this clip
+        // once. The dart:io copy fallback is not used: it needs the same
+        // permission.
+        if (storageGranted == null) {
+          try {
+            storageGranted = AppPermissionService.isPermissionGranted(
+              await Permission.storage.request(),
+            );
+          } catch (requestError) {
+            // For example no foreground activity to show the prompt.
+            _logError('Storage permission request failed: $requestError');
+            storageGranted = false;
+          }
+        }
+        if (!storageGranted) {
+          permissionDenied = true;
+          failed++;
+          continue;
+        }
+        try {
+          await export(sourcePath, fileName);
+          exported++;
+        } catch (retryError) {
+          failed++;
+          _logError('Gallery export retry failed for $fileName: $retryError');
+        }
+      } catch (e) {
+        // The private copy stays in the recordings directory.
+        failed++;
+        _logError('Deferred gallery export failed for $fileName: $e');
       }
     }
+
+    if (_isDisposed || (exported == 0 && failed == 0)) {
+      return;
+    }
+    _lastGalleryExportMessage = galleryExportSummary(
+      exported: exported,
+      failed: failed,
+      permissionDenied: permissionDenied,
+    );
+    notifyListeners();
   }
 
-  Future<String?> _copySegmentToAndroidPublicGallery(String sourcePath) async {
-    if (!Platform.isAndroid) {
-      return null;
-    }
-
-    final sourceFile = File(sourcePath);
-    if (!await sourceFile.exists()) {
-      return null;
-    }
-
-    try {
-      final galleryDirectory = Directory(_androidPublicExportDirectory);
-      if (!await galleryDirectory.exists()) {
-        await galleryDirectory.create(recursive: true);
-      }
-
-      final targetPath = await _buildUniqueSegmentPath(
-        galleryDirectory.path,
-        _fileNameFromPath(sourcePath),
-      );
-      final copied = await sourceFile.copy(targetPath);
-      _log('Copied segment to public gallery fallback: ${copied.path}');
-      return copied.path;
-    } catch (e) {
-      _log('Public gallery fallback copy failed: $e');
-      return null;
-    }
+  /// Rider-facing summary of a gallery export run.
+  @visibleForTesting
+  static String galleryExportSummary({
+    required int exported,
+    required int failed,
+    required bool permissionDenied,
+  }) {
+    String clips(int n) => '$n locked clip${n == 1 ? '' : 's'}';
+    final parts = <String>[
+      if (exported > 0) '${clips(exported)} copied to the gallery',
+      if (failed > 0)
+        permissionDenied
+            ? '${clips(failed)} not copied (storage permission denied)'
+            : '${clips(failed)} could not be copied to the gallery',
+    ];
+    final message = parts.join('; ');
+    return '${message[0].toUpperCase()}${message.substring(1)}.';
   }
 
-  // Scan media file to make it visible in gallery
-  Future<void> _scanMediaFile(String filePath) async {
-    try {
-      await platform.invokeMethod('scanMediaFile', {'path': filePath});
-      _log('Media file scanned successfully: $filePath');
-    } catch (e) {
-      _log('Error scanning media file: $e');
-    }
-  }
-
-  // Stop recording
+  /// Stops the session: waits (up to 60 s) for an in-flight segment roll,
+  /// stops the camera, registers the final segment and returns the final
+  /// segment's path (or `null` when not recording or already stopping).
+  /// When the stop fails it logs the error and returns the last registered
+  /// segment's path instead.
+  ///
+  /// [isStoppingRecording] is `true` and notified for the whole call. When
+  /// it returns, [lastSessionSegmentPaths], [lastSessionSegmentTimeline] and
+  /// [lockedSegmentPaths] describe the stopped session; they stay unchanged
+  /// until the next [startRecording].
   Future<String?> stopRecording() async {
-    if (!isRecording) {
+    if (!isRecording || _isStoppingRecording) {
       _log('Not currently recording');
       return null;
     }
 
+    _isStoppingRecording = true;
+    notifyListeners();
     try {
       _log('Stopping recording...');
-      _isStoppingRecording = true;
 
       _segmentTimer?.cancel();
       _segmentTimer = null;
 
-      var waitAttempts = 0;
-      while (_isRollingSegment && waitAttempts < 20) {
-        await Future<void>.delayed(const Duration(milliseconds: 100));
-        waitAttempts++;
+      final rollInFlight = _rollInFlight;
+      if (rollInFlight != null) {
+        await rollInFlight.timeout(
+          _rollWaitTimeout,
+          onTimeout: () =>
+              _logError('Segment roll still running after $_rollWaitTimeout'),
+        );
+        // A roll that restarted recording re-armed the segment timer.
+        _segmentTimer?.cancel();
+        _segmentTimer = null;
       }
 
       // Cancel timer
       _timerStream?.cancel();
       _timerStream = null;
 
+      final finalSequence = _activeSegmentSequence;
+      final finalStartMs = _currentSegmentStartMs;
       String? cacheVideoPath;
+      var finalEndMs = _elapsedRideMs();
       try {
         final file = await _controller!.stopVideoRecording();
+        finalEndMs = _elapsedRideMs();
         cacheVideoPath = file.path;
       } on CameraException catch (e) {
-        // Race safety: when recording already stopped at plugin level, preserve
-        // session continuity and let caller persist telemetry for known segments.
+        // Race safety: when recording already stopped at plugin level,
+        // preserve session continuity and let the caller persist telemetry
+        // for known segments.
         if (e.code == 'No video is recording') {
           _log('stopVideoRecording race detected: ${e.description ?? e.code}');
           if (_sessionSegmentPaths.isNotEmpty) {
@@ -1484,43 +2054,44 @@ class CameraProvider extends ChangeNotifier {
       }
 
       _state = RecordingState.stopped;
-      _recordingStartTime = null;
 
       if (cacheVideoPath != null && cacheVideoPath.isNotEmpty) {
         _log('Video stop candidate path: $cacheVideoPath');
-        _log('File ready: ${await _isSegmentFileReady(cacheVideoPath)}');
 
         if (!_sessionSegmentPaths.contains(cacheVideoPath)) {
-          await _registerCompletedSegment(cacheVideoPath);
+          await _registerCompletedSegment(
+            cacheVideoPath,
+            sequence: finalSequence,
+            startMs: finalStartMs,
+            endMs: finalEndMs,
+          );
         } else {
           _currentVideoPath = cacheVideoPath;
         }
       }
+      _recordingStartTime = null;
 
       final finalVideoPath = await _resolveReadyFinalVideoPath(
         cacheVideoPath: cacheVideoPath,
       );
       _log('Final persisted video path: $finalVideoPath');
 
-      // In hybrid mode, only explicitly protected clips are auto-exported.
-      if (_sessionSegmentPaths.isNotEmpty) {
+      // Locked clips leave private storage only when the rider opted in.
+      if (autoExportLockedClipsToGallery && _sessionSegmentPaths.isNotEmpty) {
         final exportCandidates = _segmentsSelectedForPublicExport();
         if (exportCandidates.isNotEmpty) {
           _enqueueDeferredGalleryExport(exportCandidates);
         } else {
-          _log('No locked segments selected for automatic public export.');
+          _log('No locked segments selected for public export.');
         }
       }
 
-      await _enforceRecordingRetention(includeTelemetryPrune: true);
-
-      notifyListeners();
+      _queueDeferredMaintenance();
       return finalVideoPath;
     } catch (e) {
       _state = RecordingState.stopped;
       _recordingStartTime = null;
-      notifyListeners();
-      _log('Error stopping recording: $e');
+      _logError('Error stopping recording: $e');
       _log('Stack trace: ${StackTrace.current}');
       if (_sessionSegmentPaths.isNotEmpty) {
         return _sessionSegmentPaths.last;
@@ -1528,10 +2099,14 @@ class CameraProvider extends ChangeNotifier {
       return _currentVideoPath;
     } finally {
       _isStoppingRecording = false;
+      notifyListeners();
     }
   }
 
-  // Get list of all recordings
+  /// Lists every file (videos, telemetry sidecars, markers) under the
+  /// recordings directory and the roots earlier builds fell back to, in no
+  /// particular order. Returns an empty list when the recordings directory
+  /// cannot be set up or listing fails.
   Future<List<FileSystemEntity>> getRecordings() async {
     if (_recordingsDirectory == null) {
       await _setupRecordingsDirectory();
@@ -1541,19 +2116,20 @@ class CameraProvider extends ChangeNotifier {
     try {
       final files = <FileSystemEntity>[];
       final seenPaths = <String>{};
-      await _appendFilesFromDirectory(
-        files: files,
-        seenPaths: seenPaths,
-        directoryPath: _recordingsDirectory,
-      );
-
-      files.sort((a, b) => File(b.path)
-          .statSync()
-          .modified
-          .compareTo(File(a.path).statSync().modified));
+      final directories = <String?>[
+        _recordingsDirectory,
+        ...await _legacyFallbackRecordingsDirectories(),
+      ];
+      for (final directoryPath in directories) {
+        await _appendFilesFromDirectory(
+          files: files,
+          seenPaths: seenPaths,
+          directoryPath: directoryPath,
+        );
+      }
       return files;
     } catch (e) {
-      _log('Error getting recordings: $e');
+      _logError('Error getting recordings: $e');
       return [];
     }
   }
@@ -1573,8 +2149,10 @@ class CameraProvider extends ChangeNotifier {
         return;
       }
 
-      await for (final entity
-          in dir.list(recursive: true, followLinks: false)) {
+      await for (final entity in dir.list(
+        recursive: true,
+        followLinks: false,
+      )) {
         if (entity is! File) {
           continue;
         }
@@ -1588,8 +2166,15 @@ class CameraProvider extends ChangeNotifier {
     }
   }
 
+  /// Disposes the camera controller to free the camera while idle (for
+  /// example while Ride History is open). Waits for an in-progress
+  /// initialization first; does nothing while a recording is starting,
+  /// active or stopping.
   Future<void> releaseCameraIfIdle() async {
-    if (isRecording || _isStoppingRecording) {
+    while (_initInFlight != null) {
+      await _initInFlight;
+    }
+    if (isRecording || _isStartingRecording || _isStoppingRecording) {
       return;
     }
 
@@ -1618,13 +2203,17 @@ class CameraProvider extends ChangeNotifier {
     }
   }
 
+  /// Cancels the segment, maintenance and elapsed-time timers, closes
+  /// [timerStream] and disposes the camera controller without awaiting it.
+  /// A gallery export still running afterwards reports no result.
   @override
   void dispose() {
+    _isDisposed = true;
     _segmentTimer?.cancel();
     _deferredMaintenanceTimer?.cancel();
     _timerStream?.cancel();
-    _timerController.close();
-    _controller?.dispose();
+    unawaited(_timerController.close());
+    unawaited(_controller?.dispose());
     super.dispose();
   }
 }

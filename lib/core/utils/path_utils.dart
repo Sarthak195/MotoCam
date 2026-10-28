@@ -54,7 +54,7 @@ String normalizePath(String path) {
   if (prefix.isNotEmpty) {
     if (resolved.isEmpty) {
       resolved = prefix;
-    } else if (prefix == '//') {
+    } else if (prefix == '//' || prefix == '/') {
       resolved = '$prefix$resolved';
     } else {
       resolved = '$prefix/$resolved';
@@ -65,7 +65,7 @@ String normalizePath(String path) {
     resolved = '.';
   }
 
-  var result = resolved.replaceAll('/', Platform.pathSeparator);
+  final result = resolved.replaceAll('/', Platform.pathSeparator);
   return Platform.isWindows ? result.toLowerCase() : result;
 }
 
@@ -96,11 +96,11 @@ bool isPathInsideDirectory(String filePath, String directoryPath) {
 
 /// Extracts the file-name component from a full [path].
 ///
-/// Returns [path] unchanged if it contains no separator.
+/// Splits on `/` and on `Platform.pathSeparator`, so Windows paths that use
+/// either separator work. Returns [path] unchanged if it contains no
+/// separator.
 String fileNameFromPath(String path) {
-  final parts = path.split(Platform.pathSeparator);
-  if (parts.isEmpty) {
-    return path;
-  }
-  return parts.last;
+  final separator = Platform.pathSeparator;
+  final unified = separator == '/' ? path : path.replaceAll('/', separator);
+  return unified.split(separator).last;
 }

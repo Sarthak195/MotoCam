@@ -1,12 +1,19 @@
 ## Key properties template — DO NOT COMMIT
 # Copy this file to android/key.properties and fill with real values.
 
-# Path to the keystore file, relative to the repo root or absolute.
-storeFile=android/release.keystore
+# Path to the keystore file, relative to android/app/ or absolute.
+# The default below is android/release.keystore, where
+# scripts/generate-keystore.ps1 writes the keystore by default.
+storeFile=../release.keystore
 storePassword=REPLACE_WITH_STORE_PASSWORD
 keyAlias=REPLACE_WITH_KEY_ALIAS
 keyPassword=REPLACE_WITH_KEY_PASSWORD
 
 # Notes:
 # - Do NOT commit your real `android/key.properties` or the keystore file.
-# - Use CI secret storage to provide `MOTOCAM_KEYSTORE_*` env vars in automation.
+# - In CI and automation, provide the values through secret-backed environment
+#   variables instead: MOTOCAM_KEYSTORE_FILE, MOTOCAM_KEYSTORE_PASSWORD,
+#   MOTOCAM_KEY_ALIAS and MOTOCAM_KEY_PASSWORD.
+# - Each value is resolved independently: its environment variable wins when it
+#   is set and non-empty, otherwise the value from this file is used.
+# - The generate-keystore.ps1 default alias is `moto_release`.

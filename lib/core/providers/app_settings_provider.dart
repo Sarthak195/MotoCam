@@ -1,12 +1,30 @@
-import 'package:camera/camera.dart';
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-enum QualityPresetTier { balanced, highDetail }
+/// Groups the quality presets shown in the settings sheet.
+enum QualityPresetTier {
+  /// Everyday presets up to 1080p.
+  balanced,
 
-enum IncidentSensitivity { low, medium, high }
+  /// The 4K preset.
+  highDetail,
+}
 
+/// How easily a g-force spike auto-locks the current segment.
+enum IncidentSensitivity {
+  /// Highest threshold, fewest auto-locks.
+  low,
+
+  /// The default threshold.
+  medium,
+
+  /// Lowest threshold, most auto-locks.
+  high,
+}
+
+/// An immutable resolution / FPS / bitrate preset.
 class RecordingQualityProfile {
+  /// Creates a preset.
   const RecordingQualityProfile({
     required this.id,
     required this.resolution,
@@ -15,13 +33,25 @@ class RecordingQualityProfile {
     required this.tier,
   });
 
+  /// Stable preset id, for example `'1080p_30_8'`.
   final String id;
+
+  /// Vertical resolution in lines (for example 1080).
   final int resolution;
+
+  /// Frames per second.
   final int fps;
+
+  /// Video bitrate in Mbps.
   final int bitrateMbps;
+
+  /// The group the preset is listed under.
   final QualityPresetTier tier;
 
-  String get label => '$resolution''p / $fps FPS / $bitrateMbps Mbps';
+  /// Display label such as `1080p / 30 FPS / 8 Mbps`.
+  String get label =>
+      '$resolution'
+      'p / $fps FPS / $bitrateMbps Mbps';
 }
 
 /// Persisted user preferences for recording quality, segment duration,
@@ -37,16 +67,21 @@ class AppSettingsProvider extends ChangeNotifier {
   static const _fpsKey = 'recording_fps';
   static const _videoBitrateMbpsKey = 'video_bitrate_mbps';
   static const _audioEnabledKey = 'recording_audio_enabled';
+  static const _exportLockedClipsKey = 'export_locked_clips_to_gallery';
   static const _speedRefreshMsKey = 'speed_refresh_ms';
-  static const _segmentDurationSecondsKey =
-      'dashcam_segment_duration_seconds';
+  static const _segmentDurationSecondsKey = 'dashcam_segment_duration_seconds';
   static const _segmentMinutesKey = 'dashcam_segment_minutes';
   static const _loopSegmentsKey = 'dashcam_loop_segment_count';
   static const _incidentSensitivityKey = 'incident_sensitivity';
   static const _cameraNameKey = 'camera_name';
 
+  /// Selectable video bitrates in Mbps.
   static const List<int> bitrateOptionsMbps = [4, 8, 12, 16];
+
+  /// Selectable resolutions in vertical lines.
   static const List<int> resolutionOptions = [480, 720, 1080, 2160];
+
+  /// Selectable segment lengths in seconds.
   static const List<int> segmentDurationOptionsSeconds = [
     5,
     10,
@@ -58,8 +93,14 @@ class AppSettingsProvider extends ChangeNotifier {
     300,
     600,
   ];
+
+  /// Selectable loop-buffer sizes (number of segments kept).
   static const List<int> loopSegmentCountOptions = [6, 12, 18, 24, 36, 48];
+
+  /// Pseudo profile id used when no preset matches the current values.
   static const String customQualityProfileId = 'custom';
+
+  /// The shipped quality presets.
   static const List<RecordingQualityProfile> qualityProfiles = [
     RecordingQualityProfile(
       id: '720p_30_4',
@@ -96,6 +137,7 @@ class AppSettingsProvider extends ChangeNotifier {
   int _videoBitrateMbps = 8;
   String _qualityProfileId = '1080p_30_8';
   bool _audioEnabled = true;
+  bool _exportLockedClipsToGallery = false;
   int _speedRefreshMs = 100;
   int _segmentDurationSeconds = 300;
   int _loopSegmentCount = 24;
@@ -103,18 +145,44 @@ class AppSettingsProvider extends ChangeNotifier {
   String _selectedCameraName = '';
   bool _isLoaded = false;
 
+  /// Selected resolution in vertical lines (one of [resolutionOptions]).
   int get recordingResolution => _recordingResolution;
+
+  /// Selected frame rate, clamped to 24-60.
   int get recordingFps => _recordingFps;
+
+  /// Selected video bitrate in Mbps (one of [bitrateOptionsMbps]).
   int get videoBitrateMbps => _videoBitrateMbps;
+
+  /// Id of the preset matching the current values, or
+  /// [customQualityProfileId].
   String get qualityProfileId => _qualityProfileId;
-  RecordingQualityProfile? get activeQualityProfile =>
-      profileById(_qualityProfileId);
+
+  /// Whether audio is recorded.
   bool get audioEnabled => _audioEnabled;
+
+  /// Whether locked clips are copied to the shared gallery
+  /// (`Movies/MotoCam/Recordings`, Android) when a ride stops. Off by
+  /// default: gallery copies are visible to every gallery app and MotoCam
+  /// never removes them.
+  bool get exportLockedClipsToGallery => _exportLockedClipsToGallery;
+
+  /// Telemetry UI refresh interval in milliseconds, clamped to 100-1000.
   int get speedRefreshMs => _speedRefreshMs;
+
+  /// Segment length in seconds (one of [segmentDurationOptionsSeconds]).
   int get segmentDurationSeconds => _segmentDurationSeconds;
+
+  /// Loop-buffer size (one of [loopSegmentCountOptions]).
   int get loopSegmentCount => _loopSegmentCount;
+
+  /// Selected incident sensitivity.
   IncidentSensitivity get incidentSensitivity => _incidentSensitivity;
+
+  /// Preferred camera name; empty means automatic selection.
   String get selectedCameraName => _selectedCameraName;
+
+  /// Peak g-force that auto-locks a segment at the current sensitivity.
   double get incidentTriggerGForce {
     switch (_incidentSensitivity) {
       case IncidentSensitivity.low:
@@ -126,6 +194,7 @@ class AppSettingsProvider extends ChangeNotifier {
     }
   }
 
+  /// Minimum time between two automatic incident locks.
   Duration get incidentDebounce {
     switch (_incidentSensitivity) {
       case IncidentSensitivity.low:
@@ -136,8 +205,11 @@ class AppSettingsProvider extends ChangeNotifier {
         return const Duration(seconds: 3);
     }
   }
+
+  /// Whether [load] has completed.
   bool get isLoaded => _isLoaded;
 
+  /// Display label for [resolution], for example `720p` or `4K (2160p)`.
   static String resolutionLabel(int resolution) {
     if (resolution >= 2160) {
       return '4K (2160p)';
@@ -145,36 +217,7 @@ class AppSettingsProvider extends ChangeNotifier {
     return '${resolution}p';
   }
 
-  static ResolutionPreset toResolutionPreset(int resolution) {
-    if (resolution <= 480) {
-      return ResolutionPreset.low;
-    }
-    if (resolution <= 720) {
-      return ResolutionPreset.high;
-    }
-    if (resolution <= 1080) {
-      return ResolutionPreset.veryHigh;
-    }
-    return ResolutionPreset.ultraHigh;
-  }
-
-  static int fromResolutionPreset(ResolutionPreset preset) {
-    switch (preset) {
-      case ResolutionPreset.low:
-        return 480;
-      case ResolutionPreset.medium:
-        return 480;
-      case ResolutionPreset.high:
-        return 720;
-      case ResolutionPreset.veryHigh:
-        return 1080;
-      case ResolutionPreset.ultraHigh:
-        return 2160;
-      case ResolutionPreset.max:
-        return 2160;
-    }
-  }
-
+  /// The shipped preset with [id], or null if there is none.
   static RecordingQualityProfile? profileById(String id) {
     for (final profile in qualityProfiles) {
       if (profile.id == id) {
@@ -184,11 +227,14 @@ class AppSettingsProvider extends ChangeNotifier {
     return null;
   }
 
+  /// The shipped presets in [tier].
   static List<RecordingQualityProfile> qualityProfilesForTier(
-      QualityPresetTier tier) {
+    QualityPresetTier tier,
+  ) {
     return qualityProfiles.where((profile) => profile.tier == tier).toList();
   }
 
+  /// Display label for [tier].
   static String qualityTierLabel(QualityPresetTier tier) {
     switch (tier) {
       case QualityPresetTier.balanced:
@@ -198,6 +244,7 @@ class AppSettingsProvider extends ChangeNotifier {
     }
   }
 
+  /// Display label for a segment length of [seconds].
   static String segmentDurationLabel(int seconds) {
     if (seconds < 60) {
       return '$seconds sec per segment';
@@ -211,6 +258,7 @@ class AppSettingsProvider extends ChangeNotifier {
     return '$minutes min $remainder sec per segment';
   }
 
+  /// Display label for [sensitivity].
   static String incidentSensitivityLabel(IncidentSensitivity sensitivity) {
     switch (sensitivity) {
       case IncidentSensitivity.low:
@@ -222,6 +270,7 @@ class AppSettingsProvider extends ChangeNotifier {
     }
   }
 
+  /// The shipped preset with exactly these values, or null.
   static RecordingQualityProfile? findMatchingQualityProfile({
     required int resolution,
     required int fps,
@@ -237,6 +286,10 @@ class AppSettingsProvider extends ChangeNotifier {
     return null;
   }
 
+  /// Reads every setting from [SharedPreferences] once, clamps it to the
+  /// allowed options and migrates the legacy `recording_quality` and
+  /// `dashcam_segment_minutes` keys. The preset id is always derived from
+  /// the loaded values. Later calls do nothing.
   Future<void> load() async {
     if (_isLoaded) {
       return;
@@ -245,27 +298,30 @@ class AppSettingsProvider extends ChangeNotifier {
     final prefs = await SharedPreferences.getInstance();
     final legacyQuality = prefs.getString(_qualityKey);
     _recordingResolution = _clampResolution(
-      prefs.getInt(_resolutionKey) ?? _legacyResolutionFromQuality(legacyQuality),
+      prefs.getInt(_resolutionKey) ??
+          _legacyResolutionFromQuality(legacyQuality),
     );
     _recordingFps = _clampFps(prefs.getInt(_fpsKey) ?? 30);
-    _videoBitrateMbps =
-        _clampVideoBitrateMbps(prefs.getInt(_videoBitrateMbpsKey) ?? 8);
+    _videoBitrateMbps = _clampVideoBitrateMbps(
+      prefs.getInt(_videoBitrateMbpsKey) ?? 8,
+    );
     _audioEnabled = prefs.getBool(_audioEnabledKey) ?? true;
-    _speedRefreshMs =
-        _clampSpeedRefreshMs(prefs.getInt(_speedRefreshMsKey) ?? 100);
-    _qualityProfileId =
-        prefs.getString(_qualityProfileIdKey) ?? customQualityProfileId;
+    _exportLockedClipsToGallery = prefs.getBool(_exportLockedClipsKey) ?? false;
+    _speedRefreshMs = _clampSpeedRefreshMs(
+      prefs.getInt(_speedRefreshMsKey) ?? 100,
+    );
     final persistedSeconds = prefs.getInt(_segmentDurationSecondsKey);
     if (persistedSeconds != null) {
-      _segmentDurationSeconds =
-          _clampSegmentDurationSeconds(persistedSeconds);
+      _segmentDurationSeconds = _clampSegmentDurationSeconds(persistedSeconds);
     } else {
       final legacyMinutes = prefs.getInt(_segmentMinutesKey) ?? 5;
-      _segmentDurationSeconds =
-          _clampSegmentDurationSeconds(legacyMinutes * 60);
+      _segmentDurationSeconds = _clampSegmentDurationSeconds(
+        legacyMinutes * 60,
+      );
     }
-    _loopSegmentCount =
-        _clampLoopSegmentCount(prefs.getInt(_loopSegmentsKey) ?? 24);
+    _loopSegmentCount = _clampLoopSegmentCount(
+      prefs.getInt(_loopSegmentsKey) ?? 24,
+    );
     _incidentSensitivity = _incidentSensitivityFromName(
       prefs.getString(_incidentSensitivityKey),
     );
@@ -275,6 +331,7 @@ class AppSettingsProvider extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Sets and persists the preferred camera name (trimmed).
   Future<void> updateSelectedCameraName(String cameraName) async {
     final trimmed = cameraName.trim();
     if (_selectedCameraName == trimmed) {
@@ -286,7 +343,10 @@ class AppSettingsProvider extends ChangeNotifier {
     await prefs.setString(_cameraNameKey, _selectedCameraName);
   }
 
-  Future<void> updateIncidentSensitivity(IncidentSensitivity sensitivity) async {
+  /// Sets and persists the incident sensitivity.
+  Future<void> updateIncidentSensitivity(
+    IncidentSensitivity sensitivity,
+  ) async {
     if (_incidentSensitivity == sensitivity) {
       return;
     }
@@ -296,6 +356,8 @@ class AppSettingsProvider extends ChangeNotifier {
     await prefs.setString(_incidentSensitivityKey, sensitivity.name);
   }
 
+  /// Applies and persists the preset with [profileId]; unknown ids are
+  /// ignored.
   Future<void> updateRecordingQualityProfile(String profileId) async {
     final profile = profileById(profileId);
     if (profile == null) {
@@ -310,6 +372,8 @@ class AppSettingsProvider extends ChangeNotifier {
     await _persistVideoSettings();
   }
 
+  /// Sets and persists the resolution; values outside [resolutionOptions]
+  /// become 1080.
   Future<void> updateRecordingResolution(int resolution) async {
     final clamped = _clampResolution(resolution);
     if (_recordingResolution == clamped) {
@@ -321,6 +385,7 @@ class AppSettingsProvider extends ChangeNotifier {
     await _persistVideoSettings();
   }
 
+  /// Sets and persists the frame rate, clamped to 24-60.
   Future<void> updateRecordingFps(int fps) async {
     final clampedFps = _clampFps(fps);
     if (_recordingFps == clampedFps) {
@@ -332,6 +397,8 @@ class AppSettingsProvider extends ChangeNotifier {
     await _persistVideoSettings();
   }
 
+  /// Sets and persists the bitrate; values outside [bitrateOptionsMbps]
+  /// become 8.
   Future<void> updateVideoBitrateMbps(int value) async {
     final clamped = _clampVideoBitrateMbps(value);
     if (_videoBitrateMbps == clamped) {
@@ -343,6 +410,7 @@ class AppSettingsProvider extends ChangeNotifier {
     await _persistVideoSettings();
   }
 
+  /// Sets and persists whether audio is recorded.
   Future<void> updateAudioEnabled(bool enabled) async {
     if (_audioEnabled == enabled) {
       return;
@@ -353,6 +421,18 @@ class AppSettingsProvider extends ChangeNotifier {
     await prefs.setBool(_audioEnabledKey, enabled);
   }
 
+  /// Sets and persists [exportLockedClipsToGallery].
+  Future<void> updateExportLockedClipsToGallery(bool enabled) async {
+    if (_exportLockedClipsToGallery == enabled) {
+      return;
+    }
+    _exportLockedClipsToGallery = enabled;
+    notifyListeners();
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_exportLockedClipsKey, enabled);
+  }
+
+  /// Sets and persists the telemetry refresh interval, clamped to 100-1000 ms.
   Future<void> updateSpeedRefreshMs(int milliseconds) async {
     final clamped = _clampSpeedRefreshMs(milliseconds);
     if (_speedRefreshMs == clamped) {
@@ -364,6 +444,9 @@ class AppSettingsProvider extends ChangeNotifier {
     await prefs.setInt(_speedRefreshMsKey, _speedRefreshMs);
   }
 
+  /// Sets and persists the segment length; values outside
+  /// [segmentDurationOptionsSeconds] become 300. Also writes the legacy
+  /// minutes key.
   Future<void> updateSegmentDurationSeconds(int seconds) async {
     final clamped = _clampSegmentDurationSeconds(seconds);
     if (_segmentDurationSeconds == clamped) {
@@ -380,6 +463,8 @@ class AppSettingsProvider extends ChangeNotifier {
     );
   }
 
+  /// Sets and persists the loop-buffer size; values outside
+  /// [loopSegmentCountOptions] become 24.
   Future<void> updateLoopSegmentCount(int value) async {
     final clamped = _clampLoopSegmentCount(value);
     if (_loopSegmentCount == clamped) {

@@ -12,9 +12,12 @@ import 'package:flutter/services.dart';
 class PipService {
   PipService._();
 
+  /// The app-wide instance.
   static final PipService instance = PipService._();
 
-  static const MethodChannel _platform = MethodChannel('com.example.motocam/pip');
+  static const MethodChannel _platform = MethodChannel(
+    'com.example.motocam/pip',
+  );
 
   final StreamController<bool> _pipModeController =
       StreamController<bool>.broadcast();
@@ -22,9 +25,13 @@ class PipService {
   bool _initialized = false;
   bool _isInPipMode = false;
 
+  /// Emits true when the activity enters PiP and false when it leaves.
   Stream<bool> get pipModeStream => _pipModeController.stream;
+
+  /// The last PiP state reported by the native activity.
   bool get isInPipMode => _isInPipMode;
 
+  /// Registers the method-channel handler. Safe to call more than once.
   Future<void> initialize() async {
     if (_initialized) {
       return;
@@ -34,7 +41,9 @@ class PipService {
       if (call.method == 'onPipModeChanged') {
         final inPip = call.arguments == true;
         _isInPipMode = inPip;
-        _pipModeController.add(inPip);
+        if (!_pipModeController.isClosed) {
+          _pipModeController.add(inPip);
+        }
       }
       return null;
     });
@@ -42,21 +51,10 @@ class PipService {
     _initialized = true;
   }
 
-  static Future<bool> isPipSupported() async {
-    return instance._isPipSupported();
-  }
-
+  /// Asks the activity to enter PiP. Returns false when PiP is unsupported,
+  /// refused, or the platform has no handler.
   static Future<bool> enterPipMode() async {
     return instance._enterPipMode();
-  }
-
-  Future<bool> _isPipSupported() async {
-    try {
-      final bool result = await _platform.invokeMethod('isPipSupported');
-      return result;
-    } catch (_) {
-      return false;
-    }
   }
 
   Future<bool> _enterPipMode() async {
@@ -68,7 +66,11 @@ class PipService {
     }
   }
 
+  /// Closes the mode stream. The instance lives for the whole app, so this
+  /// is normally never called; calling it again is a no-op.
   void dispose() {
-    _pipModeController.close();
+    if (!_pipModeController.isClosed) {
+      unawaited(_pipModeController.close());
+    }
   }
 }

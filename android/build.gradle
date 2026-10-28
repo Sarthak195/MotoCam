@@ -5,14 +5,24 @@ allprojects {
     }
 }
 
-rootProject.buildDir = '../build'
+// Build output goes to <repo>/build, as in the Flutter template.
+// layout.buildDirectory.dir() resolves against the default build directory
+// (android/build), hence "../../build".
+def newBuildDir = rootProject.layout.buildDirectory.dir('../../build').get()
+rootProject.layout.buildDirectory.value(newBuildDir)
+
 subprojects {
-    project.buildDir = "${rootProject.buildDir}/${project.name}"
+    project.layout.buildDirectory.value(newBuildDir.dir(project.name))
 }
 subprojects {
     project.evaluationDependsOn(':app')
 }
 
+// Adds androidx.concurrent:concurrent-futures to every Android module,
+// including each Flutter plugin module; :app also declares it. This was added
+// in cd39097 without a recorded reason (the CameraX/Guava ListenableFuture
+// plumbing in camera_android_camerax is the likely consumer). Keep it until a
+// debug and a release build have been verified without it.
 subprojects { subproject ->
     def addConcurrentFuturesDependency = {
         subproject.dependencies.add(
@@ -26,5 +36,5 @@ subprojects { subproject ->
 }
 
 tasks.register("clean", Delete) {
-    delete rootProject.buildDir
+    delete rootProject.layout.buildDirectory
 }

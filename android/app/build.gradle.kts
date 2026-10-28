@@ -40,21 +40,46 @@ val releaseStorePassword = resolveSigningValue("storePassword", "MOTOCAM_KEYSTOR
 val releaseKeyAlias = resolveSigningValue("keyAlias", "MOTOCAM_KEY_ALIAS")
 val releaseKeyPassword = resolveSigningValue("keyPassword", "MOTOCAM_KEY_PASSWORD")
 
-val hasReleaseSigningConfig =
-    !releaseStoreFilePath.isNullOrBlank() &&
-    !releaseStorePassword.isNullOrBlank() &&
-    !releaseKeyAlias.isNullOrBlank() &&
-    !releaseKeyPassword.isNullOrBlank()
+// Each value independently prefers its environment variable and falls back to
+// android/key.properties.
+val missingSigningValues = listOf(
+    "storeFile (MOTOCAM_KEYSTORE_FILE)" to releaseStoreFilePath,
+    "storePassword (MOTOCAM_KEYSTORE_PASSWORD)" to releaseStorePassword,
+    "keyAlias (MOTOCAM_KEY_ALIAS)" to releaseKeyAlias,
+    "keyPassword (MOTOCAM_KEY_PASSWORD)" to releaseKeyPassword,
+).filter { (_, value) -> value.isNullOrBlank() }.map { (name, _) -> name }
 
-val releaseBuildRequested = gradle.startParameter.taskNames.any { task ->
-    val normalized = task.lowercase()
-    normalized.contains("release") || normalized.contains("bundle")
-}
+// Tasks that package or sign a release artifact with the release key. Matching
+// the task graph (not the requested task names) means `assemble`/`build` are
+// gated too, while bundleDebug, lintRelease or testReleaseUnitTest are not.
+// The suffixes are anchored so that unrelated tasks which sign nothing, such as
+// packageReleaseResources, do not match; a flavor name may sit before Release.
+val releaseSigningTaskPattern = Regex(
+    "^(validateSigning|package)\\w*Release$|^sign\\w*ReleaseBundle$|^package\\w*ReleaseUniversalApk$",
+)
 
-if (releaseBuildRequested && !hasReleaseSigningConfig) {
-    throw GradleException(
-        "Release signing config missing. Provide android/key.properties or MOTOCAM_KEYSTORE_* environment variables.",
-    )
+gradle.taskGraph.whenReady {
+    val signsRelease = allTasks.any { task ->
+        task.project == project && releaseSigningTaskPattern.matches(task.name)
+    }
+    if (!signsRelease) {
+        return@whenReady
+    }
+    if (missingSigningValues.isNotEmpty()) {
+        throw GradleException(
+            "Release signing config missing: ${missingSigningValues.joinToString(", ")}. " +
+                "Provide them in android/key.properties or through the environment variables " +
+                "MOTOCAM_KEYSTORE_FILE, MOTOCAM_KEYSTORE_PASSWORD, MOTOCAM_KEY_ALIAS and " +
+                "MOTOCAM_KEY_PASSWORD.",
+        )
+    }
+    val releaseStoreFile = file(releaseStoreFilePath!!)
+    if (!releaseStoreFile.isFile) {
+        throw GradleException(
+            "Release keystore not found at ${releaseStoreFile.absolutePath}. " +
+                "A relative storeFile/MOTOCAM_KEYSTORE_FILE path is resolved against android/app/.",
+        )
+    }
 }
 
 android {

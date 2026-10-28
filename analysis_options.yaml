@@ -21,6 +21,18 @@ linter:
   # `// ignore_for_file: name_of_lint` syntax on the line or in the file
   # producing the lint.
   rules:
+    # Stricter rules adopted in the 2026-10 audit fix pass (F081). Every hit
+    # was fixed; fire-and-forget calls are wrapped in unawaited() on purpose.
+    # use_build_context_synchronously is already active via flutter_lints.
+    cancel_subscriptions: true
+    close_sinks: true
+    unawaited_futures: true
+    discarded_futures: true
+    avoid_dynamic_calls: true
+    prefer_final_locals: true
+    always_declare_return_types: true
+    # Deferred: avoid_slow_async_io (42 hits). It asks for existsSync/statSync,
+    # which would move file IO back onto the UI isolate.
     # avoid_print: false  # Uncomment to disable the `avoid_print` rule
     # prefer_single_quotes: true  # Uncomment to enable the `prefer_single_quotes` rule
 

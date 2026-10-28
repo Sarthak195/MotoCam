@@ -1,6 +1,13 @@
+import 'dart:convert';
+import 'dart:io';
+
+import 'package:crypto/crypto.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:motocam/features/history/models/ride_record.dart';
 import 'package:motocam/features/telemetry/providers/telemetry_provider.dart';
+
+final String _sep = Platform.pathSeparator;
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -12,6 +19,7 @@ void main() {
     required double accuracy,
     required double heading,
     required DateTime timestamp,
+    bool isMocked = false,
   }) {
     return Position(
       latitude: latitude,
@@ -24,6 +32,7 @@ void main() {
       speedAccuracy: 0.0,
       altitudeAccuracy: 0.0,
       headingAccuracy: 0.0,
+      isMocked: isMocked,
     );
   }
 
@@ -40,11 +49,13 @@ void main() {
 
     test('initial state defaults are correct', () {
       expect(provider.isRideActive, isFalse);
+      expect(provider.isTracking, isFalse);
       expect(provider.rideDistanceKm, 0.0);
       expect(provider.maxSpeedKmh, 0.0);
       expect(provider.averageSpeedKmh, 0.0);
       expect(provider.currentData.speed, 0.0);
       expect(provider.currentData.distanceKm, 0.0);
+      expect(provider.currentData.hasFix, isFalse);
       expect(provider.activeRideSamples, isEmpty);
     });
 
@@ -57,10 +68,51 @@ void main() {
       expect(provider.activeRideSamples.first.distanceKm, 0.0);
     });
 
+    test('startRideSession uses the given ride zero for elapsedMs', () {
+      final startedAt = DateTime.now().subtract(const Duration(seconds: 3));
+      provider.startRideSession(startedAt: startedAt);
+      expect(
+        provider.activeRideSamples.first.elapsedMs,
+        greaterThanOrEqualTo(3000),
+      );
+    });
+
+    test('startRideSession clamps a future ride zero to now', () {
+      provider.startRideSession(
+        startedAt: DateTime.now().add(const Duration(minutes: 1)),
+      );
+      expect(provider.activeRideSamples.first.elapsedMs, lessThan(1000));
+    });
+
+    test('samples before the first fix are marked as having no fix', () {
+      provider.startRideSession();
+      final sample = provider.activeRideSamples.first;
+      expect(sample.hasFix, isFalse);
+      expect(sample.fixAgeMs, isNull);
+    });
+
+    test('samples after a recent fix are marked as having a fix', () {
+      provider.updateLocationForTesting(
+        createMockPosition(
+          latitude: 28.6139,
+          longitude: 77.2090,
+          speed: 0.0,
+          accuracy: 4.0,
+          heading: 0.0,
+          timestamp: DateTime.now(),
+        ),
+      );
+      provider.startRideSession();
+      final sample = provider.activeRideSamples.first;
+      expect(sample.hasFix, isTrue);
+      expect(sample.fixAgeMs, isNotNull);
+      expect(sample.latitude, 28.6139);
+    });
+
     test('ignores location updates timestamped before ride start', () {
       final now = DateTime.now();
       provider.startRideSession();
-      
+
       // Let's create a position that is before the ride start time
       final stalePosition = createMockPosition(
         latitude: 37.7749,
@@ -109,6 +161,99 @@ void main() {
       expect(provider.rideDistanceKm, closeTo(0.096, 0.01));
     });
 
+    test('stationary GPS jitter does not accumulate ride distance', () {
+      final start = DateTime.now().add(const Duration(seconds: 1));
+      provider.startRideSession();
+
+      // 2 minutes at 2 Hz wandering about +/-2 m around one point.
+      for (var i = 0; i < 240; i++) {
+        final offsetDegrees = (i.isEven ? 1 : -1) * 0.000018; // ~2 m
+        provider.updateLocationForTesting(
+          createMockPosition(
+            latitude: 28.6139 + offsetDegrees,
+            longitude: 77.2090,
+            speed: 0.1,
+            accuracy: 5.0,
+            heading: 0.0,
+            timestamp: start.add(Duration(milliseconds: 500 * i)),
+          ),
+        );
+      }
+
+      expect(provider.rideDistanceKm, 0.0);
+    });
+
+    test('a fix older than the last accepted fix is ignored', () {
+      final now = DateTime.now();
+      provider.startRideSession();
+      provider.updateLocationForTesting(
+        createMockPosition(
+          latitude: 37.7749,
+          longitude: -122.4194,
+          speed: 5.0,
+          accuracy: 3.0,
+          heading: 90.0,
+          timestamp: now.add(const Duration(seconds: 5)),
+        ),
+      );
+      provider.updateLocationForTesting(
+        createMockPosition(
+          latitude: 37.7800,
+          longitude: -122.4100,
+          speed: 5.0,
+          accuracy: 3.0,
+          heading: 90.0,
+          timestamp: now.add(const Duration(seconds: 4)),
+        ),
+      );
+
+      expect(provider.currentData.latitude, 37.7749);
+      expect(provider.rideDistanceKm, 0.0);
+    });
+
+    test('an invalid (negative) course keeps the previous bearing', () {
+      final now = DateTime.now();
+      provider.updateLocationForTesting(
+        createMockPosition(
+          latitude: 37.7749,
+          longitude: -122.4194,
+          speed: 5.0,
+          accuracy: 3.0,
+          heading: 90.0,
+          timestamp: now,
+        ),
+      );
+      provider.updateLocationForTesting(
+        createMockPosition(
+          latitude: 37.7750,
+          longitude: -122.4194,
+          speed: 5.0,
+          accuracy: 3.0,
+          heading: -1.0,
+          timestamp: now.add(const Duration(seconds: 1)),
+        ),
+      );
+
+      expect(provider.currentData.bearing, 90.0);
+    });
+
+    test('mock location fixes during a ride are flagged', () {
+      provider.startRideSession();
+      expect(provider.mockLocationDetected, isFalse);
+      provider.updateLocationForTesting(
+        createMockPosition(
+          latitude: 37.7749,
+          longitude: -122.4194,
+          speed: 5.0,
+          accuracy: 3.0,
+          heading: 90.0,
+          timestamp: DateTime.now().add(const Duration(seconds: 1)),
+          isMocked: true,
+        ),
+      );
+      expect(provider.mockLocationDetected, isTrue);
+    });
+
     test('stationary detection filters out very slow speed', () {
       final now = DateTime.now();
       provider.startRideSession();
@@ -128,83 +273,566 @@ void main() {
       expect(provider.currentData.speed, 0.0); // Filtered to 0
     });
 
-    test('incident detection requires two consecutive hits and registers crash', () {
+    test('incident detection requires a sustained run and registers crash', () {
       provider.startRideSession();
       provider.setIncidentDetectionConfig(
         triggerGForce: 2.0,
         debounce: const Duration(seconds: 5),
       );
       expect(provider.incidentCount, 0);
+      final t0 = DateTime.now();
 
-      // We send 1 high g-force event. It should increment consecutiveIncidentHits but not detect a crash yet.
-      // Trigger threshold set to 2.0g. Send 30m/s^2 linear acceleration (~3.05g)
-      provider.updateAccelerometerForTesting(30.0, 0.0, 0.0);
+      // One sample above the 2.0 g trigger (30 m/s^2 = ~3.06 g) is not enough.
+      provider.updateAccelerometerForTesting(30.0, 0.0, 0.0, timestamp: t0);
       expect(provider.incidentCount, 0);
 
-      // Send a second consecutive high g-force event (32m/s^2 linear acceleration, ~3.26g)
-      provider.updateAccelerometerForTesting(32.0, 0.0, 0.0);
+      // A second sample 20 ms later spans less than minIncidentDuration.
+      provider.updateAccelerometerForTesting(
+        31.0,
+        0.0,
+        0.0,
+        timestamp: t0.add(const Duration(milliseconds: 20)),
+      );
+      expect(provider.incidentCount, 0);
+
+      // 40 ms above the trigger counts as an incident.
+      provider.updateAccelerometerForTesting(
+        32.0,
+        0.0,
+        0.0,
+        timestamp: t0.add(const Duration(milliseconds: 40)),
+      );
       expect(provider.incidentCount, 1);
       expect(provider.lastIncidentDetectedAt, isNotNull);
-      expect(provider.lastIncidentGForce, greaterThan(2.0));
+      expect(provider.lastIncidentGForce, closeTo(32.0 / 9.81, 0.001));
     });
 
-    test('non-consecutive high g-force event resets consecutive count', () {
+    test('a sample below the trigger resets the run', () {
       provider.startRideSession();
       provider.setIncidentDetectionConfig(
         triggerGForce: 2.0,
         debounce: const Duration(seconds: 5),
       );
-      expect(provider.incidentCount, 0);
+      final t0 = DateTime.now();
 
-      // High g-force: 20 m/s^2 linear acceleration (~2.04g)
-      provider.updateAccelerometerForTesting(20.0, 0.0, 0.0);
-      // Smoothed becomes ~2.04g (>= 2.0g trigger). Consecutive hits = 1.
-      expect(provider.incidentCount, 0);
+      provider.updateAccelerometerForTesting(20.0, 0.0, 0.0, timestamp: t0);
+      provider.updateAccelerometerForTesting(
+        0.0,
+        0.0,
+        0.0,
+        timestamp: t0.add(const Duration(milliseconds: 20)),
+      );
+      provider.updateAccelerometerForTesting(
+        20.0,
+        0.0,
+        0.0,
+        timestamp: t0.add(const Duration(milliseconds: 40)),
+      );
 
-      // Normal g-force (0.0): raw linear acceleration = 0.0g.
-      provider.updateAccelerometerForTesting(0.0, 0.0, 0.0);
-      // Smoothed decays to 2.04 * 0.70 + 0 = 1.43g (< 2.0g trigger).
-      // Consecutive hits resets to 0.
-      expect(provider.incidentCount, 0);
-
-      // High g-force again (20 m/s^2):
-      provider.updateAccelerometerForTesting(20.0, 0.0, 0.0);
-      // Smoothed becomes 1.43 * 0.70 + 2.04 * 0.30 = 1.0 + 0.61 = 1.61g (< 2.0g trigger).
-      // Consecutive hits remains 0.
       expect(provider.incidentCount, 0);
     });
 
-    test('clearHistory resets all variables', () {
+    test('a single knock right after START does not trigger an incident', () {
+      provider.startRideSession();
+      provider.setIncidentDetectionConfig(
+        triggerGForce: 3.5,
+        debounce: const Duration(seconds: 6),
+      );
+      final t0 = DateTime.now();
+
+      // One 5 g sample followed by quiet.
+      provider.updateAccelerometerForTesting(49.0, 0.0, 0.0, timestamp: t0);
+      for (var i = 1; i <= 10; i++) {
+        provider.updateAccelerometerForTesting(
+          0.3,
+          0.0,
+          0.0,
+          timestamp: t0.add(Duration(milliseconds: 20 * i)),
+        );
+      }
+
+      expect(provider.incidentCount, 0);
+    });
+
+    test('an 8 g impact lasting 150 ms triggers at medium sensitivity', () {
+      provider.startRideSession();
+      provider.setIncidentDetectionConfig(
+        triggerGForce: 3.5,
+        debounce: const Duration(seconds: 6),
+      );
+      final t0 = DateTime.now();
+
+      for (var i = 0; i < 8; i++) {
+        provider.updateAccelerometerForTesting(
+          8 * 9.81,
+          0.0,
+          0.0,
+          timestamp: t0.add(Duration(milliseconds: 20 * i)),
+        );
+      }
+
+      expect(provider.incidentCount, 1);
+    });
+
+    test('the gravity-filtered fallback keeps a 5 g, 150 ms impact', () {
+      provider.startRideSession();
+      provider.setIncidentDetectionConfig(
+        triggerGForce: 3.5,
+        debounce: const Duration(seconds: 6),
+      );
+      final t0 = DateTime.now();
+      var t = t0;
+
+      // One second at rest (gravity only) at the 20 ms game rate.
+      for (var i = 0; i < 50; i++) {
+        provider.updateRawAccelerometerForTesting(0.0, 0.0, 9.81, timestamp: t);
+        t = t.add(const Duration(milliseconds: 20));
+      }
+      expect(provider.incidentCount, 0);
+
+      // A 5 g impact along x for 150 ms.
+      for (var i = 0; i < 8; i++) {
+        provider.updateRawAccelerometerForTesting(
+          5 * 9.81,
+          0.0,
+          9.81,
+          timestamp: t,
+        );
+        t = t.add(const Duration(milliseconds: 20));
+      }
+      expect(provider.incidentCount, 1);
+    });
+
+    test('a first fix with poor accuracy does not anchor ride distance', () {
       final now = DateTime.now();
       provider.startRideSession();
+
+      // A wild first fix ~1.1 km away with 500 m accuracy.
+      provider.updateLocationForTesting(
+        createMockPosition(
+          latitude: 37.7849,
+          longitude: -122.4194,
+          speed: 0.0,
+          accuracy: 500.0,
+          heading: 0.0,
+          timestamp: now.add(const Duration(seconds: 1)),
+        ),
+      );
+      // Good fixes afterwards, ~97 m apart.
+      provider.updateLocationForTesting(
+        createMockPosition(
+          latitude: 37.7749,
+          longitude: -122.4194,
+          speed: 10.0,
+          accuracy: 3.0,
+          heading: 90.0,
+          timestamp: now.add(const Duration(seconds: 60)),
+        ),
+      );
+      provider.updateLocationForTesting(
+        createMockPosition(
+          latitude: 37.7749,
+          longitude: -122.4183,
+          speed: 10.0,
+          accuracy: 3.0,
+          heading: 90.0,
+          timestamp: now.add(const Duration(seconds: 70)),
+        ),
+      );
+
+      expect(provider.rideDistanceKm, closeTo(0.096, 0.01));
+    });
+
+    test('non-finite accelerometer samples are ignored', () {
+      provider.updateAccelerometerForTesting(1.0, 0.0, 0.0);
+      final before = provider.currentData.accelerationG;
+      provider.updateAccelerometerForTesting(double.nan, 0.0, 0.0);
+      provider.updateAccelerometerForTesting(double.infinity, 0.0, 0.0);
+
+      expect(provider.currentData.accelerationG, before);
+      expect(provider.currentData.accelerationG.isFinite, isTrue);
+    });
+
+    test(
+      'clearHistory resets ride statistics but keeps the incident count',
+      () {
+        final now = DateTime.now();
+        provider.startRideSession();
+        provider.setIncidentDetectionConfig(
+          triggerGForce: 2.0,
+          debounce: const Duration(seconds: 5),
+        );
+
+        final pos = createMockPosition(
+          latitude: 37.7749,
+          longitude: -122.4194,
+          speed: 15.0,
+          accuracy: 3.0,
+          heading: 90.0,
+          timestamp: now.add(const Duration(seconds: 1)),
+        );
+        provider.updateLocationForTesting(pos);
+
+        // Add accelerometer events to trigger an incident
+        provider.updateAccelerometerForTesting(30.0, 0.0, 0.0, timestamp: now);
+        provider.updateAccelerometerForTesting(
+          32.0,
+          0.0,
+          0.0,
+          timestamp: now.add(const Duration(milliseconds: 50)),
+        );
+
+        expect(provider.incidentCount, 1);
+
+        provider.clearHistory();
+        expect(provider.rideDistanceKm, 0.0);
+        expect(provider.maxSpeedKmh, 0.0);
+        expect(provider.averageSpeedKmh, 0.0);
+        // clearHistory() deliberately does not reset the incident count.
+        expect(provider.incidentCount, 1);
+        expect(provider.currentData.latitude, 0.0); // Reset to empty
+      },
+    );
+
+    test('pauseTracking is ignored during a ride', () {
+      provider.startRideSession();
+      provider.pauseTracking();
+      expect(provider.isRideActive, isTrue);
+    });
+  });
+
+  group('TelemetryProvider.shouldAccumulateDistance', () {
+    final anchor = DateTime(2026, 1, 1, 12);
+
+    bool accumulate({
+      double meters = 10,
+      double accuracy = 5,
+      double gpsSpeedKmh = 0,
+      Duration after = const Duration(seconds: 1),
+    }) => TelemetryProvider.shouldAccumulateDistance(
+      meters: meters,
+      accuracyMeters: accuracy,
+      gpsSpeedKmh: gpsSpeedKmh,
+      fixTimestamp: anchor.add(after),
+      anchorTimestamp: anchor,
+    );
+
+    test('accepts real movement', () {
+      expect(accumulate(meters: 10, accuracy: 5), isTrue);
+    });
+
+    test('rejects displacement below the noise floor without GPS speed', () {
+      expect(accumulate(meters: 2, accuracy: 3), isFalse);
+      expect(accumulate(meters: 8, accuracy: 20), isFalse);
+    });
+
+    test('accepts small displacement when GPS speed shows motion', () {
+      expect(accumulate(meters: 2, accuracy: 3, gpsSpeedKmh: 5), isTrue);
+    });
+
+    test('rejects fixes with poor accuracy', () {
+      expect(accumulate(meters: 60, accuracy: 80), isFalse);
+    });
+
+    test('rejects fixes that are not newer than the anchor', () {
+      expect(accumulate(after: Duration.zero), isFalse);
+      expect(accumulate(after: const Duration(seconds: -1)), isFalse);
+    });
+
+    test('rejects implausible jumps', () {
+      // 60 m in 0.5 s = 432 km/h.
+      expect(
+        accumulate(
+          meters: 60,
+          accuracy: 10,
+          after: const Duration(milliseconds: 500),
+        ),
+        isFalse,
+      );
+    });
+
+    test('treats unknown accuracy as acceptable', () {
+      expect(accumulate(meters: 10, accuracy: 0), isTrue);
+      expect(accumulate(meters: 10, accuracy: -1), isTrue);
+    });
+  });
+
+  group('TelemetryProvider.sanitizeJsonValue', () {
+    test('replaces non-finite doubles with null at any depth', () {
+      final sanitized = TelemetryProvider.sanitizeJsonValue({
+        'a': double.nan,
+        'b': [1.5, double.infinity],
+        'c': {'d': double.negativeInfinity, 'e': 'x', 'f': 2},
+      });
+      expect(sanitized, {
+        'a': null,
+        'b': [1.5, null],
+        'c': {'d': null, 'e': 'x', 'f': 2},
+      });
+      expect(() => jsonEncode(sanitized), returnsNormally);
+    });
+  });
+
+  group('TelemetryProvider persistence', () {
+    late Directory tempRoot;
+    late Directory storageDirectory;
+    late TelemetryProvider provider;
+
+    setUp(() async {
+      tempRoot = await Directory.systemTemp.createTemp('motocam_telemetry_');
+      storageDirectory = Directory(
+        '${tempRoot.path}${_sep}storage${_sep}MotoCam${_sep}Recordings',
+      );
+      await storageDirectory.create(recursive: true);
+      provider = TelemetryProvider(sampleInterval: const Duration(seconds: 1));
+    });
+
+    tearDown(() async {
+      provider.dispose();
+      if (await tempRoot.exists()) {
+        await tempRoot.delete(recursive: true);
+      }
+    });
+
+    Future<File> createSegment(String name, String content) async {
+      final file = File('${storageDirectory.path}$_sep$name');
+      await file.writeAsString(content, flush: true);
+      return file;
+    }
+
+    Future<Map<String, dynamic>> readJson(String path) async =>
+        jsonDecode(await File(path).readAsString()) as Map<String, dynamic>;
+
+    void recordIncident(TelemetryProvider provider) {
       provider.setIncidentDetectionConfig(
         triggerGForce: 2.0,
         debounce: const Duration(seconds: 5),
       );
-
-      final pos = createMockPosition(
-        latitude: 37.7749,
-        longitude: -122.4194,
-        speed: 15.0,
-        accuracy: 3.0,
-        heading: 90.0,
-        timestamp: now.add(const Duration(seconds: 1)),
+      final t0 = DateTime.now();
+      provider.updateAccelerometerForTesting(30.0, 0.0, 0.0, timestamp: t0);
+      provider.updateAccelerometerForTesting(
+        30.0,
+        0.0,
+        0.0,
+        timestamp: t0.add(const Duration(milliseconds: 50)),
       );
-      provider.updateLocationForTesting(pos);
+    }
 
-      // Add accelerometer event to trigger incident
-      provider.updateAccelerometerForTesting(30.0, 0.0, 0.0);
-      provider.updateAccelerometerForTesting(32.0, 0.0, 0.0);
-      
+    test('stop writes a sealed ride that RideRecord verifies', () async {
+      final segment1 = await createSegment('segment_1.mp4', 'video-one');
+      final segment2 = await createSegment('segment_2.mp4', 'video-two');
+
+      provider.startRideSession();
+      recordIncident(provider);
       expect(provider.incidentCount, 1);
 
-      provider.clearHistory();
-      expect(provider.rideDistanceKm, 0.0);
-      expect(provider.maxSpeedKmh, 0.0);
-      expect(provider.averageSpeedKmh, 0.0);
-      // Note: incidentCount is not reset by clearHistory() in the provider class, which is correct
-      expect(provider.incidentCount, 1);
-      expect(provider.currentData.latitude, 0.0); // Reset to empty
+      final path = await provider.stopRideSessionAndPersist(
+        segment2.path,
+        segmentPaths: [segment1.path, segment2.path],
+        lockedSegmentPaths: [segment1.path],
+      );
+
+      expect(path, isNotNull);
+      expect(provider.isRideActive, isFalse);
+      expect(provider.isPersistingRide, isFalse);
+      expect(provider.lastPersistError, isNull);
+
+      final json = await readJson(path!);
+      expect(json['schemaVersion'], TelemetryProvider.rideSchemaVersion);
+      expect(json['sessionComplete'], isTrue);
+      expect(json['startedAt'] as String, endsWith('Z'));
+      expect(json['endedAt'] as String, endsWith('Z'));
+      expect(json['mockLocationDetected'], isFalse);
+      expect(json['segmentPaths'], [segment1.path, segment2.path]);
+      expect(json['lockedSegmentPaths'], [segment1.path]);
+
+      final incidents = json['incidents'] as List<dynamic>;
+      expect(incidents, hasLength(1));
+      final incident = incidents.single as Map<String, dynamic>;
+      expect(incident['reason'], 'auto-crash');
+      expect(incident['triggerGForce'], 2.0);
+      expect((incident['gForce'] as num).toDouble(), greaterThan(2.0));
+      expect(incident['timestamp'] as String, endsWith('Z'));
+
+      final samples = json['samples'] as List<dynamic>;
+      expect(samples, isNotEmpty);
+      expect((samples.first as Map)['timestamp'] as String, endsWith('Z'));
+
+      final integrity = json['integrity'] as Map<String, dynamic>;
+      final hashes = integrity['segmentHashes'] as Map<String, dynamic>;
+      expect(
+        hashes[segment1.path],
+        sha256.convert(utf8.encode('video-one')).toString(),
+      );
+      expect(
+        hashes[segment2.path],
+        sha256.convert(utf8.encode('video-two')).toString(),
+      );
+      expect(integrity['segmentCount'], 2);
+
+      final record = await RideRecord.fromTelemetryFile(
+        File(path),
+        verifySegments: true,
+      );
+      expect(record, isNotNull);
+      expect(
+        record!.integrity.isVerified,
+        isTrue,
+        reason: record.integrity.issues.join(', '),
+      );
+      expect(record.isSessionComplete, isTrue);
     });
+
+    test(
+      'checkpoint writes a sealed incomplete ride that stop completes',
+      () async {
+        final segment1 = await createSegment('segment_1.mp4', 'video-one');
+
+        provider.startRideSession();
+        final checkpointPath = await provider.checkpointRideSession(
+          segmentPaths: [segment1.path],
+          lockedSegmentPaths: const [],
+        );
+        expect(checkpointPath, isNotNull);
+
+        final checkpoint = await readJson(checkpointPath!);
+        expect(checkpoint['sessionComplete'], isFalse);
+        expect(checkpoint['segmentPaths'], [segment1.path]);
+        expect(checkpoint['integrity'], isA<Map<String, dynamic>>());
+
+        final recovered = await RideRecord.fromTelemetryFile(
+          File(checkpointPath),
+          verifySegments: true,
+        );
+        expect(recovered, isNotNull);
+        expect(recovered!.isSessionComplete, isFalse);
+        expect(
+          recovered.integrity.isVerified,
+          isTrue,
+          reason: recovered.integrity.issues.join(', '),
+        );
+
+        final segment2 = await createSegment('segment_2.mp4', 'video-two');
+        final finalPath = await provider.stopRideSessionAndPersist(
+          segment2.path,
+          segmentPaths: [segment1.path, segment2.path],
+        );
+
+        expect(finalPath, checkpointPath);
+        final completed = await readJson(finalPath!);
+        expect(completed['sessionComplete'], isTrue);
+        expect(completed['segmentPaths'], [segment1.path, segment2.path]);
+        final telemetryFiles = storageDirectory.listSync().where(
+          (entity) => entity.path.endsWith('.telemetry.json'),
+        );
+        expect(telemetryFiles, hasLength(1));
+      },
+    );
+
+    test('checkpoint does nothing without an active ride', () async {
+      final segment1 = await createSegment('segment_1.mp4', 'video-one');
+      final path = await provider.checkpointRideSession(
+        segmentPaths: [segment1.path],
+      );
+      expect(path, isNull);
+    });
+
+    test('a failed save keeps the ride for a retry', () async {
+      final segment1 = await createSegment('segment_1.mp4', 'video-one');
+      provider.startRideSession();
+      final checkpointPath = await provider.checkpointRideSession(
+        segmentPaths: [segment1.path],
+      );
+      expect(checkpointPath, isNotNull);
+
+      // Block the target path with a directory so every write fails.
+      await File(checkpointPath!).delete();
+      final blocker = Directory(checkpointPath);
+      await blocker.create();
+
+      final failedPath = await provider.stopRideSessionAndPersist(
+        segment1.path,
+        segmentPaths: [segment1.path],
+      );
+      expect(failedPath, isNull);
+      expect(provider.lastPersistError, isNotNull);
+      expect(provider.hasPendingPersist, isTrue);
+
+      await blocker.delete(recursive: true);
+      final retriedPath = await provider.retryPendingPersist();
+      expect(retriedPath, checkpointPath);
+      expect(provider.lastPersistError, isNull);
+      expect(provider.hasPendingPersist, isFalse);
+      final json = await readJson(retriedPath!);
+      expect(json['sessionComplete'], isTrue);
+    });
+
+    test(
+      'a ride started while the previous one is saving is not affected',
+      () async {
+        final segment1 = await createSegment('segment_1.mp4', 'video-one');
+        // A long sample interval keeps the sample timer from adding samples
+        // while the save is awaited.
+        final slowProvider = TelemetryProvider(
+          sampleInterval: const Duration(minutes: 10),
+        );
+        addTearDown(slowProvider.dispose);
+        slowProvider.startRideSession();
+
+        final pendingSave = slowProvider.stopRideSessionAndPersist(
+          segment1.path,
+          segmentPaths: [segment1.path],
+        );
+        slowProvider.startRideSession();
+        final newRideSamples = slowProvider.activeRideSamples.length;
+
+        final path = await pendingSave;
+        expect(path, isNotNull);
+        expect(slowProvider.isRideActive, isTrue);
+        expect(slowProvider.activeRideSamples.length, newRideSamples);
+        expect(newRideSamples, greaterThan(0));
+      },
+    );
+
+    test(
+      'a later successful save does not discard an earlier failed one',
+      () async {
+        final segment1 = await createSegment('segment_1.mp4', 'video-one');
+        provider.startRideSession();
+        final firstPath = await provider.checkpointRideSession(
+          segmentPaths: [segment1.path],
+        );
+        expect(firstPath, isNotNull);
+        await File(firstPath!).delete();
+        final blocker = Directory(firstPath);
+        await blocker.create();
+
+        expect(
+          await provider.stopRideSessionAndPersist(
+            segment1.path,
+            segmentPaths: [segment1.path],
+          ),
+          isNull,
+        );
+        expect(provider.hasPendingPersist, isTrue);
+
+        // A second ride saves fine while the first is still pending.
+        final segment2 = await createSegment('segment_2.mp4', 'video-two');
+        provider.startRideSession();
+        final secondPath = await provider.stopRideSessionAndPersist(
+          segment2.path,
+          segmentPaths: [segment2.path],
+        );
+        expect(secondPath, isNotNull);
+        expect(provider.hasPendingPersist, isTrue);
+        expect(provider.lastPersistError, isNotNull);
+
+        await blocker.delete(recursive: true);
+        expect(await provider.retryPendingPersist(), firstPath);
+        expect(provider.hasPendingPersist, isFalse);
+        expect(provider.lastPersistError, isNull);
+        expect((await readJson(firstPath))['sessionComplete'], isTrue);
+      },
+    );
   });
 }

@@ -1,4 +1,6 @@
+import 'dart:collection';
 import 'dart:io';
+import 'dart:isolate';
 import 'dart:math' as math;
 import 'dart:async' show unawaited;
 
@@ -6,163 +8,387 @@ import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:video_player/video_player.dart';
 
+import '../../core/utils/format_utils.dart';
+import '../map/map_source_config.dart';
 import '../telemetry/models/telemetry_data.dart';
 import 'models/ride_record.dart';
+import 'widgets/playback_seekbar_track_shape.dart';
+import 'widgets/playback_timeline.dart';
 import 'widgets/route_map_view.dart';
 
+/// Plays back a recorded ride: its video segments as one continuous timeline,
+/// with a telemetry overlay, a speed graph, a seekbar that marks missing
+/// footage, integrity-check failures, incidents and locked segments, and an
+/// optional online route map.
+///
+/// Segment integrity is checked in the background after the screen opens;
+/// segments that cannot be confirmed unmodified since recording are marked on
+/// the seekbar.
 class RidePlaybackScreen extends StatefulWidget {
+  /// Creates a playback screen for [ride].
   const RidePlaybackScreen({super.key, required this.ride});
 
+  /// The ride to play.
   final RideRecord ride;
 
   @override
   State<RidePlaybackScreen> createState() => _RidePlaybackScreenState();
 }
 
+enum _SegmentLoadOutcome { loaded, failed, cancelled }
+
+class _PendingSeek {
+  const _PendingSeek(this.target, this.shouldResume);
+
+  final Duration target;
+  final bool shouldResume;
+}
+
+class _SegmentIntegrityResult {
+  const _SegmentIntegrityResult({
+    required this.issues,
+    required this.quarantinedCount,
+  });
+
+  final List<String> issues;
+  final int quarantinedCount;
+}
+
 class _RidePlaybackScreenState extends State<RidePlaybackScreen>
     with WidgetsBindingObserver {
   static const String _showRouteMapPrefKey = 'ride_playback_show_route_map';
+  static const String _onlineMapConsentPrefKey =
+      'ride_playback_online_map_consent';
 
-  late RideRecord _activeRide;
+  /// Tap distance, in logical pixels, within which a seekbar tap snaps to a
+  /// marker.
+  static const double _markerTapTolerancePx = 18;
+
+  /// Segment-integrity results of recently opened rides, keyed by the
+  /// telemetry path and the size and modification time of every file, so
+  /// re-opening an unchanged ride does not hash its segments again and
+  /// concurrent opens share one job.
+  static final LinkedHashMap<String, Future<_SegmentIntegrityResult>>
+  _integrityJobs = LinkedHashMap<String, Future<_SegmentIntegrityResult>>();
+  static const int _maxCachedIntegrityJobs = 16;
+
   VideoPlayerController? _controller;
   bool _isLoading = true;
   bool _isDisposing = false;
+  bool _isAppInForeground = true;
+  String? _playbackError;
   final List<String> _segmentPaths = <String>[];
   final List<Duration> _segmentDurations = <Duration>[];
   final List<Duration> _segmentOffsets = <Duration>[];
-  final Map<String, Duration> _segmentStartOffsetsByPath = <String, Duration>{};
+  final Set<int> _failedSegmentIndexes = <int>{};
+  List<RideSegmentTimelineEntry> _timelineEntries =
+      const <RideSegmentTimelineEntry>[];
   Duration _totalDuration = Duration.zero;
   Duration _lastKnownGlobalPosition = Duration.zero;
   Duration? _scrubPreviewPosition;
   int _activeSegmentIndex = 0;
+  int _loadGeneration = 0;
   bool _isSwitchingSegment = false;
   bool _isSeekingAcrossSegments = false;
+  _PendingSeek? _pendingSeek;
+  VideoPlayerController? _erroredController;
   bool _isScrubbing = false;
   bool _resumeAfterScrub = false;
+  Duration? _graphDragAnchor;
+  double _graphDragStartDx = 0;
   bool _showRouteMap = false;
+  bool _hasOnlineMapConsent = false;
   bool _isFullscreenPlayback = false;
   List<int> _lockMarkerMs = const <int>[];
   List<int> _incidentMarkerMs = const <int>[];
-  List<_MissingSegmentRange> _missingSegmentRanges =
-      const <_MissingSegmentRange>[];
+  List<PlaybackRange> _missingSegmentRanges = const <PlaybackRange>[];
+  List<PlaybackRange> _failedCheckRanges = const <PlaybackRange>[];
+  List<PlaybackRange> _noVideoRanges = const <PlaybackRange>[];
+  Set<String> _integrityFailedPaths = const <String>{};
+  double _maxSampleSpeed = 1;
   bool _hasShownInitializationWarning = false;
-  bool _hasShownRuntimeTrailingWarning = false;
   bool _hasShownIntegrityWarning = false;
-  Offset? _timelineTapStartLocal;
-  bool _timelineTapMoved = false;
+  String? _shownIntegrityNotice;
+
+  bool get _isSegmentLoadInFlight =>
+      _isSwitchingSegment || _isSeekingAcrossSegments;
 
   @override
   void initState() {
     super.initState();
-    _activeRide = widget.ride;
+    final lifecycle = WidgetsBinding.instance.lifecycleState;
+    _isAppInForeground =
+        lifecycle == null || lifecycle == AppLifecycleState.resumed;
     WidgetsBinding.instance.addObserver(this);
+    for (final sample in widget.ride.samples) {
+      _maxSampleSpeed = math.max(_maxSampleSpeed, sample.speed);
+    }
     unawaited(_loadPlaybackPreferences());
-    _showIntegrityWarningIfNeeded();
+    _showInitialIntegrityWarning();
     unawaited(_verifySegmentsAsync());
-    _initializePlayback();
+    unawaited(_initializePlayback());
+  }
+
+  /// Shows what the payload-level check done when loading the ride found,
+  /// that a ride without an integrity record cannot be checked, and that
+  /// its GPS came from a simulated location provider.
+  void _showInitialIntegrityWarning() {
+    final ride = widget.ride;
+    final integrityNotice = describeIntegrityIssues(
+      issues: ride.integrity.issues,
+      quarantinedCount: ride.quarantinedSegmentPaths.length,
+    );
+    final notices = <String>[
+      ?integrityNotice,
+      if (integrityNotice == null &&
+          ride.telemetryPath != null &&
+          ride.integrity.status == RideIntegrityStatus.unknown)
+        'This ride has no integrity record, so its files cannot be checked.',
+      if (ride.mockLocationDetected)
+        'GPS in this ride came from a simulated (mock) location provider.',
+    ];
+    // Segments without a recorded hash are known before any hashing, so the
+    // seekbar can mark them right away; the background check refines this.
+    _integrityFailedPaths = segmentPathsFailingIntegrity(ride.integrity.issues);
+    if (notices.isEmpty) {
+      return;
+    }
+    if (integrityNotice != null) {
+      _hasShownIntegrityWarning = true;
+      _shownIntegrityNotice = integrityNotice;
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _showMessage(notices.join(' '), duration: const Duration(seconds: 5));
+    });
   }
 
   Future<void> _verifySegmentsAsync() async {
-    final verifiedRide = await _activeRide.verifySegmentIntegrity();
+    final _SegmentIntegrityResult result;
+    try {
+      result = await _segmentIntegrityFor(widget.ride);
+    } catch (_) {
+      return;
+    }
+    if (!mounted || _isDisposing) {
+      return;
+    }
+
+    final failedPaths = segmentPathsFailingIntegrity(result.issues);
+    setState(() {
+      _integrityFailedPaths = failedPaths;
+      _failedCheckRanges = rangesForPaths(
+        timeline: _timelineEntries,
+        paths: _integrityFailedPaths,
+      );
+    });
+
+    if (failedPaths.isEmpty && _hasShownIntegrityWarning) {
+      return;
+    }
+    final notice = describeIntegrityIssues(
+      issues: result.issues,
+      quarantinedCount: result.quarantinedCount,
+    );
+    // Do not repeat the notice already shown from the load-time check.
+    if (notice == null || notice == _shownIntegrityNotice) {
+      return;
+    }
+    _hasShownIntegrityWarning = true;
+    _shownIntegrityNotice = notice;
+    _showMessage(notice, duration: const Duration(seconds: 6));
+  }
+
+  static Future<_SegmentIntegrityResult> _segmentIntegrityFor(
+    RideRecord ride,
+  ) async {
+    final key = await _integrityCacheKey(ride);
+    final cached = _integrityJobs.remove(key);
+    if (cached != null) {
+      _integrityJobs[key] = cached;
+      return cached;
+    }
+
+    final job = _verifySegmentsOffUiIsolate(ride);
+    _integrityJobs[key] = job;
+    while (_integrityJobs.length > _maxCachedIntegrityJobs) {
+      unawaited(_integrityJobs.remove(_integrityJobs.keys.first));
+    }
+    unawaited(
+      job.catchError((Object _) {
+        unawaited(_integrityJobs.remove(key));
+        return const _SegmentIntegrityResult(
+          issues: <String>[],
+          quarantinedCount: 0,
+        );
+      }),
+    );
+    return job;
+  }
+
+  /// Hashes the ride's segments on a background isolate so playback and the
+  /// UI stay responsive; falls back to the current isolate if that fails.
+  ///
+  /// Only the issue list and the quarantine count come back from the
+  /// isolate, not the whole ride with its telemetry samples.
+  static Future<_SegmentIntegrityResult> _verifySegmentsOffUiIsolate(
+    RideRecord ride,
+  ) async {
+    Future<_SegmentIntegrityResult> verify() async {
+      final verified = await ride.verifySegmentIntegrity();
+      return _SegmentIntegrityResult(
+        issues: List<String>.of(verified.integrity.issues),
+        quarantinedCount: verified.quarantinedSegmentPaths.length,
+      );
+    }
+
+    try {
+      return await Isolate.run(verify);
+    } catch (_) {
+      return verify();
+    }
+  }
+
+  static Future<String> _integrityCacheKey(RideRecord ride) async {
+    final buffer = StringBuffer(ride.telemetryPath ?? ride.videoPath);
+    final paths = <String>[
+      if (ride.telemetryPath != null) ride.telemetryPath!,
+      ...ride.segmentPaths,
+    ];
+    for (final path in paths) {
+      final stat = await FileStat.stat(path);
+      buffer
+        ..write('|')
+        ..write(path)
+        ..write(':')
+        ..write(stat.size)
+        ..write(':')
+        ..write(stat.modified.millisecondsSinceEpoch);
+    }
+    return buffer.toString();
+  }
+
+  void _showMessage(
+    String message, {
+    Duration? duration,
+    bool replaceCurrent = false,
+  }) {
     if (!mounted) {
       return;
     }
-    setState(() {
-      _activeRide = verifiedRide;
-    });
-    _showIntegrityWarningIfNeeded();
-  }
-
-  void _showIntegrityWarningIfNeeded() {
-    if (_hasShownIntegrityWarning) {
-      return;
+    final messenger = ScaffoldMessenger.of(context);
+    if (replaceCurrent) {
+      messenger.hideCurrentSnackBar();
     }
-
-    final hasIntegrityWarning =
-        _activeRide.integrity.status == RideIntegrityStatus.modified ||
-            _activeRide.hasQuarantinedSegments;
-    if (!hasIntegrityWarning) {
-      return;
-    }
-
-    _hasShownIntegrityWarning = true;
-    final notes = <String>[];
-    final integrityIssueCount = _activeRide.integrity.issues.length;
-    if (integrityIssueCount > 0) {
-      notes.add(
-          '$integrityIssueCount integrity issue${integrityIssueCount == 1 ? '' : 's'}');
-    }
-
-    final quarantinedCount = _activeRide.quarantinedSegmentPaths.length;
-    if (quarantinedCount > 0) {
-      notes.add('$quarantinedCount quarantined path${quarantinedCount == 1 ? '' : 's'}');
-    }
-
-    final detail =
-        notes.isEmpty ? 'modified telemetry metadata' : notes.join(', ');
-
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) {
-        return;
-      }
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            'Security warning: this ride shows $detail. Playback continues with trusted segments only.',
-          ),
-          duration: const Duration(seconds: 5),
-        ),
-      );
-    });
+    messenger.showSnackBar(
+      SnackBar(
+        content: Text(message),
+        duration: duration ?? const Duration(seconds: 4),
+      ),
+    );
   }
 
   Future<void> _loadPlaybackPreferences() async {
     final prefs = await SharedPreferences.getInstance();
-    final showRouteMap = prefs.getBool(_showRouteMapPrefKey) ?? false;
-    if (!mounted || showRouteMap == _showRouteMap) {
+    final consent = prefs.getBool(_onlineMapConsentPrefKey) ?? false;
+    final showRouteMap =
+        consent && (prefs.getBool(_showRouteMapPrefKey) ?? false);
+    if (!mounted) {
       return;
     }
     setState(() {
+      _hasOnlineMapConsent = consent;
       _showRouteMap = showRouteMap;
     });
   }
 
-  Future<void> _persistShowRouteMap(bool value) async {
+  Future<void> _persistBool(String key, bool value) async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setBool(_showRouteMapPrefKey, value);
+    await prefs.setBool(key, value);
   }
 
-  void _toggleRouteMapVisibility() {
+  /// Asks once before the online map is first shown, because loading tiles
+  /// sends the ride's area to the tile server.
+  Future<bool> _confirmOnlineMap() async {
+    final accepted = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Show online map?'),
+        content: const Text(
+          'The route map downloads map tiles from OpenStreetMap '
+          '(${MapSourceConfig.tileHost}). This sends the area of this ride '
+          'and your IP address to the OpenStreetMap Foundation, and the tiles '
+          'are cached on this device.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('Not now'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('Show map'),
+          ),
+        ],
+      ),
+    );
+    return accepted ?? false;
+  }
+
+  Future<void> _toggleRouteMapVisibility() async {
+    final show = !_showRouteMap;
+    if (show && !_hasOnlineMapConsent) {
+      if (!await _confirmOnlineMap() || !mounted) {
+        return;
+      }
+      _hasOnlineMapConsent = true;
+      unawaited(_persistBool(_onlineMapConsentPrefKey, true));
+    }
     setState(() {
-      _showRouteMap = !_showRouteMap;
+      _showRouteMap = show;
     });
-    unawaited(_persistShowRouteMap(_showRouteMap));
+    unawaited(_persistBool(_showRouteMapPrefKey, show));
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.inactive ||
-        state == AppLifecycleState.paused ||
-        state == AppLifecycleState.detached) {
-      _stopPlayback();
+    _isAppInForeground = state == AppLifecycleState.resumed;
+    if (!_isAppInForeground) {
+      unawaited(_stopPlayback());
     }
   }
 
   Future<void> _initializePlayback() async {
-    final declaredPaths = _orderedDeclaredSegmentPaths();
+    final declaredPaths = orderedDeclaredSegmentPaths(
+      segmentPaths: widget.ride.segmentPaths,
+      videoPath: widget.ride.videoPath,
+    );
+    final storedTimelinePaths = <String>{
+      for (final entry in widget.ride.segmentTimeline)
+        if (entry.endMs - entry.startMs >= minPlaybackSegmentMs)
+          entry.path.trim(),
+    };
 
-    final playablePaths = <String>[];
-    final playableDurations = <Duration>[];
-    final availableDurationsByPath = <String, Duration>{};
+    // Durations of segments listed in the stored timeline come from it; only
+    // segments without a usable entry (rides recorded before the timeline
+    // existed, or an entry saved without an end) are probed with a native
+    // player. Readability is checked when a segment is loaded.
+    final probedDurationsByPath = <String, Duration>{};
+    final unavailablePaths = <String>{};
     var missingSegmentsCount = 0;
     var unreadableSegmentsCount = 0;
     var unreadableTrailingSegmentsCount = 0;
 
     for (var index = 0; index < declaredPaths.length; index++) {
+      if (_isDisposing || !mounted) {
+        return;
+      }
       final path = declaredPaths[index];
-      final file = File(path);
-      if (!await file.exists()) {
+      if (!await File(path).exists()) {
         missingSegmentsCount++;
+        unavailablePaths.add(path);
+        continue;
+      }
+      if (storedTimelinePaths.contains(path)) {
         continue;
       }
 
@@ -171,131 +397,163 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
         path,
         retryOnFailure: isTrailingSegment,
       );
-
+      if (_isDisposing || !mounted) {
+        return;
+      }
       if (probe.duration > Duration.zero) {
-        playablePaths.add(path);
-        playableDurations.add(probe.duration);
-        availableDurationsByPath[path] = probe.duration;
+        probedDurationsByPath[path] = probe.duration;
         continue;
       }
 
       unreadableSegmentsCount++;
+      unavailablePaths.add(path);
       if (isTrailingSegment) {
         unreadableTrailingSegmentsCount++;
       }
       debugPrint(
-        'Ride playback: skipped unreadable segment $path (${probe.error ?? 'unknown-error'})',
+        'Ride playback: skipped unreadable segment ${index + 1} '
+        '(${probe.error ?? 'unknown-error'})',
       );
     }
-
-    _segmentPaths
-      ..clear()
-      ..addAll(playablePaths);
-    _segmentDurations
-      ..clear()
-      ..addAll(playableDurations);
-
-    if (_segmentPaths.isEmpty) {
-      _showInitializationWarning(
-        missingSegmentsCount: missingSegmentsCount,
-        unreadableSegmentsCount: unreadableSegmentsCount,
-        unreadableTrailingSegmentsCount: unreadableTrailingSegmentsCount,
-      );
-      setState(() {
-        _isLoading = false;
-      });
+    if (_isDisposing || !mounted) {
       return;
     }
 
-    final effectiveTimeline = _buildEffectiveTimelineEntries(
+    final timeline = buildEffectiveTimeline(
       declaredPaths: declaredPaths,
-      availableDurationsByPath: availableDurationsByPath,
+      storedTimeline: widget.ride.segmentTimeline,
+      probedDurationsByPath: probedDurationsByPath,
     );
-    _missingSegmentRanges = _buildMissingSegmentRanges(
-      timelineEntries: effectiveTimeline,
-      availablePaths: availableDurationsByPath.keys.toSet(),
-    );
+    final declaredSet = declaredPaths.toSet();
 
+    _segmentPaths.clear();
+    _segmentDurations.clear();
     _segmentOffsets.clear();
-    _segmentStartOffsetsByPath.clear();
-
-    final timelineByPath = <String, RideSegmentTimelineEntry>{
-      for (final entry in effectiveTimeline) entry.path: entry,
-    };
-
-    var runningFallbackOffset = Duration.zero;
-    var maxSegmentEnd = Duration.zero;
-    for (var index = 0; index < _segmentPaths.length; index++) {
-      final path = _segmentPaths[index];
-      final duration = _segmentDurations[index];
-      final timelineEntry = timelineByPath[path];
-
-      var offset = timelineEntry != null
-          ? Duration(milliseconds: timelineEntry.startMs)
-          : runningFallbackOffset;
-      if (offset < Duration.zero) {
-        offset = Duration.zero;
+    _failedSegmentIndexes.clear();
+    final unplayablePaths = <String>{};
+    for (final entry in timeline) {
+      if (!declaredSet.contains(entry.path) ||
+          unavailablePaths.contains(entry.path)) {
+        unplayablePaths.add(entry.path);
+        continue;
       }
-      if (_segmentOffsets.isNotEmpty && offset < _segmentOffsets.last) {
-        offset = _segmentOffsets.last;
-      }
-
-      _segmentOffsets.add(offset);
-      _segmentStartOffsetsByPath[path] = offset;
-
-      final segmentEnd = offset + duration;
-      final timelineEnd = timelineEntry == null
-          ? segmentEnd
-          : Duration(milliseconds: timelineEntry.endMs);
-      final effectiveEnd = timelineEnd > segmentEnd ? timelineEnd : segmentEnd;
-
-      if (effectiveEnd > maxSegmentEnd) {
-        maxSegmentEnd = effectiveEnd;
-      }
-      final nextFallback = effectiveEnd;
-      if (nextFallback > runningFallbackOffset) {
-        runningFallbackOffset = nextFallback;
-      }
+      _segmentPaths.add(entry.path);
+      _segmentOffsets.add(Duration(milliseconds: entry.startMs));
+      _segmentDurations.add(
+        Duration(milliseconds: entry.endMs - entry.startMs),
+      );
     }
 
-    final telemetryDuration = widget.ride.samples.isNotEmpty
-        ? Duration(milliseconds: widget.ride.samples.last.elapsedMs)
-        : Duration.zero;
-    var timelineMaxEndMs = 0;
-    for (final entry in effectiveTimeline) {
-      if (entry.endMs > timelineMaxEndMs) {
-        timelineMaxEndMs = entry.endMs;
-      }
+    final telemetryMs = widget.ride.samples.isNotEmpty
+        ? widget.ride.samples.last.elapsedMs
+        : 0;
+    var totalMs = telemetryMs;
+    for (final entry in timeline) {
+      totalMs = math.max(totalMs, entry.endMs);
     }
-    final timelineDuration = Duration(milliseconds: timelineMaxEndMs);
 
-    _totalDuration = telemetryDuration;
-    if (maxSegmentEnd > _totalDuration) {
-      _totalDuration = maxSegmentEnd;
-    }
-    if (timelineDuration > _totalDuration) {
-      _totalDuration = timelineDuration;
-    }
-    _lastKnownGlobalPosition = Duration.zero;
-    _lockMarkerMs =
-        _buildLockMarkers(totalDurationMs: _totalDuration.inMilliseconds);
-    _incidentMarkerMs = _buildIncidentMarkers(
-      samples: widget.ride.samples,
-      totalDurationMs: _totalDuration.inMilliseconds,
+    _timelineEntries = timeline;
+    _totalDuration = Duration(milliseconds: totalMs);
+    _missingSegmentRanges = rangesForPaths(
+      timeline: timeline,
+      paths: unplayablePaths,
     );
+    _failedCheckRanges = rangesForPaths(
+      timeline: timeline,
+      paths: _integrityFailedPaths,
+    );
+    _noVideoRanges = uncoveredRanges(timeline: timeline, totalMs: totalMs);
+    _lastKnownGlobalPosition = Duration.zero;
+    _lockMarkerMs = lockMarkerOffsetsMs(
+      playlistPaths: _segmentPaths,
+      playlistOffsets: _segmentOffsets,
+      lockedPaths: widget.ride.lockedSegmentPaths,
+      totalMs: totalMs,
+    );
+    // Rides that saved live-detected incidents show exactly those; older
+    // files fall back to the sample heuristic.
+    final recordedIncidents = widget.ride.incidents;
+    _incidentMarkerMs = recordedIncidents != null
+        ? recordedIncidentOffsetsMs(
+            elapsedMs: [
+              for (final incident in recordedIncidents) incident.elapsedMs,
+            ],
+            totalMs: totalMs,
+          )
+        : incidentMarkerOffsetsMs(
+            samples: widget.ride.samples,
+            totalMs: totalMs,
+          );
 
-    await _loadSegment(index: 0, autoPlay: false);
-    if (!mounted) {
+    var loaded = false;
+    for (var index = 0; index < _segmentPaths.length; index++) {
+      final outcome = await _loadSegment(index: index, autoPlay: false);
+      if (outcome == _SegmentLoadOutcome.cancelled) {
+        return;
+      }
+      if (outcome == _SegmentLoadOutcome.loaded) {
+        loaded = true;
+        break;
+      }
+      unreadableSegmentsCount++;
+      _markSegmentFailed(index);
+    }
+    if (!mounted || _isDisposing) {
       return;
     }
+
     setState(() {
       _isLoading = false;
+      if (!loaded) {
+        _playbackError = _noPlayableVideoMessage(
+          declaredCount: declaredPaths.length,
+          missingCount: missingSegmentsCount,
+          unreadableCount: unreadableSegmentsCount,
+        );
+      }
     });
+    if (!loaded) {
+      return;
+    }
     _showInitializationWarning(
       missingSegmentsCount: missingSegmentsCount,
       unreadableSegmentsCount: unreadableSegmentsCount,
       unreadableTrailingSegmentsCount: unreadableTrailingSegmentsCount,
     );
+  }
+
+  String _noPlayableVideoMessage({
+    required int declaredCount,
+    required int missingCount,
+    required int unreadableCount,
+  }) {
+    if (declaredCount == 0) {
+      return 'This ride has no video segments.';
+    }
+    final details = <String>[
+      if (missingCount > 0) '$missingCount missing',
+      if (unreadableCount > 0) '$unreadableCount unreadable',
+    ];
+    final suffix = details.isEmpty ? '' : ' (${details.join(', ')})';
+    return 'No playable video for this ride$suffix.';
+  }
+
+  Future<void> _retryPlayback() async {
+    final controller = _controller;
+    _loadGeneration++;
+    _pendingSeek = null;
+    _erroredController = null;
+    setState(() {
+      _controller = null;
+      _isLoading = true;
+      _playbackError = null;
+      _hasShownInitializationWarning = false;
+    });
+    if (controller != null) {
+      controller.removeListener(_onControllerTick);
+      unawaited(_stopAndDisposeController(controller));
+    }
+    await _initializePlayback();
   }
 
   void _showInitializationWarning({
@@ -320,192 +578,39 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
     }
 
     final trailingHint = unreadableTrailingSegmentsCount > 0
-        ? ' Last segment was retried once and skipped.'
+        ? ' The last segment was retried once.'
         : '';
 
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          'Some ride segments are unavailable (${details.join(', ')}). Playback is running in incomplete mode.$trailingHint',
-        ),
-        duration: const Duration(seconds: 4),
+    _showMessage(
+      'Some ride segments are unavailable (${details.join(', ')}). '
+      'They are marked red on the seekbar and skipped.$trailingHint',
+    );
+  }
+
+  /// Marks the playlist segment at [index] as unplayable and shows its span as
+  /// missing footage.
+  void _markSegmentFailed(int index) {
+    if (index < 0 || index >= _segmentPaths.length) {
+      return;
+    }
+    if (!_failedSegmentIndexes.add(index)) {
+      return;
+    }
+    final start = _segmentOffsets[index];
+    final ranges = mergeRanges(<PlaybackRange>[
+      ..._missingSegmentRanges,
+      PlaybackRange(
+        startMs: start.inMilliseconds,
+        endMs: (start + _segmentDurations[index]).inMilliseconds,
       ),
-    );
-  }
-
-  List<String> _orderedDeclaredSegmentPaths() {
-    final ordered = <String>[];
-    final seen = <String>{};
-
-    void addPath(String rawPath) {
-      final path = rawPath.trim();
-      if (path.isEmpty || !seen.add(path)) {
-        return;
-      }
-      ordered.add(path);
+    ]);
+    if (mounted) {
+      setState(() {
+        _missingSegmentRanges = ranges;
+      });
+    } else {
+      _missingSegmentRanges = ranges;
     }
-
-    for (final path in widget.ride.segmentPaths) {
-      addPath(path);
-    }
-    addPath(widget.ride.videoPath);
-    return ordered;
-  }
-
-  List<RideSegmentTimelineEntry> _buildEffectiveTimelineEntries({
-    required List<String> declaredPaths,
-    required Map<String, Duration> availableDurationsByPath,
-  }) {
-    final fallbackDurationMs = _estimateFallbackSegmentDurationMs(
-      availableDurationsByPath,
-      declaredCount: declaredPaths.length,
-    );
-
-    if (widget.ride.segmentTimeline.isEmpty) {
-      var cursorMs = 0;
-      final synthesized = <RideSegmentTimelineEntry>[];
-      for (final path in declaredPaths) {
-        final durationMs = availableDurationsByPath[path]?.inMilliseconds ??
-            fallbackDurationMs;
-        final normalizedDurationMs = math.max(durationMs, 1000);
-        final endMs = cursorMs + normalizedDurationMs;
-        synthesized.add(
-          RideSegmentTimelineEntry(path: path, startMs: cursorMs, endMs: endMs),
-        );
-        cursorMs = endMs;
-      }
-      return synthesized;
-    }
-
-    final merged = <RideSegmentTimelineEntry>[];
-    final seenPaths = <String>{};
-
-    for (final entry in widget.ride.segmentTimeline) {
-      final path = entry.path.trim();
-      if (path.isEmpty || !seenPaths.add(path)) {
-        continue;
-      }
-
-      final startMs = math.max(entry.startMs, 0);
-      final endMs = math.max(entry.endMs, startMs + 1);
-      merged.add(
-        RideSegmentTimelineEntry(path: path, startMs: startMs, endMs: endMs),
-      );
-    }
-
-    var appendCursorMs = 0;
-    if (merged.isNotEmpty) {
-      appendCursorMs =
-          merged.map((entry) => entry.endMs).reduce((a, b) => a > b ? a : b);
-    }
-
-    for (final path in declaredPaths) {
-      if (seenPaths.contains(path)) {
-        continue;
-      }
-      final durationMs =
-          availableDurationsByPath[path]?.inMilliseconds ?? fallbackDurationMs;
-      final normalizedDurationMs = math.max(durationMs, 1000);
-      final endMs = appendCursorMs + normalizedDurationMs;
-      merged.add(
-        RideSegmentTimelineEntry(
-          path: path,
-          startMs: appendCursorMs,
-          endMs: endMs,
-        ),
-      );
-      appendCursorMs = endMs;
-    }
-
-    merged.sort((a, b) => a.startMs.compareTo(b.startMs));
-    final normalized = <RideSegmentTimelineEntry>[];
-    var cursorMs = 0;
-    for (final entry in merged) {
-      final startMs = math.max(entry.startMs, cursorMs);
-      final endMs = math.max(entry.endMs, startMs + 1);
-      normalized.add(
-        RideSegmentTimelineEntry(
-            path: entry.path, startMs: startMs, endMs: endMs),
-      );
-      cursorMs = endMs;
-    }
-
-    return normalized;
-  }
-
-  int _estimateFallbackSegmentDurationMs(
-    Map<String, Duration> availableDurationsByPath, {
-    required int declaredCount,
-  }) {
-    final durationsMs = availableDurationsByPath.values
-        .map((duration) => duration.inMilliseconds)
-        .where((ms) => ms > 0)
-        .toList()
-      ..sort();
-
-    if (durationsMs.isNotEmpty) {
-      return durationsMs[durationsMs.length ~/ 2];
-    }
-
-    if (widget.ride.samples.isNotEmpty && declaredCount > 0) {
-      final estimated =
-          (widget.ride.samples.last.elapsedMs / declaredCount).round();
-      return math.max(estimated, 1000);
-    }
-
-    return const Duration(minutes: 5).inMilliseconds;
-  }
-
-  List<_MissingSegmentRange> _buildMissingSegmentRanges({
-    required List<RideSegmentTimelineEntry> timelineEntries,
-    required Set<String> availablePaths,
-  }) {
-    if (timelineEntries.isEmpty) {
-      return const <_MissingSegmentRange>[];
-    }
-
-    final ranges = <_MissingSegmentRange>[];
-    for (final entry in timelineEntries) {
-      final path = entry.path.trim();
-      if (path.isEmpty) {
-        continue;
-      }
-
-      if (availablePaths.contains(path)) {
-        continue;
-      }
-
-      final startMs = entry.startMs;
-      final endMs = entry.endMs >= startMs ? entry.endMs : startMs;
-      if (endMs <= startMs) {
-        continue;
-      }
-
-      ranges.add(_MissingSegmentRange(startMs: startMs, endMs: endMs));
-    }
-
-    if (ranges.isEmpty) {
-      return const <_MissingSegmentRange>[];
-    }
-
-    ranges.sort((a, b) => a.startMs.compareTo(b.startMs));
-    final merged = <_MissingSegmentRange>[];
-    var current = ranges.first;
-
-    for (final next in ranges.skip(1)) {
-      if (next.startMs <= current.endMs) {
-        current = _MissingSegmentRange(
-          startMs: current.startMs,
-          endMs: math.max(current.endMs, next.endMs),
-        );
-      } else {
-        merged.add(current);
-        current = next;
-      }
-    }
-    merged.add(current);
-
-    return List<_MissingSegmentRange>.unmodifiable(merged);
   }
 
   Future<_SegmentProbeResult> _probeDurationOnce(String path) async {
@@ -532,7 +637,9 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
     required bool retryOnFailure,
   }) async {
     final firstAttempt = await _probeDurationOnce(path);
-    if (firstAttempt.duration > Duration.zero || !retryOnFailure) {
+    if (firstAttempt.duration > Duration.zero ||
+        !retryOnFailure ||
+        _isDisposing) {
       return firstAttempt;
     }
 
@@ -558,16 +665,14 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
         await controller.initialize();
         return controller;
       } catch (e) {
-        debugPrint(
-          'Ride playback: failed loading segment $path (${e.toString()})',
-        );
+        debugPrint('Ride playback: failed loading segment ($e)');
         await _stopAndDisposeController(controller);
         return null;
       }
     }
 
     final firstAttempt = await tryInitializeOnce();
-    if (firstAttempt != null || !retryOnFailure) {
+    if (firstAttempt != null || !retryOnFailure || _isDisposing) {
       return firstAttempt;
     }
 
@@ -575,21 +680,30 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
     return tryInitializeOnce();
   }
 
-  Future<bool> _loadSegment({
+  /// Initializes the segment at [index] and makes it the active controller.
+  ///
+  /// Each call takes a new load generation; a load that a later call (or
+  /// dispose) supersedes disposes its own controller and reports
+  /// [_SegmentLoadOutcome.cancelled]. The controller that is replaced is read
+  /// at swap time, so no initialized controller is ever left undisposed.
+  Future<_SegmentLoadOutcome> _loadSegment({
     required int index,
     required bool autoPlay,
     Duration initialPosition = Duration.zero,
   }) async {
-    if (_isDisposing) {
-      return false;
+    if (_isDisposing || !mounted) {
+      return _SegmentLoadOutcome.cancelled;
     }
-
     if (index < 0 || index >= _segmentPaths.length) {
-      return false;
+      return _SegmentLoadOutcome.failed;
     }
 
-    final previous = _controller;
-    if (previous != null && previous.value.isInitialized) {
+    final generation = ++_loadGeneration;
+    bool isSuperseded() =>
+        _isDisposing || !mounted || generation != _loadGeneration;
+
+    final current = _controller;
+    if (current != null && current.value.isInitialized) {
       _lastKnownGlobalPosition = _globalPosition();
     }
 
@@ -599,56 +713,68 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
       retryOnFailure: retryOnFailure,
     );
     if (controller == null) {
-      return false;
+      return isSuperseded()
+          ? _SegmentLoadOutcome.cancelled
+          : _SegmentLoadOutcome.failed;
     }
-    try {
-      if (_isDisposing) {
-        await _stopAndDisposeController(controller);
-        return false;
-      }
-      controller.setLooping(false);
 
-      final clampedPosition =
-          _clampDuration(initialPosition, controller.value.duration);
+    Duration clampedPosition;
+    try {
+      if (isSuperseded()) {
+        await _stopAndDisposeController(controller);
+        return _SegmentLoadOutcome.cancelled;
+      }
+      await controller.setLooping(false);
+
+      clampedPosition = _clampDuration(
+        initialPosition,
+        controller.value.duration,
+      );
       if (clampedPosition > Duration.zero) {
         await controller.seekTo(clampedPosition);
       }
-
-      controller.addListener(_onControllerTick);
-
-      if (!mounted || _isDisposing) {
-        await _stopAndDisposeController(controller);
-        return false;
-      }
-
-      if (previous != null) {
-        previous.removeListener(_onControllerTick);
-      }
-
-      setState(() {
-        _controller = controller;
-        _activeSegmentIndex = index;
-        _lastKnownGlobalPosition = _clampDuration(
-          _segmentOffsets[index] + clampedPosition,
-          _totalDuration,
-        );
-      });
-
-      if (autoPlay) {
-        await controller.play();
-      }
-
-      if (previous != null) {
-        // Dispose previous controller after the new one is mounted to avoid
-        // transient "used after dispose" during widget handoff.
-        unawaited(_stopAndDisposeController(previous));
-      }
-
-      return true;
     } catch (_) {
       await _stopAndDisposeController(controller);
-      return false;
+      return isSuperseded()
+          ? _SegmentLoadOutcome.cancelled
+          : _SegmentLoadOutcome.failed;
     }
+
+    if (isSuperseded()) {
+      await _stopAndDisposeController(controller);
+      return _SegmentLoadOutcome.cancelled;
+    }
+
+    final replaced = _controller;
+    replaced?.removeListener(_onControllerTick);
+    controller.addListener(_onControllerTick);
+    final actualDuration = controller.value.duration;
+    setState(() {
+      _controller = controller;
+      _activeSegmentIndex = index;
+      if (actualDuration > Duration.zero) {
+        _segmentDurations[index] = actualDuration;
+      }
+      _lastKnownGlobalPosition = _clampDuration(
+        _segmentOffsets[index] + clampedPosition,
+        _totalDuration,
+      );
+    });
+
+    if (replaced != null && !identical(replaced, controller)) {
+      // Dispose the replaced controller after the new one is mounted to avoid
+      // a transient "used after dispose" during widget handoff.
+      unawaited(_stopAndDisposeController(replaced));
+    }
+
+    if (autoPlay && _isAppInForeground && !_isDisposing && !_isScrubbing) {
+      try {
+        await controller.play();
+      } catch (_) {
+        // A playback error is reported through the controller value.
+      }
+    }
+    return _SegmentLoadOutcome.loaded;
   }
 
   void _onControllerTick() {
@@ -657,7 +783,14 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
     }
 
     final controller = _controller;
-    if (controller == null || !controller.value.isInitialized) {
+    if (controller == null) {
+      return;
+    }
+    if (controller.value.hasError) {
+      _handleRuntimeError(controller);
+      return;
+    }
+    if (!controller.value.isInitialized) {
       return;
     }
 
@@ -667,45 +800,77 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
     );
 
     if (controller.value.isCompleted &&
-        _activeSegmentIndex < _segmentPaths.length - 1 &&
-        !_isSwitchingSegment &&
-        !_isSeekingAcrossSegments) {
+        !_isSegmentLoadInFlight &&
+        _nextPlayableIndex(_activeSegmentIndex + 1) != null) {
       _lastKnownGlobalPosition = _clampDuration(
         _segmentOffsets[_activeSegmentIndex] +
             _segmentDurations[_activeSegmentIndex],
         _totalDuration,
       );
-      _advanceToNextSegment();
+      unawaited(_advanceToNextSegment());
     }
   }
 
-  Future<void> _advanceToNextSegment() async {
-    if (_isSwitchingSegment || _isDisposing) {
+  /// Handles a decode or source error reported after a segment loaded: marks
+  /// the segment as unplayable and moves on to the next playable one.
+  void _handleRuntimeError(VideoPlayerController controller) {
+    if (identical(_erroredController, controller)) {
       return;
     }
+    _erroredController = controller;
+    final index = _activeSegmentIndex;
+    debugPrint(
+      'Ride playback: segment ${index + 1} failed during playback '
+      '(${controller.value.errorDescription})',
+    );
+    _markSegmentFailed(index);
 
-    final nextIndex = _activeSegmentIndex + 1;
-    if (nextIndex >= _segmentPaths.length) {
-      await _stopPlayback();
+    final hasNext = _nextPlayableIndex(index + 1) != null;
+    _showMessage(
+      hasNext
+          ? 'Segment ${index + 1} could not be played. Skipping to the next segment.'
+          : 'Playback ended: segment ${index + 1} could not be played.',
+    );
+    if (hasNext && !_isSegmentLoadInFlight) {
+      unawaited(_advanceToNextSegment());
+    }
+  }
+
+  int? _nextPlayableIndex(int from) {
+    for (var index = math.max(from, 0); index < _segmentPaths.length; index++) {
+      if (!_failedSegmentIndexes.contains(index)) {
+        return index;
+      }
+    }
+    return null;
+  }
+
+  Future<void> _advanceToNextSegment() async {
+    if (_isSegmentLoadInFlight || _isDisposing) {
       return;
     }
 
     _isSwitchingSegment = true;
     try {
-      var candidate = nextIndex;
-      while (candidate < _segmentPaths.length && !_isDisposing) {
-        final loaded = await _loadSegment(index: candidate, autoPlay: true);
-        if (loaded) {
+      var candidate = _nextPlayableIndex(_activeSegmentIndex + 1);
+      while (candidate != null && !_isDisposing) {
+        final outcome = await _loadSegment(index: candidate, autoPlay: true);
+        if (outcome != _SegmentLoadOutcome.failed) {
           return;
         }
-        if (candidate == _segmentPaths.length - 1) {
-          _showRuntimeTrailingSegmentWarning();
-        }
-        candidate++;
+        _markSegmentFailed(candidate);
+        candidate = _nextPlayableIndex(candidate + 1);
+      }
+      if (_isDisposing) {
+        return;
       }
       await _stopPlayback();
+      _showMessage(
+        'Playback ended: the remaining segments could not be opened.',
+      );
     } finally {
       _isSwitchingSegment = false;
+      _drainPendingSeek();
     }
   }
 
@@ -720,7 +885,8 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
   }
 
   Future<void> _stopAndDisposeController(
-      VideoPlayerController controller) async {
+    VideoPlayerController controller,
+  ) async {
     try {
       if (controller.value.isPlaying) {
         await controller.pause();
@@ -729,21 +895,6 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
       // Best effort pause before dispose.
     }
     await controller.dispose();
-  }
-
-  void _showRuntimeTrailingSegmentWarning() {
-    if (!mounted || _hasShownRuntimeTrailingWarning) {
-      return;
-    }
-    _hasShownRuntimeTrailingWarning = true;
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text(
-          'Final segment could not be opened after retry. Playback continued without it.',
-        ),
-        duration: Duration(seconds: 4),
-      ),
-    );
   }
 
   Duration _globalPosition() {
@@ -765,70 +916,129 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
     return _clampDuration(offset + controller.value.position, _totalDuration);
   }
 
-  Future<void> _seekGlobal(Duration target,
-      {required bool shouldResume}) async {
+  /// Seeks to [target] on the ride timeline.
+  ///
+  /// While a segment load is in flight the request is not started; the latest
+  /// one is kept and runs when the load finishes, so only one segment load
+  /// ever runs at a time.
+  Future<void> _seekGlobal(
+    Duration target, {
+    required bool shouldResume,
+  }) async {
     if (_isDisposing ||
         _segmentPaths.isEmpty ||
         _totalDuration == Duration.zero) {
       return;
     }
+    if (_isSegmentLoadInFlight) {
+      // During an auto-advance the finished segment reports "not playing",
+      // but the advance itself resumes playback, so keep it going.
+      _pendingSeek = _PendingSeek(target, shouldResume || _isSwitchingSegment);
+      return;
+    }
 
-    final safeTarget = _clampDuration(target, _totalDuration);
-    _lastKnownGlobalPosition = safeTarget;
-    final seekTarget = _locateSegmentForGlobalPosition(safeTarget);
     final current = _controller;
     if (current == null) {
       return;
     }
+    final safeTarget = _clampDuration(target, _totalDuration);
+    final seekTarget = locateSegment(
+      offsets: _segmentOffsets,
+      durations: _segmentDurations,
+      position: safeTarget,
+    );
 
-    if (seekTarget.segmentIndex == _activeSegmentIndex) {
-      await current.seekTo(seekTarget.localPosition);
-      if (shouldResume && !_isDisposing) {
-        await current.play();
+    // A segment that failed during playback is skipped like any other
+    // unplayable segment instead of seeking its errored controller.
+    if (seekTarget.segmentIndex == _activeSegmentIndex &&
+        !_failedSegmentIndexes.contains(_activeSegmentIndex)) {
+      _lastKnownGlobalPosition = safeTarget;
+      try {
+        await current.seekTo(seekTarget.localPosition);
+        // An auto-advance may have replaced (and disposed) this controller
+        // while the seek ran.
+        if (shouldResume &&
+            _isAppInForeground &&
+            !_isDisposing &&
+            !_isScrubbing &&
+            identical(_controller, current)) {
+          await current.play();
+        }
+      } catch (e) {
+        debugPrint('Ride playback: seek failed ($e)');
       }
       return;
     }
 
     _isSeekingAcrossSegments = true;
     try {
-      if (_isDisposing) {
-        return;
-      }
       var candidate = seekTarget.segmentIndex;
       var initialPosition = seekTarget.localPosition;
-      var loaded = false;
+      var outcome = _SegmentLoadOutcome.failed;
 
       while (candidate < _segmentPaths.length && !_isDisposing) {
-        loaded = await _loadSegment(
+        if (_failedSegmentIndexes.contains(candidate)) {
+          candidate++;
+          initialPosition = Duration.zero;
+          continue;
+        }
+        outcome = await _loadSegment(
           index: candidate,
           autoPlay: false,
           initialPosition: initialPosition,
         );
-        if (loaded) {
+        if (outcome != _SegmentLoadOutcome.failed) {
           break;
         }
+        _markSegmentFailed(candidate);
         candidate++;
         initialPosition = Duration.zero;
       }
 
-      if (!loaded || _isDisposing) {
+      if (_isDisposing || outcome == _SegmentLoadOutcome.cancelled) {
+        return;
+      }
+      if (outcome == _SegmentLoadOutcome.failed) {
+        if (mounted) {
+          setState(() {});
+        }
+        _showMessage(
+          'No playable video at ${_formatDuration(safeTarget)} or later.',
+        );
         return;
       }
 
-      if (shouldResume && !_isDisposing) {
-        await _controller?.play();
+      if (shouldResume && _isAppInForeground && !_isScrubbing) {
+        try {
+          await _controller?.play();
+        } catch (_) {
+          // A playback error is reported through the controller value.
+        }
       }
     } finally {
       _isSeekingAcrossSegments = false;
+      _drainPendingSeek();
     }
   }
 
+  void _drainPendingSeek() {
+    final pending = _pendingSeek;
+    if (pending == null || _isDisposing || _isSegmentLoadInFlight) {
+      return;
+    }
+    _pendingSeek = null;
+    unawaited(_seekGlobal(pending.target, shouldResume: pending.shouldResume));
+  }
+
   Future<void> _beginScrub(bool wasPlaying) async {
-    if (_isDisposing || _isSwitchingSegment || _isSeekingAcrossSegments) {
+    if (_isDisposing) {
       return;
     }
 
-    _resumeAfterScrub = wasPlaying;
+    // A scrub may start while a segment loads: the seek it commits is queued
+    // by _seekGlobal. During an auto-advance the finished segment reports
+    // "not playing", but playback is meant to continue.
+    _resumeAfterScrub = wasPlaying || _isSwitchingSegment;
     _isScrubbing = true;
     _scrubPreviewPosition = _globalPosition();
     if (wasPlaying) {
@@ -865,6 +1075,34 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
     await _seekGlobal(target, shouldResume: shouldResume);
   }
 
+  /// Commits a seekbar release at [valueMs]. A release within
+  /// [_markerTapTolerancePx] of a marker snaps to that marker, so a tap on a
+  /// marker issues exactly one seek.
+  Future<void> _commitSeekbarValue(double valueMs, double sliderWidth) async {
+    final totalMs = _totalDuration.inMilliseconds;
+    final toleranceMs = sliderWidth > 0
+        ? _markerTapTolerancePx / sliderWidth * totalMs
+        : 0.0;
+    final marker = nearestMarker(
+      markers: _timelineMarkers(),
+      valueMs: valueMs.round(),
+      toleranceMs: toleranceMs,
+    );
+    final target = Duration(milliseconds: marker?.elapsedMs ?? valueMs.round());
+    await _commitScrub(target);
+    if (marker == null || !mounted) {
+      return;
+    }
+    final markerLabel = marker.type == PlaybackMarkerType.incident
+        ? 'incident'
+        : 'locked';
+    _showMessage(
+      'Jumped to $markerLabel marker at ${_formatDuration(target)}',
+      duration: const Duration(milliseconds: 1200),
+      replaceCurrent: true,
+    );
+  }
+
   void _toggleFullscreenPlayback() {
     if (!mounted) {
       return;
@@ -874,200 +1112,13 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
     });
   }
 
-  List<int> _buildLockMarkers({required int totalDurationMs}) {
-    if (totalDurationMs <= 0 || _segmentPaths.isEmpty) {
-      return const <int>[];
-    }
-
-    final lockedPathSet = widget.ride.lockedSegmentPaths.toSet();
-    if (lockedPathSet.isEmpty) {
-      return const <int>[];
-    }
-
-    final markers = <int>{};
-    for (final segmentPath in _segmentPaths) {
-      if (!lockedPathSet.contains(segmentPath)) {
-        continue;
-      }
-      final markerOffset = _segmentStartOffsetsByPath[segmentPath];
-      if (markerOffset == null) {
-        continue;
-      }
-
-      final marker = markerOffset.inMilliseconds;
-      markers.add(marker.clamp(0, totalDurationMs));
-    }
-
-    final ordered = markers.toList()..sort();
-    return List<int>.unmodifiable(ordered);
-  }
-
-  List<int> _buildIncidentMarkers({
-    required List<TelemetryData> samples,
-    required int totalDurationMs,
-  }) {
-    if (samples.isEmpty || totalDurationMs <= 0) {
-      return const <int>[];
-    }
-
-    const incidentThresholdG = 3.2;
-    const debounceMs = 5000;
-    var lastAcceptedMs = -debounceMs;
-    final markers = <int>[];
-
-    for (final sample in samples) {
-      if (sample.accelerationG < incidentThresholdG) {
-        continue;
-      }
-
-      if (sample.elapsedMs - lastAcceptedMs < debounceMs) {
-        continue;
-      }
-
-      final markerMs = sample.elapsedMs.clamp(0, totalDurationMs);
-      markers.add(markerMs);
-      lastAcceptedMs = markerMs;
-    }
-
-    return List<int>.unmodifiable(markers);
-  }
-
-  List<_PlaybackTimelineMarker> _timelineMarkers() {
-    final markers = <_PlaybackTimelineMarker>[];
-    for (final marker in _incidentMarkerMs) {
-      markers.add(
-        _PlaybackTimelineMarker(
-          elapsedMs: marker,
-          type: _PlaybackTimelineMarkerType.incident,
-        ),
-      );
-    }
-    for (final marker in _lockMarkerMs) {
-      markers.add(
-        _PlaybackTimelineMarker(
-          elapsedMs: marker,
-          type: _PlaybackTimelineMarkerType.locked,
-        ),
-      );
-    }
-    markers.sort((a, b) => a.elapsedMs.compareTo(b.elapsedMs));
-    return markers;
-  }
-
-  _PlaybackTimelineMarker? _nearestTimelineMarkerForTap({
-    required double dx,
-    required double width,
-    required int totalDurationMs,
-  }) {
-    if (totalDurationMs <= 0 || width <= 0) {
-      return null;
-    }
-
-    final markers = _timelineMarkers();
-    if (markers.isEmpty) {
-      return null;
-    }
-
-    const tapTolerancePx = 18.0;
-    final usableWidth = width - (_TimelineMarkersPainter.horizontalInset * 2);
-    if (usableWidth <= 0) {
-      return null;
-    }
-
-    _PlaybackTimelineMarker? nearest;
-    var nearestPx = double.infinity;
-    for (final marker in markers) {
-      final normalized = (marker.elapsedMs / totalDurationMs).clamp(0.0, 1.0);
-      final markerX =
-          _TimelineMarkersPainter.horizontalInset + (normalized * usableWidth);
-      final distance = (markerX - dx).abs();
-      if (distance < nearestPx) {
-        nearestPx = distance;
-        nearest = marker;
-      }
-    }
-
-    if (nearest == null || nearestPx > tapTolerancePx) {
-      return null;
-    }
-    return nearest;
-  }
-
-  Future<void> _jumpToTimelineMarker({
-    required _PlaybackTimelineMarker marker,
-    required bool wasPlaying,
-  }) async {
-    if (_isDisposing || _isSwitchingSegment || _isSeekingAcrossSegments) {
-      return;
-    }
-
-    final target = Duration(milliseconds: marker.elapsedMs);
-    await _seekGlobal(target, shouldResume: wasPlaying);
-    if (!mounted) {
-      return;
-    }
-
-    final markerLabel = marker.type == _PlaybackTimelineMarkerType.incident
-        ? 'incident'
-        : 'locked';
-    ScaffoldMessenger.of(context).hideCurrentSnackBar();
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          'Jumped to $markerLabel marker at ${_formatDuration(target)}',
-        ),
-        duration: const Duration(milliseconds: 1200),
-      ),
-    );
-  }
-
-  Duration _graphWindowMs(int totalMs) {
-    return Duration(milliseconds: math.max(10000, math.min(totalMs, 60000)));
-  }
-
-  Duration _graphTargetForOffset({
-    required double dx,
-    required double width,
-    required Duration currentPosition,
-  }) {
-    if (width <= 0 || _totalDuration == Duration.zero) {
-      return currentPosition;
-    }
-
-    final centerX = width / 2;
-    final windowMs =
-        _graphWindowMs(_totalDuration.inMilliseconds).inMilliseconds;
-    final deltaMs = ((dx - centerX) / width) * windowMs;
-    return _clampDuration(
-      currentPosition + Duration(milliseconds: deltaMs.round()),
-      _totalDuration,
-    );
-  }
-
-  _SegmentSeekTarget _locateSegmentForGlobalPosition(Duration position) {
-    for (var index = 0; index < _segmentDurations.length; index++) {
-      final start = _segmentOffsets[index];
-      final end = start + _segmentDurations[index];
-      if (position <= start) {
-        return _SegmentSeekTarget(
-          segmentIndex: index,
-          localPosition: Duration.zero,
-        );
-      }
-      if (position < end || index == _segmentDurations.length - 1) {
-        final localPosition = position - start;
-        return _SegmentSeekTarget(
-          segmentIndex: index,
-          localPosition:
-              localPosition > Duration.zero ? localPosition : Duration.zero,
-        );
-      }
-    }
-
-    return const _SegmentSeekTarget(
-      segmentIndex: 0,
-      localPosition: Duration.zero,
-    );
+  List<PlaybackMarker> _timelineMarkers() {
+    return <PlaybackMarker>[
+      for (final marker in _incidentMarkerMs)
+        PlaybackMarker(elapsedMs: marker, type: PlaybackMarkerType.incident),
+      for (final marker in _lockMarkerMs)
+        PlaybackMarker(elapsedMs: marker, type: PlaybackMarkerType.locked),
+    ]..sort((a, b) => a.elapsedMs.compareTo(b.elapsedMs));
   }
 
   Duration _clampDuration(Duration value, Duration max) {
@@ -1080,12 +1131,7 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
     return value;
   }
 
-  String _formatDuration(Duration value) {
-    final minutes = value.inMinutes.remainder(60).toString().padLeft(2, '0');
-    final seconds = value.inSeconds.remainder(60).toString().padLeft(2, '0');
-    final hours = value.inHours;
-    return '$hours:$minutes:$seconds';
-  }
+  String _formatDuration(Duration value) => formatElapsed(value);
 
   Widget _buildOverlay(TelemetryData sample) {
     return Positioned(
@@ -1104,8 +1150,10 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
             _stat('Speed', '${sample.speed.toStringAsFixed(1)} km/h'),
             _stat('Dist', '${sample.distanceKm.toStringAsFixed(2)} km'),
             _stat('G', sample.accelerationG.toStringAsFixed(2)),
-            _stat('GPS',
-                '${sample.latitude.toStringAsFixed(5)}, ${sample.longitude.toStringAsFixed(5)}'),
+            _stat(
+              'GPS',
+              '${sample.latitude.toStringAsFixed(5)}, ${sample.longitude.toStringAsFixed(5)}',
+            ),
           ],
         ),
       ),
@@ -1142,48 +1190,62 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
           height: 56,
           child: LayoutBuilder(
             builder: (context, constraints) {
-              return GestureDetector(
-                behavior: HitTestBehavior.opaque,
-                onTapDown: (details) {
-                  if (_isDisposing ||
-                      _isSwitchingSegment ||
-                      _isSeekingAcrossSegments) {
-                    return;
-                  }
-                  final target = _graphTargetForOffset(
-                    dx: details.localPosition.dx,
-                    width: constraints.maxWidth,
-                    currentPosition: position,
-                  );
-                  _seekGlobal(target, shouldResume: isPlaying);
-                },
-                onHorizontalDragStart: (_) {
-                  if (_isDisposing ||
-                      _isSwitchingSegment ||
-                      _isSeekingAcrossSegments) {
-                    return;
-                  }
-                  _beginScrub(isPlaying);
-                },
-                onHorizontalDragUpdate: (details) {
-                  final target = _graphTargetForOffset(
-                    dx: details.localPosition.dx,
-                    width: constraints.maxWidth,
-                    currentPosition: position,
-                  );
-                  _updateScrubPreview(target);
-                },
-                onHorizontalDragEnd: (_) {
-                  final target = _scrubPreviewPosition ?? position;
-                  _commitScrub(target);
-                },
-                child: CustomPaint(
-                  painter: _SpeedGraphPainter(
-                    samples: widget.ride.samples,
-                    currentPositionMs: position.inMilliseconds,
-                    totalDurationMs: graphDurationMs,
-                    incidentMarkerMs: _incidentMarkerMs,
-                    lockMarkerMs: _lockMarkerMs,
+              return Semantics(
+                label: 'Speed graph',
+                hint: 'Tap or drag horizontally to seek',
+                child: GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTapUp: (details) {
+                    if (_isDisposing) {
+                      return;
+                    }
+                    final target = speedGraphTapTarget(
+                      dx: details.localPosition.dx,
+                      width: constraints.maxWidth,
+                      currentPosition: position,
+                      totalDuration: _totalDuration,
+                    );
+                    unawaited(_seekGlobal(target, shouldResume: isPlaying));
+                  },
+                  onHorizontalDragStart: (details) {
+                    if (_isDisposing) {
+                      return;
+                    }
+                    _graphDragAnchor = position;
+                    _graphDragStartDx = details.localPosition.dx;
+                    unawaited(_beginScrub(isPlaying));
+                  },
+                  onHorizontalDragUpdate: (details) {
+                    final anchor = _graphDragAnchor;
+                    if (anchor == null) {
+                      return;
+                    }
+                    final target = speedGraphDragTarget(
+                      startDx: _graphDragStartDx,
+                      dx: details.localPosition.dx,
+                      width: constraints.maxWidth,
+                      anchorPosition: anchor,
+                      totalDuration: _totalDuration,
+                    );
+                    _updateScrubPreview(target);
+                  },
+                  onHorizontalDragEnd: (_) {
+                    if (_graphDragAnchor == null) {
+                      return;
+                    }
+                    _graphDragAnchor = null;
+                    final target = _scrubPreviewPosition ?? position;
+                    unawaited(_commitScrub(target));
+                  },
+                  child: CustomPaint(
+                    painter: _SpeedGraphPainter(
+                      samples: widget.ride.samples,
+                      maxSpeed: _maxSampleSpeed,
+                      currentPositionMs: position.inMilliseconds,
+                      totalDurationMs: graphDurationMs,
+                      incidentMarkerMs: _incidentMarkerMs,
+                      lockMarkerMs: _lockMarkerMs,
+                    ),
                   ),
                 ),
               );
@@ -1215,467 +1277,425 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
     );
   }
 
+  Widget _legendEntry(Color color, String label) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(
+          width: 8,
+          height: 8,
+          decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+        ),
+        const SizedBox(width: 4),
+        Text(
+          label,
+          style: const TextStyle(color: Colors.white70, fontSize: 11),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildPlaybackError(String message) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.videocam_off, size: 48, color: Colors.white54),
+            const SizedBox(height: 12),
+            Text(message, textAlign: TextAlign.center),
+            const SizedBox(height: 16),
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                OutlinedButton(
+                  onPressed: () => Navigator.of(context).maybePop(),
+                  child: const Text('Back'),
+                ),
+                const SizedBox(width: 12),
+                FilledButton(
+                  onPressed: _retryPlayback,
+                  child: const Text('Retry'),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final controller = _controller;
+    final playbackError = _playbackError;
 
-    return PopScope(
-      canPop: true,
-      onPopInvokedWithResult: (_, __) {
-        // Dispose handles teardown; avoid async playback work during route pop.
-      },
-      child: Scaffold(
-        appBar: _isFullscreenPlayback
-            ? null
-            : AppBar(title: const Text('Ride Playback')),
-        body: _isLoading || controller == null
-            ? const Center(child: CircularProgressIndicator())
-            : ValueListenableBuilder<VideoPlayerValue>(
-                valueListenable: controller,
-                builder: (context, value, _) {
-                  final position = _isScrubbing
-                      ? (_scrubPreviewPosition ?? _globalPosition())
-                      : _globalPosition();
-                  final duration = _totalDuration;
-                  final sample = widget.ride.sampleForPosition(position);
-                  final viewportHeight = MediaQuery.sizeOf(context).height;
-                  final mapHeight =
-                      (viewportHeight * 0.14).clamp(90.0, 130.0).toDouble();
-                  final showPlaybackChrome = !_isFullscreenPlayback;
+    return Scaffold(
+      appBar: _isFullscreenPlayback
+          ? null
+          : AppBar(title: const Text('Ride Playback')),
+      body: playbackError != null
+          ? _buildPlaybackError(playbackError)
+          : _isLoading || controller == null
+          ? const Center(child: CircularProgressIndicator())
+          : ValueListenableBuilder<VideoPlayerValue>(
+              valueListenable: controller,
+              builder: (context, value, _) {
+                final position = _isScrubbing
+                    ? (_scrubPreviewPosition ?? _globalPosition())
+                    : _globalPosition();
+                final duration = _totalDuration;
+                final sample = widget.ride.sampleForPosition(position);
+                final viewportHeight = MediaQuery.sizeOf(context).height;
+                final mapHeight = (viewportHeight * 0.14)
+                    .clamp(90.0, 130.0)
+                    .toDouble();
+                final showPlaybackChrome = !_isFullscreenPlayback;
 
-                  return Column(
-                    children: [
-                      Expanded(
-                        child: Stack(
-                          children: [
-                            Center(
-                              child: AspectRatio(
-                                aspectRatio: controller.value.aspectRatio,
-                                child: GestureDetector(
-                                  behavior: HitTestBehavior.opaque,
-                                  onTap: _toggleFullscreenPlayback,
-                                  child: VideoPlayer(controller),
-                                ),
+                return Column(
+                  children: [
+                    Expanded(
+                      child: Stack(
+                        children: [
+                          Center(
+                            child: AspectRatio(
+                              aspectRatio: controller.value.aspectRatio,
+                              child: GestureDetector(
+                                behavior: HitTestBehavior.opaque,
+                                onTap: _toggleFullscreenPlayback,
+                                child: VideoPlayer(controller),
                               ),
-                            ),
-                            if (showPlaybackChrome &&
-                                widget.ride.samples.isNotEmpty)
-                              _buildOverlay(sample),
-                            if (showPlaybackChrome &&
-                                widget.ride.samples.isNotEmpty)
-                              _buildSpeedGraph(
-                                position,
-                                duration,
-                                isPlaying: value.isPlaying,
-                              ),
-                            Positioned(
-                              top: 10,
-                              right: 10,
-                              child: Container(
-                                decoration: BoxDecoration(
-                                  color: Colors.black.withValues(alpha: 0.45),
-                                  borderRadius: BorderRadius.circular(20),
-                                ),
-                                child: IconButton(
-                                  onPressed: _toggleFullscreenPlayback,
-                                  icon: Icon(
-                                    _isFullscreenPlayback
-                                        ? Icons.fullscreen_exit
-                                        : Icons.fullscreen,
-                                    color: Colors.white,
-                                  ),
-                                  tooltip: _isFullscreenPlayback
-                                      ? 'Exit fullscreen'
-                                      : 'Fullscreen',
-                                ),
-                              ),
-                            ),
-                            if (_isFullscreenPlayback)
-                              Positioned(
-                                left: 0,
-                                right: 0,
-                                bottom: 14,
-                                child: Center(
-                                  child: Container(
-                                    padding: const EdgeInsets.symmetric(
-                                      horizontal: 10,
-                                      vertical: 4,
-                                    ),
-                                    decoration: BoxDecoration(
-                                      color:
-                                          Colors.black.withValues(alpha: 0.45),
-                                      borderRadius: BorderRadius.circular(12),
-                                    ),
-                                    child: const Text(
-                                      'Tap video to show controls',
-                                      style: TextStyle(
-                                        color: Colors.white70,
-                                        fontSize: 11,
-                                        fontWeight: FontWeight.w600,
-                                      ),
-                                    ),
-                                  ),
-                                ),
-                              ),
-                          ],
-                        ),
-                      ),
-                      if (showPlaybackChrome && widget.ride.samples.isNotEmpty)
-                        Container(
-                          margin: const EdgeInsets.fromLTRB(12, 6, 12, 0),
-                          padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
-                          decoration: BoxDecoration(
-                            color: Colors.white.withValues(alpha: 0.04),
-                            borderRadius: BorderRadius.circular(10),
-                            border: Border.all(
-                              color: Colors.white.withValues(alpha: 0.08),
                             ),
                           ),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              InkWell(
+                          if (showPlaybackChrome &&
+                              widget.ride.samples.isNotEmpty)
+                            _buildOverlay(sample),
+                          if (showPlaybackChrome &&
+                              widget.ride.samples.isNotEmpty)
+                            _buildSpeedGraph(
+                              position,
+                              duration,
+                              isPlaying: value.isPlaying,
+                            ),
+                          Positioned(
+                            top: 10,
+                            right: 10,
+                            child: Container(
+                              decoration: BoxDecoration(
+                                color: Colors.black.withValues(alpha: 0.45),
+                                borderRadius: BorderRadius.circular(20),
+                              ),
+                              child: IconButton(
+                                onPressed: _toggleFullscreenPlayback,
+                                icon: Icon(
+                                  _isFullscreenPlayback
+                                      ? Icons.fullscreen_exit
+                                      : Icons.fullscreen,
+                                  color: Colors.white,
+                                ),
+                                tooltip: _isFullscreenPlayback
+                                    ? 'Exit fullscreen'
+                                    : 'Fullscreen',
+                              ),
+                            ),
+                          ),
+                          if (_isFullscreenPlayback)
+                            Positioned(
+                              left: 0,
+                              right: 0,
+                              bottom: 14,
+                              child: Center(
+                                child: Container(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 10,
+                                    vertical: 4,
+                                  ),
+                                  decoration: BoxDecoration(
+                                    color: Colors.black.withValues(alpha: 0.45),
+                                    borderRadius: BorderRadius.circular(12),
+                                  ),
+                                  child: const Text(
+                                    'Tap video to show controls',
+                                    style: TextStyle(
+                                      color: Colors.white70,
+                                      fontSize: 11,
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                    if (showPlaybackChrome && widget.ride.samples.isNotEmpty)
+                      Container(
+                        margin: const EdgeInsets.fromLTRB(12, 6, 12, 0),
+                        padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
+                        decoration: BoxDecoration(
+                          color: Colors.white.withValues(alpha: 0.04),
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(
+                            color: Colors.white.withValues(alpha: 0.08),
+                          ),
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Semantics(
+                              button: true,
+                              expanded: _showRouteMap,
+                              label: 'Route map',
+                              onTap: _toggleRouteMapVisibility,
+                              excludeSemantics: true,
+                              child: InkWell(
                                 borderRadius: BorderRadius.circular(8),
                                 onTap: _toggleRouteMapVisibility,
-                                child: Row(
-                                  children: [
-                                    const Icon(
-                                      Icons.map_outlined,
-                                      size: 16,
-                                      color: Colors.white70,
-                                    ),
-                                    const SizedBox(width: 8),
-                                    const Text(
-                                      'Route Map',
-                                      style: TextStyle(
-                                        color: Colors.white,
-                                        fontSize: 12,
-                                        fontWeight: FontWeight.w700,
-                                      ),
-                                    ),
-                                    const Spacer(),
-                                    Icon(
-                                      _showRouteMap
-                                          ? Icons.expand_less
-                                          : Icons.expand_more,
-                                      color: Colors.white70,
-                                      size: 18,
-                                    ),
-                                  ],
-                                ),
-                              ),
-                              AnimatedCrossFade(
-                                duration: const Duration(milliseconds: 180),
-                                firstCurve: Curves.easeOut,
-                                secondCurve: Curves.easeIn,
-                                crossFadeState: _showRouteMap
-                                    ? CrossFadeState.showFirst
-                                    : CrossFadeState.showSecond,
-                                firstChild: Padding(
-                                  padding: const EdgeInsets.only(top: 8),
-                                  child: RouteMapView(
-                                    telemetryData: widget.ride.samples,
-                                    height: mapHeight,
-                                    currentSample: sample,
+                                child: ConstrainedBox(
+                                  constraints: const BoxConstraints(
+                                    minHeight: 48,
                                   ),
-                                ),
-                                secondChild: const SizedBox.shrink(),
-                              ),
-                            ],
-                          ),
-                        ),
-                      if (showPlaybackChrome)
-                        Padding(
-                          padding: const EdgeInsets.fromLTRB(12, 6, 12, 8),
-                          child: Column(
-                            children: [
-                              SizedBox(
-                                height: 34,
-                                child: Stack(
-                                  children: [
-                                    SliderTheme(
-                                      data: SliderTheme.of(context).copyWith(
-                                        trackShape:
-                                            _MissingRangeSliderTrackShape(
-                                          missingSegmentRanges:
-                                              _missingSegmentRanges,
-                                          totalDurationMs:
-                                              duration.inMilliseconds,
-                                        ),
-                                      ),
-                                      child: Slider(
-                                        min: 0,
-                                        max: duration.inMilliseconds > 0
-                                            ? duration.inMilliseconds.toDouble()
-                                            : 1,
-                                        value: position.inMilliseconds
-                                            .clamp(
-                                                0,
-                                                duration.inMilliseconds > 0
-                                                    ? duration.inMilliseconds
-                                                    : 1)
-                                            .toDouble(),
-                                        onChangeStart: duration
-                                                    .inMilliseconds <=
-                                                0
-                                            ? null
-                                            : (_) {
-                                                if (_isDisposing ||
-                                                    _isSwitchingSegment ||
-                                                    _isSeekingAcrossSegments) {
-                                                  return;
-                                                }
-                                                _beginScrub(value.isPlaying);
-                                              },
-                                        onChanged: duration.inMilliseconds <= 0
-                                            ? null
-                                            : (newValue) {
-                                                _updateScrubPreview(
-                                                  Duration(
-                                                      milliseconds:
-                                                          newValue.round()),
-                                                );
-                                              },
-                                        onChangeEnd:
-                                            duration.inMilliseconds <= 0
-                                                ? null
-                                                : (newValue) {
-                                                    _commitScrub(
-                                                      Duration(
-                                                          milliseconds:
-                                                              newValue.round()),
-                                                    );
-                                                  },
-                                      ),
-                                    ),
-                                    Positioned.fill(
-                                      child: LayoutBuilder(
-                                        builder: (context, markerConstraints) {
-                                          return Stack(
-                                            children: [
-                                              IgnorePointer(
-                                                child: CustomPaint(
-                                                  painter:
-                                                      _TimelineMarkersPainter(
-                                                    totalDurationMs:
-                                                        duration.inMilliseconds,
-                                                    incidentMarkerMs:
-                                                        _incidentMarkerMs,
-                                                    lockMarkerMs: _lockMarkerMs,
-                                                  ),
-                                                ),
-                                              ),
-                                              Listener(
-                                                behavior:
-                                                    HitTestBehavior.translucent,
-                                                onPointerDown: (event) {
-                                                  _timelineTapStartLocal =
-                                                      event.localPosition;
-                                                  _timelineTapMoved = false;
-                                                },
-                                                onPointerMove: (event) {
-                                                  final start =
-                                                      _timelineTapStartLocal;
-                                                  if (start == null) {
-                                                    return;
-                                                  }
-                                                  if ((event.localPosition -
-                                                              start)
-                                                          .distance >
-                                                      10) {
-                                                    _timelineTapMoved = true;
-                                                  }
-                                                },
-                                                onPointerCancel: (_) {
-                                                  _timelineTapStartLocal = null;
-                                                  _timelineTapMoved = false;
-                                                },
-                                                onPointerUp: (event) {
-                                                  final moved =
-                                                      _timelineTapMoved;
-                                                  _timelineTapStartLocal = null;
-                                                  _timelineTapMoved = false;
-                                                  if (moved) {
-                                                    return;
-                                                  }
-                                                  final marker =
-                                                      _nearestTimelineMarkerForTap(
-                                                    dx: event.localPosition.dx,
-                                                    width: markerConstraints
-                                                        .maxWidth,
-                                                    totalDurationMs:
-                                                        duration.inMilliseconds,
-                                                  );
-                                                  if (marker == null) {
-                                                    return;
-                                                  }
-                                                  unawaited(
-                                                    _jumpToTimelineMarker(
-                                                      marker: marker,
-                                                      wasPlaying:
-                                                          value.isPlaying,
-                                                    ),
-                                                  );
-                                                },
-                                              ),
-                                            ],
-                                          );
-                                        },
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                              Row(
-                                mainAxisAlignment:
-                                    MainAxisAlignment.spaceBetween,
-                                children: [
-                                  Text(_formatDuration(position)),
-                                  Text(_formatDuration(duration)),
-                                ],
-                              ),
-                              if (_incidentMarkerMs.isNotEmpty ||
-                                  _lockMarkerMs.isNotEmpty ||
-                                  _missingSegmentRanges.isNotEmpty)
-                                Padding(
-                                  padding: const EdgeInsets.only(top: 4),
                                   child: Row(
-                                    mainAxisAlignment: MainAxisAlignment.end,
                                     children: [
-                                      if (_missingSegmentRanges.isNotEmpty) ...[
-                                        Container(
-                                          width: 8,
-                                          height: 8,
-                                          decoration: const BoxDecoration(
-                                            color: Colors.red,
-                                            shape: BoxShape.circle,
-                                          ),
+                                      const Icon(
+                                        Icons.map_outlined,
+                                        size: 16,
+                                        color: Colors.white70,
+                                      ),
+                                      const SizedBox(width: 8),
+                                      const Text(
+                                        'Route Map',
+                                        style: TextStyle(
+                                          color: Colors.white,
+                                          fontSize: 12,
+                                          fontWeight: FontWeight.w700,
                                         ),
-                                        const SizedBox(width: 4),
-                                        const Text(
-                                          'Missing segment',
-                                          style: TextStyle(
-                                            color: Colors.white70,
-                                            fontSize: 11,
-                                          ),
-                                        ),
-                                      ],
-                                      if (_missingSegmentRanges.isNotEmpty &&
-                                          (_incidentMarkerMs.isNotEmpty ||
-                                              _lockMarkerMs.isNotEmpty))
-                                        const SizedBox(width: 12),
-                                      if (_incidentMarkerMs.isNotEmpty) ...[
-                                        Container(
-                                          width: 8,
-                                          height: 8,
-                                          decoration: const BoxDecoration(
-                                            color: Colors.redAccent,
-                                            shape: BoxShape.circle,
-                                          ),
-                                        ),
-                                        const SizedBox(width: 4),
-                                        const Text(
-                                          'Incident',
-                                          style: TextStyle(
-                                            color: Colors.white70,
-                                            fontSize: 11,
-                                          ),
-                                        ),
-                                      ],
-                                      if (_incidentMarkerMs.isNotEmpty &&
-                                          _lockMarkerMs.isNotEmpty)
-                                        const SizedBox(width: 12),
-                                      if (_lockMarkerMs.isNotEmpty) ...[
-                                        Container(
-                                          width: 8,
-                                          height: 8,
-                                          decoration: const BoxDecoration(
-                                            color: Colors.orangeAccent,
-                                            shape: BoxShape.circle,
-                                          ),
-                                        ),
-                                        const SizedBox(width: 4),
-                                        const Text(
-                                          'Locked',
-                                          style: TextStyle(
-                                            color: Colors.white70,
-                                            fontSize: 11,
-                                          ),
-                                        ),
-                                      ],
+                                      ),
+                                      const Spacer(),
+                                      Icon(
+                                        _showRouteMap
+                                            ? Icons.expand_less
+                                            : Icons.expand_more,
+                                        color: Colors.white70,
+                                        size: 18,
+                                      ),
                                     ],
                                   ),
                                 ),
-                              const SizedBox(height: 8),
-                              Row(
-                                mainAxisAlignment: MainAxisAlignment.center,
-                                children: [
-                                  IconButton(
-                                    onPressed: () async {
-                                      final target = position -
-                                          const Duration(seconds: 10);
-                                      await _seekGlobal(
-                                        target,
-                                        shouldResume: value.isPlaying,
-                                      );
-                                    },
-                                    icon: const Icon(Icons.replay_10),
-                                  ),
-                                  IconButton(
-                                    onPressed: () {
-                                      if (controller.value.isPlaying) {
-                                        controller.pause();
-                                      } else {
-                                        controller.play();
-                                      }
-                                    },
-                                    icon: Icon(
-                                      controller.value.isPlaying
-                                          ? Icons.pause_circle
-                                          : Icons.play_circle,
-                                      size: 36,
-                                    ),
-                                  ),
-                                  IconButton(
-                                    onPressed: () async {
-                                      final target = position +
-                                          const Duration(seconds: 10);
-                                      await _seekGlobal(
-                                        target,
-                                        shouldResume: value.isPlaying,
-                                      );
-                                    },
-                                    icon: const Icon(Icons.forward_10),
-                                  ),
-                                ],
                               ),
-                              const SizedBox(height: 4),
-                              Text(
-                                'Segment ${_activeSegmentIndex + 1}/${_segmentPaths.length}',
-                                style: const TextStyle(
-                                    color: Colors.white70, fontSize: 12),
-                              ),
-                            ],
-                          ),
+                            ),
+                            // The map is only built while expanded: a
+                            // built map fetches tiles from the network.
+                            AnimatedSize(
+                              duration: const Duration(milliseconds: 180),
+                              curve: Curves.easeOut,
+                              alignment: Alignment.topCenter,
+                              child: _showRouteMap
+                                  ? Padding(
+                                      padding: const EdgeInsets.only(top: 8),
+                                      child: RouteMapView(
+                                        telemetryData: widget.ride.samples,
+                                        height: mapHeight,
+                                        currentSample: sample,
+                                      ),
+                                    )
+                                  : const SizedBox(width: double.infinity),
+                            ),
+                          ],
                         ),
-                    ],
-                  );
-                },
-              ),
-      ),
+                      ),
+                    if (showPlaybackChrome)
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(12, 6, 12, 8),
+                        child: Column(
+                          children: [
+                            SizedBox(
+                              height: 34,
+                              child: LayoutBuilder(
+                                builder: (context, sliderConstraints) {
+                                  return SliderTheme(
+                                    data: SliderTheme.of(context).copyWith(
+                                      trackShape: PlaybackSeekbarTrackShape(
+                                        totalDurationMs:
+                                            duration.inMilliseconds,
+                                        missingRanges: _missingSegmentRanges,
+                                        failedCheckRanges: _failedCheckRanges,
+                                        noVideoRanges: _noVideoRanges,
+                                        incidentMarkerMs: _incidentMarkerMs,
+                                        lockMarkerMs: _lockMarkerMs,
+                                      ),
+                                    ),
+                                    child: Slider(
+                                      min: 0,
+                                      max: duration.inMilliseconds > 0
+                                          ? duration.inMilliseconds.toDouble()
+                                          : 1,
+                                      value: position.inMilliseconds
+                                          .clamp(
+                                            0,
+                                            duration.inMilliseconds > 0
+                                                ? duration.inMilliseconds
+                                                : 1,
+                                          )
+                                          .toDouble(),
+                                      onChangeStart:
+                                          duration.inMilliseconds <= 0
+                                          ? null
+                                          : (_) {
+                                              if (_isDisposing) {
+                                                return;
+                                              }
+                                              unawaited(
+                                                _beginScrub(value.isPlaying),
+                                              );
+                                            },
+                                      onChanged: duration.inMilliseconds <= 0
+                                          ? null
+                                          : (newValue) {
+                                              _updateScrubPreview(
+                                                Duration(
+                                                  milliseconds: newValue
+                                                      .round(),
+                                                ),
+                                              );
+                                            },
+                                      onChangeEnd: duration.inMilliseconds <= 0
+                                          ? null
+                                          : (newValue) {
+                                              unawaited(
+                                                _commitSeekbarValue(
+                                                  newValue,
+                                                  sliderConstraints.maxWidth,
+                                                ),
+                                              );
+                                            },
+                                    ),
+                                  );
+                                },
+                              ),
+                            ),
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              children: [
+                                Text(_formatDuration(position)),
+                                Text(_formatDuration(duration)),
+                              ],
+                            ),
+                            if (_incidentMarkerMs.isNotEmpty ||
+                                _lockMarkerMs.isNotEmpty ||
+                                _missingSegmentRanges.isNotEmpty ||
+                                _failedCheckRanges.isNotEmpty ||
+                                _noVideoRanges.isNotEmpty)
+                              Padding(
+                                padding: const EdgeInsets.only(top: 4),
+                                child: Align(
+                                  alignment: Alignment.centerRight,
+                                  child: Wrap(
+                                    alignment: WrapAlignment.end,
+                                    spacing: 12,
+                                    runSpacing: 4,
+                                    children: [
+                                      if (_noVideoRanges.isNotEmpty)
+                                        _legendEntry(noVideoColor, 'No video'),
+                                      if (_missingSegmentRanges.isNotEmpty)
+                                        _legendEntry(
+                                          missingFootageColor,
+                                          'Missing segment',
+                                        ),
+                                      if (_failedCheckRanges.isNotEmpty)
+                                        _legendEntry(
+                                          failedCheckColor,
+                                          'Failed integrity check',
+                                        ),
+                                      if (_incidentMarkerMs.isNotEmpty)
+                                        _legendEntry(
+                                          incidentMarkerColor,
+                                          'Incident',
+                                        ),
+                                      if (_lockMarkerMs.isNotEmpty)
+                                        _legendEntry(lockMarkerColor, 'Locked'),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            const SizedBox(height: 8),
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                IconButton(
+                                  tooltip: 'Back 10 seconds',
+                                  onPressed: () async {
+                                    final target =
+                                        position - const Duration(seconds: 10);
+                                    await _seekGlobal(
+                                      target,
+                                      shouldResume: value.isPlaying,
+                                    );
+                                  },
+                                  icon: const Icon(Icons.replay_10),
+                                ),
+                                IconButton(
+                                  tooltip: controller.value.isPlaying
+                                      ? 'Pause'
+                                      : 'Play',
+                                  onPressed: () {
+                                    if (controller.value.isPlaying) {
+                                      unawaited(controller.pause());
+                                    } else {
+                                      unawaited(controller.play());
+                                    }
+                                  },
+                                  icon: Icon(
+                                    controller.value.isPlaying
+                                        ? Icons.pause_circle
+                                        : Icons.play_circle,
+                                    size: 36,
+                                  ),
+                                ),
+                                IconButton(
+                                  tooltip: 'Forward 10 seconds',
+                                  onPressed: () async {
+                                    final target =
+                                        position + const Duration(seconds: 10);
+                                    await _seekGlobal(
+                                      target,
+                                      shouldResume: value.isPlaying,
+                                    );
+                                  },
+                                  icon: const Icon(Icons.forward_10),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              'Segment ${_activeSegmentIndex + 1}/${_segmentPaths.length}',
+                              style: const TextStyle(
+                                color: Colors.white70,
+                                fontSize: 12,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                  ],
+                );
+              },
+            ),
     );
   }
 
   @override
   void dispose() {
     _isDisposing = true;
+    _loadGeneration++;
+    _pendingSeek = null;
     WidgetsBinding.instance.removeObserver(this);
     final controller = _controller;
     _controller = null;
     if (controller != null) {
       controller.removeListener(_onControllerTick);
-      controller.pause();
-      _stopAndDisposeController(controller);
+      unawaited(_stopAndDisposeController(controller));
     }
     super.dispose();
   }
@@ -1684,6 +1704,7 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
 class _SpeedGraphPainter extends CustomPainter {
   const _SpeedGraphPainter({
     required this.samples,
+    required this.maxSpeed,
     required this.currentPositionMs,
     required this.totalDurationMs,
     required this.incidentMarkerMs,
@@ -1691,6 +1712,7 @@ class _SpeedGraphPainter extends CustomPainter {
   });
 
   final List<TelemetryData> samples;
+  final double maxSpeed;
   final int currentPositionMs;
   final int totalDurationMs;
   final List<int> incidentMarkerMs;
@@ -1702,17 +1724,10 @@ class _SpeedGraphPainter extends CustomPainter {
       return;
     }
 
-    var maxSpeed = 1.0;
-    for (final sample in samples) {
-      if (sample.speed > maxSpeed) {
-        maxSpeed = sample.speed;
-      }
-    }
-
     final path = Path();
     final points = <Offset>[];
     final centerX = size.width / 2;
-    final windowMs = math.max(10000, math.min(totalDurationMs, 60000));
+    final windowMs = speedGraphWindowMs(totalDurationMs);
     final halfWindowMs = windowMs / 2;
     var started = false;
 
@@ -1740,11 +1755,21 @@ class _SpeedGraphPainter extends CustomPainter {
       }
     }
 
-    drawEventMarkers(lockMarkerMs, Colors.orangeAccent);
-    drawEventMarkers(incidentMarkerMs, Colors.redAccent);
+    drawEventMarkers(lockMarkerMs, lockMarkerColor);
+    drawEventMarkers(incidentMarkerMs, incidentMarkerColor);
 
-    for (var i = 0; i < samples.length; i++) {
+    // Only walk the samples inside the visible window (plus a small margin).
+    final marginMs = (windowMs * 2 / math.max(size.width, 1)).ceil() + 1;
+    final firstIndex = firstSampleIndexAtOrAfter(
+      samples,
+      currentPositionMs - halfWindowMs.ceil() - marginMs,
+    );
+    final lastVisibleMs = currentPositionMs + halfWindowMs.ceil() + marginMs;
+    for (var i = firstIndex; i < samples.length; i++) {
       final sample = samples[i];
+      if (sample.elapsedMs > lastVisibleMs) {
+        break;
+      }
       final relativeMs = sample.elapsedMs - currentPositionMs;
       final x = centerX + (relativeMs / windowMs) * size.width;
       if (x < -2 || x > size.width + 2) {
@@ -1802,233 +1827,15 @@ class _SpeedGraphPainter extends CustomPainter {
   bool shouldRepaint(covariant _SpeedGraphPainter oldDelegate) {
     return oldDelegate.currentPositionMs != currentPositionMs ||
         oldDelegate.totalDurationMs != totalDurationMs ||
-        oldDelegate.samples.length != samples.length ||
-        oldDelegate.lockMarkerMs.length != lockMarkerMs.length ||
-        oldDelegate.incidentMarkerMs.length != incidentMarkerMs.length;
+        oldDelegate.maxSpeed != maxSpeed ||
+        !identical(oldDelegate.samples, samples) ||
+        !identical(oldDelegate.lockMarkerMs, lockMarkerMs) ||
+        !identical(oldDelegate.incidentMarkerMs, incidentMarkerMs);
   }
-}
-
-class _TimelineMarkersPainter extends CustomPainter {
-  static const double horizontalInset = 14.0;
-
-  const _TimelineMarkersPainter({
-    required this.totalDurationMs,
-    required this.incidentMarkerMs,
-    required this.lockMarkerMs,
-  });
-
-  final int totalDurationMs;
-  final List<int> incidentMarkerMs;
-  final List<int> lockMarkerMs;
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    if (totalDurationMs <= 0) {
-      return;
-    }
-
-    final usableWidth = size.width - (horizontalInset * 2);
-    if (usableWidth <= 0) {
-      return;
-    }
-
-    void drawMarkers({
-      required List<int> markers,
-      required Color color,
-      required double top,
-      required double bottom,
-      required double stroke,
-    }) {
-      if (markers.isEmpty) {
-        return;
-      }
-
-      final paint = Paint()
-        ..color = color.withValues(alpha: 0.9)
-        ..strokeWidth = stroke
-        ..strokeCap = StrokeCap.round;
-
-      for (final markerMs in markers) {
-        final normalized = (markerMs / totalDurationMs).clamp(0.0, 1.0);
-        final x = horizontalInset + (normalized * usableWidth);
-        canvas.drawLine(Offset(x, top), Offset(x, bottom), paint);
-      }
-    }
-
-    drawMarkers(
-      markers: lockMarkerMs,
-      color: Colors.orangeAccent,
-      top: 7,
-      bottom: size.height - 6,
-      stroke: 2,
-    );
-    drawMarkers(
-      markers: incidentMarkerMs,
-      color: Colors.redAccent,
-      top: 4,
-      bottom: size.height - 9,
-      stroke: 2,
-    );
-  }
-
-  @override
-  bool shouldRepaint(covariant _TimelineMarkersPainter oldDelegate) {
-    if (oldDelegate.totalDurationMs != totalDurationMs ||
-        oldDelegate.incidentMarkerMs.length != incidentMarkerMs.length ||
-        oldDelegate.lockMarkerMs.length != lockMarkerMs.length) {
-      return true;
-    }
-
-    return false;
-  }
-}
-
-class _MissingRangeSliderTrackShape extends SliderTrackShape
-    with BaseSliderTrackShape {
-  const _MissingRangeSliderTrackShape({
-    required this.missingSegmentRanges,
-    required this.totalDurationMs,
-  });
-
-  final List<_MissingSegmentRange> missingSegmentRanges;
-  final int totalDurationMs;
-
-  @override
-  void paint(
-    PaintingContext context,
-    Offset offset, {
-    required RenderBox parentBox,
-    required SliderThemeData sliderTheme,
-    required Animation<double> enableAnimation,
-    required Offset thumbCenter,
-    required TextDirection textDirection,
-    bool isDiscrete = false,
-    bool isEnabled = false,
-    Offset? secondaryOffset,
-  }) {
-    final trackHeight = sliderTheme.trackHeight;
-    if (trackHeight == null || trackHeight <= 0) {
-      return;
-    }
-
-    final trackRect = getPreferredRect(
-      parentBox: parentBox,
-      offset: offset,
-      sliderTheme: sliderTheme,
-      isEnabled: isEnabled,
-      isDiscrete: isDiscrete,
-    );
-    if (trackRect.width <= 0 || trackRect.height <= 0) {
-      return;
-    }
-
-    final activeColor = isEnabled
-        ? (sliderTheme.activeTrackColor ?? Colors.blueAccent)
-        : (sliderTheme.disabledActiveTrackColor ??
-            sliderTheme.activeTrackColor ??
-            Colors.blueGrey);
-    final inactiveColor = isEnabled
-        ? (sliderTheme.inactiveTrackColor ?? Colors.white24)
-        : (sliderTheme.disabledInactiveTrackColor ??
-            sliderTheme.inactiveTrackColor ??
-            Colors.white24);
-
-    final canvas = context.canvas;
-    final trackRRect = RRect.fromRectAndRadius(
-      trackRect,
-      Radius.circular(trackRect.height / 2),
-    );
-
-    canvas.drawRRect(trackRRect, Paint()..color = inactiveColor);
-
-    final clampedThumbX = thumbCenter.dx.clamp(trackRect.left, trackRect.right);
-    final activeRect = textDirection == TextDirection.ltr
-        ? Rect.fromLTRB(
-            trackRect.left,
-            trackRect.top,
-            clampedThumbX,
-            trackRect.bottom,
-          )
-        : Rect.fromLTRB(
-            clampedThumbX,
-            trackRect.top,
-            trackRect.right,
-            trackRect.bottom,
-          );
-
-    if (activeRect.width > 0) {
-      canvas.save();
-      canvas.clipRRect(trackRRect);
-      canvas.drawRect(activeRect, Paint()..color = activeColor);
-      canvas.restore();
-    }
-
-    if (totalDurationMs <= 0 || missingSegmentRanges.isEmpty) {
-      return;
-    }
-
-    final missingPaint = Paint()..color = Colors.red.withValues(alpha: 0.86);
-    canvas.save();
-    canvas.clipRRect(trackRRect);
-    for (final range in missingSegmentRanges) {
-      if (range.endMs <= range.startMs) {
-        continue;
-      }
-
-      final startNormalized = (range.startMs / totalDurationMs).clamp(0.0, 1.0);
-      final endNormalized = (range.endMs / totalDurationMs).clamp(0.0, 1.0);
-      final left = trackRect.left + (trackRect.width * startNormalized);
-      final right = trackRect.left + (trackRect.width * endNormalized);
-      if (right - left <= 0) {
-        continue;
-      }
-
-      canvas.drawRect(
-        Rect.fromLTRB(left, trackRect.top, right, trackRect.bottom),
-        missingPaint,
-      );
-    }
-    canvas.restore();
-  }
-}
-
-class _MissingSegmentRange {
-  const _MissingSegmentRange({
-    required this.startMs,
-    required this.endMs,
-  });
-
-  final int startMs;
-  final int endMs;
-}
-
-enum _PlaybackTimelineMarkerType { incident, locked }
-
-class _PlaybackTimelineMarker {
-  const _PlaybackTimelineMarker({
-    required this.elapsedMs,
-    required this.type,
-  });
-
-  final int elapsedMs;
-  final _PlaybackTimelineMarkerType type;
-}
-
-class _SegmentSeekTarget {
-  const _SegmentSeekTarget({
-    required this.segmentIndex,
-    required this.localPosition,
-  });
-
-  final int segmentIndex;
-  final Duration localPosition;
 }
 
 class _SegmentProbeResult {
-  const _SegmentProbeResult({
-    required this.duration,
-    this.error,
-  });
+  const _SegmentProbeResult({required this.duration, this.error});
 
   final Duration duration;
   final String? error;
