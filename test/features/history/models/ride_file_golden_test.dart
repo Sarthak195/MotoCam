@@ -89,6 +89,120 @@ void main() {
     return telemetryFile;
   }
 
+  /// Like [materialize], but rewrites every bare segment file name in the
+  /// copy (`videoPath`, `segmentPaths`, `lockedSegmentPaths`, timeline paths
+  /// and `segmentHashes` keys) to its absolute path next to the copy, as the
+  /// app writes them, and recomputes the envelope's `payloadHash`.
+  Future<File> materializeAbsolute(String name) async {
+    final telemetryFile = await materialize(name);
+    final directory = telemetryFile.parent.path;
+    String absolute(Object? value) {
+      final path = value.toString();
+      return path.isEmpty || path.contains('/') || path.contains(r'\')
+          ? path
+          : '$directory${Platform.pathSeparator}$path';
+    }
+
+    final json = readFixture(name);
+    json['videoPath'] = absolute(json['videoPath']);
+    for (final key in <String>['segmentPaths', 'lockedSegmentPaths']) {
+      json[key] = <String>[
+        for (final path in json[key] as List) absolute(path),
+      ];
+    }
+    json['segmentTimeline'] = <Map<String, dynamic>>[
+      for (final entry in json['segmentTimeline'] as List)
+        <String, dynamic>{
+          ...entry as Map<String, dynamic>,
+          'path': absolute(entry['path']),
+        },
+    ];
+    final integrity = json['integrity'] as Map<String, dynamic>;
+    integrity['segmentHashes'] = <String, dynamic>{
+      for (final entry in (integrity['segmentHashes'] as Map).entries)
+        absolute(entry.key): entry.value,
+    };
+    integrity['payloadHash'] = computeRidePayloadHash(json);
+    expect(json['segmentPaths'], everyElement(startsWith(directory)));
+    expect(
+      (integrity['segmentHashes'] as Map).keys,
+      everyElement(startsWith(directory)),
+    );
+    await telemetryFile.writeAsString(jsonEncode(json), flush: true);
+    return telemetryFile;
+  }
+
+  /// Reads [telemetryFile] (a copy of fixture [name]) lazily, with segment
+  /// hashing and on demand, and describes the results relative to its
+  /// directory.
+  Future<Map<String, Object?>> describeRead(
+    String name,
+    File telemetryFile,
+  ) async {
+    final directory = telemetryFile.parent.path;
+    final startedAt = readFixture(name)['startedAt'] as String;
+    final lazy = await RideRecord.fromTelemetryFile(telemetryFile);
+    final deep = await RideRecord.fromTelemetryFile(
+      telemetryFile,
+      verifySegments: true,
+    );
+    final actual = <String, Object?>{
+      'ride': _describeRide(lazy, directory, startedAt),
+      'deepIntegrity': deep == null
+          ? null
+          : _describeReport(deep.integrity, directory),
+      'onDemandIntegrity': lazy == null
+          ? null
+          : _describeReport(
+              (await lazy.verifySegmentIntegrity()).integrity,
+              directory,
+            ),
+    };
+    // Hashing the segments changes only the integrity report.
+    expect(
+      _describeRide(deep, directory, startedAt)?..remove('integrity'),
+      _describeRide(lazy, directory, startedAt)?..remove('integrity'),
+    );
+    return actual;
+  }
+
+  /// Applies the lock state [locked] to the ride in [telemetryFile] and
+  /// describes the rewritten file and its re-read.
+  Future<Map<String, Object?>> describeLockRewrite(
+    File telemetryFile,
+    bool locked,
+  ) async {
+    final directory = telemetryFile.parent.path;
+    final ride = await RideRecord.fromTelemetryFile(telemetryFile);
+    final saved = await ride!.setLockState(locked);
+    final rewritten =
+        jsonDecode(await telemetryFile.readAsString()) as Map<String, dynamic>;
+    final integrity = rewritten['integrity'];
+    final reloaded = await RideRecord.fromTelemetryFile(
+      telemetryFile,
+      verifySegments: true,
+    );
+    return <String, Object?>{
+      'saved': saved,
+      'keys': rewritten.keys.toList(),
+      'lockedSegmentPaths': rewritten['lockedSegmentPaths'],
+      'envelope': integrity is Map
+          ? <String, Object?>{
+              'keys': integrity.keys.toList(),
+              'envelopeVersion': integrity['envelopeVersion'],
+              'payloadHash': integrity['payloadHash'],
+              'generatedAt': integrity['generatedAt'],
+              'segmentCount': integrity['segmentCount'],
+            }
+          : integrity,
+      'fileSha256': sha256
+          .convert(utf8.encode(jsonEncode(rewritten)))
+          .toString(),
+      'reloaded': _describeReport(reloaded!.integrity, directory),
+      'reloadedLocked': _relative(reloaded.lockedSegmentPaths, directory),
+    };
+  }
+
   group('ride file golden values', () {
     test('payload hashes of every fixture are unchanged', () {
       final actual = <String, String>{
@@ -101,72 +215,60 @@ void main() {
     for (final name in _segmentsOnDisk.keys) {
       test('$name reads exactly as recorded', () async {
         final telemetryFile = await materialize(name);
-        final directory = telemetryFile.parent.path;
-        final startedAt = readFixture(name)['startedAt'] as String;
-        final lazy = await RideRecord.fromTelemetryFile(telemetryFile);
-        final deep = await RideRecord.fromTelemetryFile(
-          telemetryFile,
-          verifySegments: true,
-        );
-        final actual = <String, Object?>{
-          'ride': _describeRide(lazy, directory, startedAt),
-          'deepIntegrity': deep == null
-              ? null
-              : _describeReport(deep.integrity, directory),
-          'onDemandIntegrity': lazy == null
-              ? null
-              : _describeReport(
-                  (await lazy.verifySegmentIntegrity()).integrity,
-                  directory,
-                ),
-        };
-        // Hashing the segments changes only the integrity report.
-        expect(
-          _describeRide(deep, directory, startedAt)?..remove('integrity'),
-          _describeRide(lazy, directory, startedAt)?..remove('integrity'),
-        );
-        expect(actual, _expectedReads[name]);
+        expect(await describeRead(name, telemetryFile), _expectedReads[name]);
       });
     }
 
     for (final entry in _lockCases.entries) {
       test('${entry.key} lock-state rewrite is unchanged', () async {
         final telemetryFile = await materialize(entry.key);
-        final directory = telemetryFile.parent.path;
-        final ride = await RideRecord.fromTelemetryFile(telemetryFile);
-        final saved = await ride!.setLockState(entry.value);
-        final rewritten =
-            jsonDecode(await telemetryFile.readAsString())
-                as Map<String, dynamic>;
-        final integrity = rewritten['integrity'];
-        final reloaded = await RideRecord.fromTelemetryFile(
-          telemetryFile,
-          verifySegments: true,
+        expect(
+          await describeLockRewrite(telemetryFile, entry.value),
+          _expectedLockRewrites[entry.key],
         );
-        final actual = <String, Object?>{
-          'saved': saved,
-          'keys': rewritten.keys.toList(),
-          'lockedSegmentPaths': rewritten['lockedSegmentPaths'],
-          'envelope': integrity is Map
-              ? <String, Object?>{
-                  'keys': integrity.keys.toList(),
-                  'envelopeVersion': integrity['envelopeVersion'],
-                  'payloadHash': integrity['payloadHash'],
-                  'generatedAt': integrity['generatedAt'],
-                  'segmentCount': integrity['segmentCount'],
-                }
-              : integrity,
-          'fileSha256': sha256
-              .convert(utf8.encode(jsonEncode(rewritten)))
-              .toString(),
-          'reloaded': _describeReport(reloaded!.integrity, directory),
-          'reloadedLocked': _relative(reloaded.lockedSegmentPaths, directory),
-        };
-        expect(actual, _expectedLockRewrites[entry.key]);
+      });
+    }
+
+    // App-written rides store absolute segment paths that exist on disk,
+    // with `segmentHashes` keyed by them. The rewritten payload hash depends
+    // on where the test runs, so only location-independent results are
+    // compared, against the values recorded for the bare-name fixture.
+    for (final name in _absolutePathCases) {
+      test('$name with existing absolute paths reads as recorded', () async {
+        final telemetryFile = await materializeAbsolute(name);
+        expect(await describeRead(name, telemetryFile), _expectedReads[name]);
+      });
+
+      test('$name with existing absolute paths rewrites locks as '
+          'recorded', () async {
+        final telemetryFile = await materializeAbsolute(name);
+        final actual = await describeLockRewrite(
+          telemetryFile,
+          _lockCases[name]!,
+        );
+        final expected = Map<String, Object?>.from(
+          _expectedLockRewrites[name]! as Map,
+        );
+        expected['envelope'] = Map<String, Object?>.from(
+          expected['envelope']! as Map,
+        );
+        for (final description in <Map<String, Object?>>[actual, expected]) {
+          description.remove('fileSha256');
+          (description['envelope']! as Map).remove('payloadHash');
+        }
+        expect(actual, expected);
       });
     }
   });
 }
+
+/// Fixtures also read with their bare segment names rewritten to existing
+/// absolute paths (see `materializeAbsolute`); each is in [_lockCases].
+const List<String> _absolutePathCases = <String>[
+  'envelope_v1',
+  'envelope_v2',
+  'checkpoint',
+];
 
 /// Lock-state rewrites recorded for these fixtures (`true` locks every
 /// segment, `false` unlocks).
