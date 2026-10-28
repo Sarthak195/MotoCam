@@ -407,6 +407,11 @@ class RecordingsMigrator {
   /// snapshot is recorded from it.
   bool _listingFailed = false;
 
+  /// Paths (source and destination) of the videos an earlier run already
+  /// moved for a ride JSON that no longer matches its pin, found while
+  /// planning: that ride stays split for good, so they stay protected.
+  final Set<String> _changedRidePaths = <String>{};
+
   /// Whether a copy did not fit during this run: no further file is
   /// copied, only renamed.
   bool _stoppedForSpace = false;
@@ -574,6 +579,32 @@ class RecordingsMigrator {
     _pins = pins;
   }
 
+  /// Notes in [_changedRidePaths] the videos pinned to the ride JSON
+  /// [telemetryPath] (whose content changed, so it stays) that an earlier
+  /// run already moved, with the JSON itself. Read from the pins, since the
+  /// changed JSON need not name its real videos.
+  Future<void> _noteChangedRide(String telemetryPath) async {
+    final json = path_utils.normalizePath(telemetryPath);
+    final paths = <String>{};
+    for (final entry in _pins.entries) {
+      if (entry.value.ride != json) {
+        continue;
+      }
+      final destination = _destinationFor(entry.key);
+      if (!await File(entry.key).exists() && await File(destination).exists()) {
+        paths
+          ..add(entry.key)
+          ..add(path_utils.normalizePath(destination));
+      }
+    }
+    if (paths.isNotEmpty) {
+      _changedRidePaths
+        ..addAll(paths)
+        ..add(json)
+        ..add(path_utils.normalizePath(_destinationFor(json)));
+    }
+  }
+
   /// Drops from the snapshot every file that has moved (gone from its
   /// legacy root, present in the recordings root), so a file later
   /// created under its name is never moved.
@@ -705,6 +736,18 @@ class RecordingsMigrator {
     var moved = 0;
     var outcome = RecordingsMigrationOutcome.completed;
     final splitPaths = <String>{};
+    if (_changedRidePaths.isNotEmpty) {
+      splitPaths.addAll(_changedRidePaths);
+      _carriedSplitPaths = <String>{
+        ..._carriedSplitPaths,
+        ..._changedRidePaths,
+      };
+      await _saveJournal(
+        ride: journal['ride'],
+        file: journal['file'],
+        reported: reported,
+      );
+    }
     _lowStorageBytes = null;
     onProgress?.call(RecordingsMigrationProgress(done: 0, total: total));
 
@@ -867,9 +910,15 @@ class RecordingsMigrator {
       final files = await _listFiles(root);
       final rideUnits = <_MigrationUnit>[];
       for (final file in files) {
+        if (!_isRideJson(file.path)) {
+          continue;
+        }
         // A ride JSON whose content changed since the first run stays,
         // and so do the videos pinned to it.
-        if (!_isRideJson(file.path) || !await _matchesSnapshot(file.path)) {
+        if (!await _matchesSnapshot(file.path)) {
+          if (_inSnapshot(file.path)) {
+            await _noteChangedRide(file.path);
+          }
           continue;
         }
         if (shouldPause()) {

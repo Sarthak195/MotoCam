@@ -939,6 +939,32 @@ void main() {
         expect(journal()['split'], isNull);
       });
 
+      test('a ride paused half-moved whose JSON is then replaced keeps its '
+          'moved videos named and is never marked done (F036)', () async {
+        final ride = await writeRide(external, 'x');
+        await migrator(
+          shouldPause: () => File('$root${sep}seg_x_1.mp4').existsSync(),
+        ).run();
+        // The JSON in the old folder is replaced in place.
+        ride.writeAsStringSync('${ride.readAsStringSync()} ');
+        final rootBefore = contents(root);
+        final externalBefore = contents(external);
+
+        final next = await migrator().run();
+        expect(next.outcome, RecordingsMigrationOutcome.completed);
+        expect(contents(root), rootBefore);
+        expect(contents(external), externalBefore);
+        expect(journal()['done'], isNull);
+        expect(journal()['split'], contains(inRoot('seg_x_1.mp4')));
+        expect(next.splitPaths, contains(inRoot('seg_x_1.mp4')));
+        expect(await protectedPaths(), contains(inRoot('seg_x_1.mp4')));
+
+        // Still named on every later run.
+        await migrator().run();
+        expect(journal()['done'], isNull);
+        expect(await protectedPaths(), contains(inRoot('seg_x_1.mp4')));
+      });
+
       test('a split ride whose copy fails again is not marked done '
           '(F036)', () async {
         await writeRide(external, 'split');
