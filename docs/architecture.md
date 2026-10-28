@@ -219,7 +219,7 @@ flowchart TD
     L --> F["Isolate.run(loadRideHistoryIndexed): ride index hits, fromTelemetryFile for misses, fromVideoFile for orphan videos"]
     F --> W["RideIndexStore (UI isolate) writes the refreshed index"]
     F --> List["Locked Clips / All Rides cards with integrity, video check and lock badges"]
-    List -->|unlock| U["confirm, RideRecord.setLockState(false): re-verify (stored segment hashes reused), rewrite JSON + envelope, reload"]
+    List -->|unlock| U["confirm, RideRecord.changeLockState(false): re-verify (stored segment hashes reused), rewrite JSON + envelope, reload"]
     List -->|delete| D["confirm, delete segments and JSON, reload"]
     List -->|tap| P["RidePlaybackScreen"]
     P --> S["loadSamples in Isolate.run"]
@@ -240,7 +240,7 @@ While recording, the HISTORY button reads MINIMISE, and both it and system back 
   - `RidePlaybackScreen`: `RideRecord.loadSamples`, and `SegmentVerifier` hashing (one segment per call, cancelled between segments when the screen closes).
   - `RideIndexStore`: the first read of the ride index.
 
-  The ride index file is written only by `RideIndexStore` on the UI isolate. `RideRecord.setLockState` reads the ride JSON and computes its payload hashes on the UI isolate.
+  The ride index file is written only by `RideIndexStore` on the UI isolate. `RideRecord.changeLockState` (which `setLockState` wraps) reads the ride JSON and computes its payload hashes on the UI isolate.
 - **Timers.**
 
   | Owner | Timers and delays |
