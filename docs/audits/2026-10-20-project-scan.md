@@ -207,7 +207,7 @@ Nothing has been run on a device or an emulator, and nothing for iOS has been bu
 | [F121](#f121) | low | No tileProvider is passed, so every TileLayer rebuild creates a new NetworkTileProvider and HTTP client that is never closed | `lib/features/history/widgets/route_map_view.dart:64` | fixed |
 | [F122](#f122) | low | TileLayer has no error image or callback and the map background stays light grey, so failed tile loads show a blank grey box with no message | `lib/features/history/widgets/route_map_view.dart:64` | fixed |
 | [F123](#f123) | low | TileLayer.maxZoom 19 with unbounded MapOptions zoom blanks every tile at zoom 19.5 and above | `lib/features/history/widgets/route_map_view.dart:68` | fixed |
-| [F124](#f124) | low | The OpenStreetMap attribution is plain non-tappable text and the app has no licence screen | `lib/features/history/widgets/route_map_view.dart:125` | partially fixed |
+| [F124](#f124) | low | The OpenStreetMap attribution is plain non-tappable text and the app has no licence screen | `lib/features/history/widgets/route_map_view.dart:125` | fixed |
 | [F125](#f125) | low | The route map's initial zoom ignores its 90-130 px height and the Mercator latitude stretch, so north-south routes open clipped | `lib/features/history/widgets/route_map_view.dart:191` | fixed |
 | [F126](#f126) | low | The OSM tile User-Agent uses the template placeholder 'com.example.motocam' with no contact, and the tile URL is a constant with no fallback | `lib/features/map/map_source_config.dart:12` | partially fixed |
 | [F127](#f127) | low | _pipBlinkStream's 700 ms Stream.periodic timer is never cancelled once the PiP view has been shown | `lib/features/recording/recording_screen.dart:57` | fixed |
@@ -236,7 +236,7 @@ Nothing has been run on a device or an emulator, and nothing for iOS has been bu
 | [F154](#f154) | low | README lists iOS as supported, but every Android-native feature (background recording, notification Stop, PiP, device status, gallery expor… | `README.md:10` | fixed (docs) |
 | [F148](#f148) | info | android/build.gradle uses the deprecated Project.buildDir API and silently adds concurrent-futures to every plugin module | `android/build.gradle:8` | fixed |
 | [F149](#f149) | info | Commit cd39097 claims dartdoc was added to all public services, providers and models, but the core providers and models document only their… | `lib/features/camera/providers/camera_provider.dart:33` | fixed (docs) |
-| [F150](#f150) | info | Large unused public surface and unreachable branches across providers, services, playback and the map painter (e.g. roll-metric getters tha… | `lib/features/camera/providers/camera_provider.dart:132` | partially fixed |
+| [F150](#f150) | info | Large unused public surface and unreachable branches across providers, services, playback and the map painter (e.g. roll-metric getters tha… | `lib/features/camera/providers/camera_provider.dart:132` | fixed |
 | [F153](#f153) | info | Permission-granted checks (5 copies) and elapsed-time formatting (4 copies, 2 formats) are duplicated across screens | `lib/features/recording/recording_screen.dart:577` | fixed |
 
 ## Findings
@@ -2083,7 +2083,7 @@ Also affects: `lib/features/map/map_source_config.dart:13-14`, `lib/features/his
 
 **The OpenStreetMap attribution is plain non-tappable text and the app has no licence screen**
 
-Severity: **low** · Category: ux-accessibility · Location: `lib/features/history/widgets/route_map_view.dart:125` · Verification: single → confirmed · Status: **partially fixed**
+Severity: **low** · Category: ux-accessibility · Location: `lib/features/history/widgets/route_map_view.dart:125` · Verification: single → confirmed · Status: **fixed**
 
 Also affects: `lib/features/map/map_source_config.dart:11`
 
@@ -2091,7 +2091,7 @@ Also affects: `lib/features/map/map_source_config.dart:11`
 - **Failure scenario:** A rider, or an OSMF reviewer, taps the attribution and nothing happens; nowhere in the app leads to openstreetmap.org/copyright or the ODbL.
 - **Evidence:** route_map_view.dart:134-137 `child: const Text(MapSourceConfig.attribution, style: TextStyle(color: Colors.white70, fontSize: 10),),`; map_source_config.dart:11 `static const String attribution = '© OpenStreetMap contributors';`; grep -i `LicenseRegistry|showAboutDialog|showLicensePage|AboutListTile|copyright|odbl|url_launcher` in lib/ and pubspec.yaml -> no matches; flutter_map-8.2.2/lib/src/layer/attribution_layer/rich/widget.dart defines RichAttributionWidget.
 - **Recommendation:** Replace the overlay with flutter_map's RichAttributionWidget, using a TextSourceAttribution('OpenStreetMap contributors') whose onTap opens https://www.openstreetmap.org/copyright (this adds url_launcher). Alternatively, add an About/licences entry that shows that URL and calls showLicensePage.
-- **Fix note:** attribution dialog + licence page; opening the URL needs url_launcher
+- **Fix note:** `OsmAttribution` (flutter_map `RichAttributionWidget`, tap opens the copyright page with url_launcher, Android https `<queries>` entry) on the route map, and an About and licences entry in the recording settings sheet
 
 #### F125
 
@@ -2515,7 +2515,7 @@ Also affects: `lib/core/providers/app_settings_provider.dart:148`, `lib/features
 
 **Large unused public surface and unreachable branches across providers, services, playback and the map painter (e.g. roll-metric getters that still notify on every roll)**
 
-Severity: **info** · Category: maintainability · Location: `lib/features/camera/providers/camera_provider.dart:132` · Verification: single → confirmed · Status: **partially fixed**
+Severity: **info** · Category: maintainability · Location: `lib/features/camera/providers/camera_provider.dart:132` · Verification: single → confirmed · Status: **fixed**
 
 Also affects: `lib/features/camera/providers/camera_provider.dart:106`, `lib/features/camera/providers/camera_provider.dart:148`, `lib/features/camera/providers/camera_provider.dart:192`, `lib/features/camera/providers/camera_provider.dart:646`, `lib/features/telemetry/providers/telemetry_provider.dart:713`, `lib/core/providers/app_settings_provider.dart:110`, `lib/core/providers/app_settings_provider.dart:273`, `lib/core/services/pip_service.dart:45` …
 
@@ -2524,7 +2524,7 @@ Also affects: `lib/features/camera/providers/camera_provider.dart:106`, `lib/fea
 - **Evidence:** Per-symbol grep over lib and test; for example, `grep -rnw lastRollTotalMs lib test` finds only the definition. Plugin sources: camera-0.12.0/lib/src/camera_controller.dart:253-268 and camera_platform_interface-2.12.0/lib/src/types/media_settings.dart:16-30 (asserts only). ride_playback_screen.dart:198-208 returns early unless at least one segment has a positive duration.
 - **Verifier corrections:** Not every one of the roughly 30 sub-claims was checked individually; the samples checked all held.
 - **Recommendation:** Delete the unused getters and branches, or mark the test-only members @visibleForTesting. Remove the roll-metric notifyListeners() or drop the metrics, and make the singletons' dispose() idempotent or remove it. Add an unused-code check to CI.
-- **Fix note:** dead code removed; some unused public getters kept for API compatibility
+- **Fix note:** unread public members, `RecordingState.paused`, the roll and recovery metrics, the singletons' `dispose` methods and `integrityLabel` removed; getters only tests read are `@visibleForTesting`
 
 #### F153
 
