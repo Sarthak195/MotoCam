@@ -1942,6 +1942,9 @@ class _RecordingScreenState extends State<RecordingScreen>
       await settings.updateKeepScreenOnWhileRecording(
         result.keepScreenOnWhileRecording,
       );
+      await settings.updateRecordingsStorageBudgetGb(
+        result.recordingsStorageBudgetGb,
+      );
 
       if (!mounted) {
         return;

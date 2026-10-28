@@ -75,6 +75,7 @@ class AppSettingsProvider extends ChangeNotifier {
   static const _loopSegmentsKey = 'dashcam_loop_segment_count';
   static const _incidentSensitivityKey = 'incident_sensitivity';
   static const _cameraNameKey = 'camera_name';
+  static const _storageBudgetGbKey = 'recordings_storage_budget_gb';
 
   /// Selectable video bitrates in Mbps.
   static const List<int> bitrateOptionsMbps = [4, 8, 12, 16];
@@ -97,6 +98,9 @@ class AppSettingsProvider extends ChangeNotifier {
 
   /// Selectable loop-buffer sizes (number of segments kept).
   static const List<int> loopSegmentCountOptions = [6, 12, 18, 24, 36, 48];
+
+  /// Storage budget choices for all recordings, in GB (0 = off).
+  static const List<int> storageBudgetOptionsGb = [0, 4, 8, 16, 32, 64];
 
   /// Pseudo profile id used when no preset matches the current values.
   static const String customQualityProfileId = 'custom';
@@ -143,6 +147,7 @@ class AppSettingsProvider extends ChangeNotifier {
   int _speedRefreshMs = 100;
   int _segmentDurationSeconds = 300;
   int _loopSegmentCount = 24;
+  int _recordingsStorageBudgetGb = 0;
   IncidentSensitivity _incidentSensitivity = IncidentSensitivity.medium;
   String _selectedCameraName = '';
   bool _isLoaded = false;
@@ -182,6 +187,16 @@ class AppSettingsProvider extends ChangeNotifier {
 
   /// Loop-buffer size (one of [loopSegmentCountOptions]).
   int get loopSegmentCount => _loopSegmentCount;
+
+  /// Storage budget for all recordings in GB (one of
+  /// [storageBudgetOptionsGb]); 0 (the default) turns it off. While a ride
+  /// records, the oldest unlocked rides are deleted when the recordings
+  /// exceed it; locked rides are never deleted.
+  int get recordingsStorageBudgetGb => _recordingsStorageBudgetGb;
+
+  /// [recordingsStorageBudgetGb] in bytes (GB as 1024^3 bytes); 0 when off.
+  int get recordingsStorageBudgetBytes =>
+      _recordingsStorageBudgetGb * 1024 * 1024 * 1024;
 
   /// Selected incident sensitivity.
   IncidentSensitivity get incidentSensitivity => _incidentSensitivity;
@@ -265,6 +280,10 @@ class AppSettingsProvider extends ChangeNotifier {
     return '$minutes min $remainder sec per segment';
   }
 
+  /// Display label for a storage budget of [gigabytes] (0 is off).
+  static String storageBudgetLabel(int gigabytes) =>
+      gigabytes <= 0 ? 'Off' : '$gigabytes GB';
+
   /// Display label for [sensitivity].
   static String incidentSensitivityLabel(IncidentSensitivity sensitivity) {
     switch (sensitivity) {
@@ -332,6 +351,9 @@ class AppSettingsProvider extends ChangeNotifier {
     );
     _incidentSensitivity = _incidentSensitivityFromName(
       prefs.getString(_incidentSensitivityKey),
+    );
+    _recordingsStorageBudgetGb = _clampStorageBudgetGb(
+      prefs.getInt(_storageBudgetGbKey) ?? 0,
     );
     _selectedCameraName = prefs.getString(_cameraNameKey) ?? '';
     _syncQualityProfileIdFromValues();
@@ -495,6 +517,19 @@ class AppSettingsProvider extends ChangeNotifier {
     await prefs.setInt(_loopSegmentsKey, _loopSegmentCount);
   }
 
+  /// Sets and persists [recordingsStorageBudgetGb]; values outside
+  /// [storageBudgetOptionsGb] become 0 (off).
+  Future<void> updateRecordingsStorageBudgetGb(int gigabytes) async {
+    final clamped = _clampStorageBudgetGb(gigabytes);
+    if (_recordingsStorageBudgetGb == clamped) {
+      return;
+    }
+    _recordingsStorageBudgetGb = clamped;
+    notifyListeners();
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt(_storageBudgetGbKey, _recordingsStorageBudgetGb);
+  }
+
   int _legacyResolutionFromQuality(String? quality) {
     switch (quality) {
       case 'low':
@@ -550,6 +585,13 @@ class AppSettingsProvider extends ChangeNotifier {
       return value;
     }
     return 24;
+  }
+
+  int _clampStorageBudgetGb(int value) {
+    if (storageBudgetOptionsGb.contains(value)) {
+      return value;
+    }
+    return 0;
   }
 
   IncidentSensitivity _incidentSensitivityFromName(String? value) {

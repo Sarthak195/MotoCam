@@ -30,7 +30,32 @@ void main() {
       expect(settings.selectedCameraName, '');
       expect(settings.exportLockedClipsToGallery, isFalse);
       expect(settings.keepScreenOnWhileRecording, isTrue);
+      expect(settings.recordingsStorageBudgetGb, 0);
+      expect(settings.recordingsStorageBudgetBytes, 0);
     });
+
+    test(
+      'persists the storage budget and clamps unknown values to off',
+      () async {
+        final settings = await _loadWith({});
+        await settings.updateRecordingsStorageBudgetGb(8);
+        expect(settings.recordingsStorageBudgetGb, 8);
+        expect(settings.recordingsStorageBudgetBytes, 8 * 1024 * 1024 * 1024);
+        final prefs = await SharedPreferences.getInstance();
+        expect(prefs.getInt('recordings_storage_budget_gb'), 8);
+
+        final reloaded = AppSettingsProvider();
+        await reloaded.load();
+        expect(reloaded.recordingsStorageBudgetGb, 8);
+
+        await reloaded.updateRecordingsStorageBudgetGb(5);
+        expect(reloaded.recordingsStorageBudgetGb, 0);
+        final odd = await _loadWith({'recordings_storage_budget_gb': 7});
+        expect(odd.recordingsStorageBudgetGb, 0);
+        expect(AppSettingsProvider.storageBudgetLabel(0), 'Off');
+        expect(AppSettingsProvider.storageBudgetLabel(16), '16 GB');
+      },
+    );
 
     test('persists the keep-screen-on setting', () async {
       final settings = await _loadWith({});

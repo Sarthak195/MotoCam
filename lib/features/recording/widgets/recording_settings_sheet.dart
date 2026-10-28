@@ -36,6 +36,7 @@ class RecordingSettingsFormResult {
     required this.incidentSensitivity,
     this.exportLockedClipsToGallery = false,
     this.keepScreenOnWhileRecording = true,
+    this.recordingsStorageBudgetGb = 0,
   });
 
   /// Requested vertical resolution in pixels (e.g. 1080).
@@ -71,6 +72,9 @@ class RecordingSettingsFormResult {
 
   /// Whether the screen is kept on while a recording is active (Android).
   final bool keepScreenOnWhileRecording;
+
+  /// Storage budget for all recordings in GB; 0 is off.
+  final int recordingsStorageBudgetGb;
 }
 
 /// Modal form for the recording, camera and telemetry settings.
@@ -112,6 +116,7 @@ class _RecordingSettingsSheetState extends State<RecordingSettingsSheet> {
   late int speedRefreshMs;
   late int segmentDurationSeconds;
   late int loopSegmentCount;
+  late int recordingsStorageBudgetGb;
   late IncidentSensitivity incidentSensitivity;
   late List<int> availableFps;
   late Set<ResolutionPreset> unsupportedResolutionPresets;
@@ -137,6 +142,7 @@ class _RecordingSettingsSheetState extends State<RecordingSettingsSheet> {
     speedRefreshMs = settings.speedRefreshMs;
     segmentDurationSeconds = settings.segmentDurationSeconds;
     loopSegmentCount = settings.loopSegmentCount;
+    recordingsStorageBudgetGb = settings.recordingsStorageBudgetGb;
     incidentSensitivity = settings.incidentSensitivity;
     availableFps = List<int>.from(widget.initialFpsOptions);
     final initialFps = resolveInitialFps(selectedFps, availableFps);
@@ -536,6 +542,36 @@ class _RecordingSettingsSheetState extends State<RecordingSettingsSheet> {
                   },
                 ),
                 const SizedBox(height: 12),
+                _buildSettingsLabel('Storage budget for all rides'),
+                DropdownButtonFormField<int>(
+                  key: ValueKey(recordingsStorageBudgetGb),
+                  initialValue: recordingsStorageBudgetGb,
+                  dropdownColor: const Color(0xFF1B1B1B),
+                  decoration: _settingsInputDecoration(),
+                  items: AppSettingsProvider.storageBudgetOptionsGb
+                      .map(
+                        (gigabytes) => DropdownMenuItem<int>(
+                          value: gigabytes,
+                          child: Text(
+                            AppSettingsProvider.storageBudgetLabel(gigabytes),
+                          ),
+                        ),
+                      )
+                      .toList(),
+                  onChanged: (value) {
+                    if (value == null) return;
+                    setState(() => recordingsStorageBudgetGb = value);
+                  },
+                ),
+                const Padding(
+                  padding: EdgeInsets.only(top: 4),
+                  child: Text(
+                    'When recordings exceed it, the oldest unlocked rides are '
+                    'deleted while you record. Locked rides are never deleted.',
+                    style: TextStyle(color: Colors.white70, fontSize: 12),
+                  ),
+                ),
+                const SizedBox(height: 12),
                 _buildSettingsLabel('Speed UI refresh'),
                 DropdownButtonFormField<int>(
                   key: ValueKey(speedRefreshMs),
@@ -658,6 +694,7 @@ class _RecordingSettingsSheetState extends State<RecordingSettingsSheet> {
                               exportLockedClipsToGallery,
                           keepScreenOnWhileRecording:
                               keepScreenOnWhileRecording,
+                          recordingsStorageBudgetGb: recordingsStorageBudgetGb,
                         ),
                       );
                     },
