@@ -116,7 +116,7 @@ Notes:
 
 | Dart side | Channel `com.example.motocam/...` | Gating in Dart | Methods (Dart to native) | Native to Dart |
 |---|---|---|---|---|
-| `BackgroundRecordingService` | `background_recording` | `defaultTargetPlatform == android`; no-op or default elsewhere | `startForegroundRecording`, `updateForegroundRecording`, `stopForegroundRecording`, `setKeepScreenOn`, `isIgnoringBatteryOptimizations`, `requestIgnoreBatteryOptimizations` | `onStopRequested` |
+| `BackgroundRecordingService` | `background_recording` | `defaultTargetPlatform == android`; no-op or default elsewhere | `startForegroundRecording`, `updateForegroundRecording`, `releaseCameraHold`, `stopForegroundRecording`, `setKeepScreenOn`, `isIgnoringBatteryOptimizations`, `requestIgnoreBatteryOptimizations` | `onStopRequested`, `onForegroundStopped` |
 | `DeviceStatusService` | `device_status` | `defaultTargetPlatform == android`; otherwise `empty` | `getBatteryStatus` | none |
 | `PipService` | `pip` | Not gated. Failures are caught and return `false` | `enterPipMode` | `onPipModeChanged` |
 | `CameraProvider.platform` | `media` | Gallery export runs only on Android; a failed free-space query returns `null` | `getAvailableStorageBytes`, `exportVideoToGallery` | none |

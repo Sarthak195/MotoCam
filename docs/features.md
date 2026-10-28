@@ -52,7 +52,7 @@ flowchart TD
 - "Open Settings" in the permissions dialog and "Open Location Settings" in the location dialog wait until the rider returns to the app (at most 2 minutes) before checking again.
 - While the flow runs, the main button reads `STARTING...`. Other states of the same button are `PREPARING CAMERA...`, `SAVING RECORDING...` and `APPLYING SETTINGS...`; the button is disabled in all of them.
 - `CameraProvider.startRecording` refuses to start when the platform reports less free space than one segment needs; see [Storage and retention](#storage-and-retention). If recording fails to start at the chosen resolution, `_startVideoRecordingWithFallback` retries at lower resolution presets. The saved settings are not changed by this; the chip bar shows the applied values next to the saved ones.
-- If the Android foreground service cannot start, recording continues and a SnackBar reads `Background protection unavailable: recording may stop if the app is in the background or the screen turns off.`
+- If the Android foreground service cannot start, or stops on its own during a recording, recording continues and a SnackBar reads `Background protection unavailable: recording may stop if the app is in the background or the screen turns off.`
 
 ### Preflight checks
 
