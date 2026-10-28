@@ -79,6 +79,44 @@ class PlaybackMarker {
   final PlaybackMarkerType type;
 }
 
+/// What the seekbar and the legend mark on the ride timeline: footage that
+/// is missing, failed the integrity check or does not exist, and the
+/// incident and lock markers. All positions are in milliseconds from ride
+/// start.
+class PlaybackTimelineMarks {
+  /// Creates the marks; every list defaults to empty.
+  const PlaybackTimelineMarks({
+    this.missingRanges = const <PlaybackRange>[],
+    this.failedCheckRanges = const <PlaybackRange>[],
+    this.noVideoRanges = const <PlaybackRange>[],
+    this.incidentMarkerMs = const <int>[],
+    this.lockMarkerMs = const <int>[],
+  });
+
+  /// Segments that are missing or could not be played.
+  final List<PlaybackRange> missingRanges;
+
+  /// Segments that could not be confirmed unmodified since recording.
+  final List<PlaybackRange> failedCheckRanges;
+
+  /// Ride time without any video.
+  final List<PlaybackRange> noVideoRanges;
+
+  /// Incident marker times.
+  final List<int> incidentMarkerMs;
+
+  /// Locked-segment marker times.
+  final List<int> lockMarkerMs;
+
+  /// Whether nothing at all is marked.
+  bool get isEmpty =>
+      missingRanges.isEmpty &&
+      failedCheckRanges.isEmpty &&
+      noVideoRanges.isEmpty &&
+      incidentMarkerMs.isEmpty &&
+      lockMarkerMs.isEmpty;
+}
+
 /// Where a global timeline position lands inside the playlist.
 class SegmentSeekTarget {
   /// Creates a seek target.
@@ -446,6 +484,89 @@ int firstSampleIndexAtOrAfter(List<TelemetryData> samples, int elapsedMs) {
   }
   return low;
 }
+
+/// Returns [value] limited to the range from zero to [max].
+Duration clampDuration(Duration value, Duration max) {
+  if (value < Duration.zero) {
+    return Duration.zero;
+  }
+  if (value > max) {
+    return max;
+  }
+  return value;
+}
+
+/// Returns the ride-timeline position of [localPosition] inside a segment
+/// that starts at [segmentOffset], clamped to `[0, total]`.
+Duration globalPlaybackPosition({
+  required Duration segmentOffset,
+  required Duration localPosition,
+  required Duration total,
+}) => clampDuration(segmentOffset + localPosition, total);
+
+/// Returns the incident and lock markers as one list sorted by time (the
+/// order a seekbar tap searches them in).
+List<PlaybackMarker> timelineMarkers({
+  required List<int> incidentMarkerMs,
+  required List<int> lockMarkerMs,
+}) {
+  return <PlaybackMarker>[
+    for (final marker in incidentMarkerMs)
+      PlaybackMarker(elapsedMs: marker, type: PlaybackMarkerType.incident),
+    for (final marker in lockMarkerMs)
+      PlaybackMarker(elapsedMs: marker, type: PlaybackMarkerType.locked),
+  ]..sort((a, b) => a.elapsedMs.compareTo(b.elapsedMs));
+}
+
+/// Returns the message shown when none of a ride's segments can be played,
+/// naming how many of the [declaredCount] declared segments are missing or
+/// unreadable.
+String noPlayableVideoMessage({
+  required int declaredCount,
+  required int missingCount,
+  required int unreadableCount,
+}) {
+  if (declaredCount == 0) {
+    return 'This ride has no video segments.';
+  }
+  final details = <String>[
+    if (missingCount > 0) '$missingCount missing',
+    if (unreadableCount > 0) '$unreadableCount unreadable',
+  ];
+  final suffix = details.isEmpty ? '' : ' (${details.join(', ')})';
+  return 'No playable video for this ride$suffix.';
+}
+
+/// Returns the index of the sample whose elapsed time is closest to
+/// [elapsedMs] (the earlier one on a tie), or `null` when [samples] is
+/// empty. [samples] must be ordered by elapsed time, as recorded.
+int? nearestSampleIndex(List<TelemetryData> samples, int elapsedMs) {
+  if (samples.isEmpty) {
+    return null;
+  }
+  final next = firstSampleIndexAtOrAfter(samples, elapsedMs);
+  if (next == 0) {
+    return 0;
+  }
+  if (next >= samples.length) {
+    return samples.length - 1;
+  }
+  final before = elapsedMs - samples[next - 1].elapsedMs;
+  final after = samples[next].elapsedMs - elapsedMs;
+  return before <= after ? next - 1 : next;
+}
+
+/// Returns the index of the speed-graph page that holds the window around
+/// [positionMs].
+///
+/// The graph's curve is drawn once per page, three windows wide (from
+/// `(index - 1) * windowMs`), and slid across the strip as the position
+/// moves, so the curve is redrawn only when the position enters another
+/// page. The window centred on any position inside page `index` (positions
+/// from `index * windowMs` up to, not including, `(index + 1) * windowMs`)
+/// lies within that page.
+int speedGraphPageIndex(int positionMs, int windowMs) =>
+    windowMs <= 0 ? 0 : (positionMs / windowMs).floor();
 
 /// Returns the segment paths that failed the integrity check according to
 /// [issues]: a hash mismatch, no recorded hash, or a file that could not be

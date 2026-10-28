@@ -367,4 +367,153 @@ void main() {
       expect(recordedIncidentOffsetsMs(elapsedMs: [5], totalMs: 0), isEmpty);
     });
   });
+
+  group('clampDuration and globalPlaybackPosition', () {
+    test('clampDuration limits to zero and the maximum', () {
+      const max = Duration(seconds: 10);
+      expect(clampDuration(const Duration(seconds: -3), max), Duration.zero);
+      expect(
+        clampDuration(const Duration(seconds: 4), max),
+        const Duration(seconds: 4),
+      );
+      expect(clampDuration(const Duration(seconds: 12), max), max);
+    });
+
+    test('globalPlaybackPosition adds the segment offset and clamps', () {
+      expect(
+        globalPlaybackPosition(
+          segmentOffset: const Duration(seconds: 60),
+          localPosition: const Duration(seconds: 5),
+          total: const Duration(seconds: 120),
+        ),
+        const Duration(seconds: 65),
+      );
+      expect(
+        globalPlaybackPosition(
+          segmentOffset: const Duration(seconds: 118),
+          localPosition: const Duration(seconds: 5),
+          total: const Duration(seconds: 120),
+        ),
+        const Duration(seconds: 120),
+      );
+    });
+  });
+
+  group('timelineMarkers', () {
+    test('merges incident and lock markers sorted by time', () {
+      final markers = timelineMarkers(
+        incidentMarkerMs: [9000, 1000],
+        lockMarkerMs: [5000],
+      );
+      expect(markers.map((m) => m.elapsedMs), [1000, 5000, 9000]);
+      expect(markers[1].type, PlaybackMarkerType.locked);
+      expect(markers[0].type, PlaybackMarkerType.incident);
+    });
+
+    test('is empty without markers', () {
+      expect(
+        timelineMarkers(incidentMarkerMs: const [], lockMarkerMs: const []),
+        isEmpty,
+      );
+    });
+  });
+
+  group('noPlayableVideoMessage', () {
+    test('names a ride with no declared segments', () {
+      expect(
+        noPlayableVideoMessage(
+          declaredCount: 0,
+          missingCount: 0,
+          unreadableCount: 0,
+        ),
+        'This ride has no video segments.',
+      );
+    });
+
+    test('lists only the non-zero counts', () {
+      expect(
+        noPlayableVideoMessage(
+          declaredCount: 3,
+          missingCount: 2,
+          unreadableCount: 1,
+        ),
+        'No playable video for this ride (2 missing, 1 unreadable).',
+      );
+      expect(
+        noPlayableVideoMessage(
+          declaredCount: 2,
+          missingCount: 0,
+          unreadableCount: 2,
+        ),
+        'No playable video for this ride (2 unreadable).',
+      );
+      expect(
+        noPlayableVideoMessage(
+          declaredCount: 1,
+          missingCount: 0,
+          unreadableCount: 0,
+        ),
+        'No playable video for this ride.',
+      );
+    });
+  });
+
+  group('nearestSampleIndex', () {
+    final samples = [_sample(0), _sample(1000), _sample(2000), _sample(5000)];
+
+    test('is null without samples', () {
+      expect(nearestSampleIndex(const [], 100), isNull);
+    });
+
+    test('picks the closest sample, the earlier one on a tie', () {
+      expect(nearestSampleIndex(samples, 400), 0);
+      expect(nearestSampleIndex(samples, 600), 1);
+      expect(nearestSampleIndex(samples, 500), 0);
+      expect(nearestSampleIndex(samples, 1000), 1);
+      expect(nearestSampleIndex(samples, 3400), 2);
+      expect(nearestSampleIndex(samples, 3600), 3);
+    });
+
+    test('clamps to the first and last sample', () {
+      expect(nearestSampleIndex(samples, -50), 0);
+      expect(nearestSampleIndex(samples, 99999), 3);
+    });
+  });
+
+  group('speedGraphPageIndex', () {
+    test('changes only when the position crosses a window boundary', () {
+      expect(speedGraphPageIndex(0, 10000), 0);
+      expect(speedGraphPageIndex(9999, 10000), 0);
+      expect(speedGraphPageIndex(10000, 10000), 1);
+      expect(speedGraphPageIndex(125000, 60000), 2);
+    });
+
+    test('keeps the window centred on the position inside its page', () {
+      const windowMs = 10000;
+      for (final positionMs in [0, 1, 9999, 10000, 34567, 59999]) {
+        final index = speedGraphPageIndex(positionMs, windowMs);
+        final pageStart = (index - 1) * windowMs;
+        final pageEnd = pageStart + 3 * windowMs;
+        expect(positionMs - windowMs / 2, greaterThanOrEqualTo(pageStart));
+        expect(positionMs + windowMs / 2, lessThanOrEqualTo(pageEnd));
+      }
+    });
+
+    test('is zero for a missing window', () {
+      expect(speedGraphPageIndex(5000, 0), 0);
+    });
+  });
+
+  group('PlaybackTimelineMarks', () {
+    test('is empty by default and not once anything is marked', () {
+      expect(const PlaybackTimelineMarks().isEmpty, isTrue);
+      expect(const PlaybackTimelineMarks(lockMarkerMs: [1]).isEmpty, isFalse);
+      expect(
+        const PlaybackTimelineMarks(
+          noVideoRanges: [PlaybackRange(startMs: 0, endMs: 5)],
+        ).isEmpty,
+        isFalse,
+      );
+    });
+  });
 }
