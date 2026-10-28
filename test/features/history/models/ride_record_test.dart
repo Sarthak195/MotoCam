@@ -103,6 +103,35 @@ void main() {
       expect(loaded.sampleForPosition(Duration.zero).hasFix, isFalse);
     });
 
+    test('a sample-less ride whose file no longer parses reports the failed '
+        're-read', () async {
+      // Playback treats a result with a telemetry path and no samples as a
+      // failed re-read and skips the video check.
+      final segmentFile = await createSegment('segment_01.mp4', 'data');
+      final telemetryFile = telemetryFileNamed('segment_01');
+      await _writeRide(
+        telemetryFile: telemetryFile,
+        payload: _ridePayload(segmentPaths: <String>[segmentFile.path]),
+        envelope: _Envelope.bound,
+      );
+      final lazy = (await RideRecord.fromTelemetryFile(
+        telemetryFile,
+        loadSamples: false,
+      ))!;
+      await telemetryFile.writeAsString('{"truncated": ');
+
+      final loaded = await lazy.loadSamples();
+      expect(loaded.telemetryPath, isNotNull);
+      expect(loaded.samplesLoaded, isFalse);
+
+      await _writeRide(
+        telemetryFile: telemetryFile,
+        payload: _ridePayload(segmentPaths: <String>[segmentFile.path]),
+        envelope: _Envelope.bound,
+      );
+      expect((await lazy.loadSamples()).samplesLoaded, isTrue);
+    });
+
     test(
       'fromTelemetryFile returns verified ride when integrity matches',
       () async {

@@ -444,7 +444,9 @@ class RideRecord {
 
   /// Returns this ride with its samples: this record when [samplesLoaded]
   /// is already `true`, otherwise the ride re-read from [telemetryPath]
-  /// (this record when that fails or there is no telemetry file).
+  /// (this record when that fails or there is no telemetry file). So a
+  /// result with a [telemetryPath] and [samplesLoaded] `false` means the
+  /// file could not be read again.
   ///
   /// Parsing a long ride takes a while; run it off the UI isolate.
   Future<RideRecord> loadSamples() async {
@@ -466,7 +468,7 @@ class RideRecord {
   ///
   /// Segment files are hashed with [hashSegment]; Ride History passes one
   /// that reuses still-valid results from the ride index
-  /// (`SegmentVerifier.hashFor`) and hashes the rest off the UI isolate.
+  /// (`SegmentVerifier.lockHasher`) and hashes the rest off the UI isolate.
   Future<bool> setLockState(
     bool locked, {
     ride_codec.SegmentFileHasher hashSegment = ride_codec.hashSegmentFile,

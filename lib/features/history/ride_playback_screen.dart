@@ -68,6 +68,12 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
   SegmentCheckToken? _segmentCheckToken;
   bool _isCheckingSegments = false;
 
+  /// Whether the ride file could not be read again when playback opened.
+  /// The ride then plays from the saved summary, whose recorded video
+  /// hashes no longer come from a file on disk, so the videos are not
+  /// checked against them.
+  bool _rideReadFailed = false;
+
   VideoPlayerController? _controller;
   bool _isLoading = true;
   bool _isDisposing = false;
@@ -135,6 +141,8 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
       }
       setState(() {
         _ride = ride;
+        // loadSamples returns the sample-less record when the re-read fails.
+        _rideReadFailed = ride.telemetryPath != null && !ride.samplesLoaded;
       });
     }
     for (final sample in _ride.samples) {
@@ -149,7 +157,8 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
   }
 
   /// Reads the ride with its samples on a background isolate (on this one
-  /// if that fails). A ride that cannot be re-read plays without telemetry.
+  /// if that fails). A ride that cannot be re-read comes back sample-less
+  /// and plays without telemetry (see [_rideReadFailed]).
   static Future<RideRecord> _loadFullRide(RideRecord ride) async {
     try {
       return await Isolate.run(ride.loadSamples);
@@ -179,6 +188,7 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
         'This ride has no integrity record, so its files cannot be checked.',
       if (ride.mockLocationDetected)
         'GPS in this ride came from a simulated (mock) location provider.',
+      if (_rideReadFailed) _rideReadFailedMessage,
     ];
     // Segments without a recorded hash are known before any hashing, so the
     // seekbar can mark them right away; the background check adds the
@@ -196,6 +206,10 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
     });
   }
 
+  static const String _rideReadFailedMessage =
+      'The ride file could not be read again: showing the saved summary '
+      'without telemetry, and its videos were not checked.';
+
   /// Checks the segment files against the hashes in the ride's envelope,
   /// one at a time: the segment about to play first, then the others in
   /// timeline order. Results stored in the ride index are reused unless
@@ -207,6 +221,12 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
     bool announce = false,
   }) async {
     _segmentCheckToken?.cancel();
+    if (_rideReadFailed) {
+      if (announce) {
+        _showMessage(_rideReadFailedMessage, replaceCurrent: true);
+      }
+      return;
+    }
     final token = SegmentCheckToken();
     _segmentCheckToken = token;
     final ride = _ride;
@@ -305,8 +325,12 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
   }
 
   /// The 'Check videos again' action: hashes every segment again, ignoring
-  /// stored results.
+  /// stored results (nothing when the ride file could not be read again).
   void _checkVideosAgain() {
+    if (_rideReadFailed) {
+      _showMessage(_rideReadFailedMessage, replaceCurrent: true);
+      return;
+    }
     _segmentCheckToken?.cancel();
     setState(() {
       _integrityFailedPaths = segmentPathsFailingIntegrity(

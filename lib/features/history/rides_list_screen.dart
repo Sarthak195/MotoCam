@@ -39,6 +39,18 @@ class _RidesListScreenState extends State<RidesListScreen> {
   /// telemetry path.
   Map<String, RideVideoCheck> _videoChecks = <String, RideVideoCheck>{};
 
+  /// The ride index store this screen listens to, once resolved.
+  RideIndexStore? _indexStore;
+
+  /// The ride last opened for playback. Its segment check can still store
+  /// a result after playback closed, so its video state is re-read on every
+  /// index update.
+  RideRecord? _openedRide;
+
+  /// Counts [_refreshVideoCheck] calls, so an older refresh that finishes
+  /// late does not overwrite a newer one.
+  int _videoCheckRefreshes = 0;
+
   Widget _buildStatusBadge({required String label, required Color color}) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
@@ -68,6 +80,19 @@ class _RidesListScreenState extends State<RidesListScreen> {
     }
   }
 
+  @override
+  void dispose() {
+    _indexStore?.removeListener(_onIndexChanged);
+    super.dispose();
+  }
+
+  void _onIndexChanged() {
+    final ride = _openedRide;
+    if (ride != null && mounted) {
+      unawaited(_refreshVideoCheck(ride));
+    }
+  }
+
   Future<List<RideRecord>> _loadRides() async {
     final cameraProvider = context.read<CameraProvider>();
     final recordings = await cameraProvider.getRecordings();
@@ -76,6 +101,10 @@ class _RidesListScreenState extends State<RidesListScreen> {
         .map((file) => file.path)
         .toList(growable: false);
     final store = await RideIndexStore.shared();
+    if (store != null && _indexStore == null && mounted) {
+      _indexStore = store;
+      store.addListener(_onIndexChanged);
+    }
     final load = await _loadRideHistoryInBackground(
       recordingPaths,
       indexFilePath: store?.file.path,
@@ -132,6 +161,7 @@ class _RidesListScreenState extends State<RidesListScreen> {
   /// checked its segments); nothing is hashed.
   Future<void> _refreshVideoCheck(RideRecord ride) async {
     final path = ride.telemetryPath;
+    final refresh = ++_videoCheckRefreshes;
     final store = await RideIndexStore.shared();
     if (path == null || store == null) {
       return;
@@ -141,7 +171,7 @@ class _RidesListScreenState extends State<RidesListScreen> {
       index: await store.read(),
       stat: statRideFile,
     );
-    if (!mounted) {
+    if (!mounted || refresh != _videoCheckRefreshes) {
       return;
     }
     setState(() {
@@ -656,6 +686,7 @@ class _RidesListScreenState extends State<RidesListScreen> {
             return;
           }
           _isOpeningRide = true;
+          _openedRide = ride;
           try {
             await Navigator.of(context).push(
               MaterialPageRoute(builder: (_) => RidePlaybackScreen(ride: ride)),
@@ -664,6 +695,8 @@ class _RidesListScreenState extends State<RidesListScreen> {
             _isOpeningRide = false;
           }
           // Playback stored the segments it checked; show the new state.
+          // A segment still being hashed refreshes it again through
+          // _onIndexChanged when its result is stored.
           unawaited(_refreshVideoCheck(ride));
         },
       ),
