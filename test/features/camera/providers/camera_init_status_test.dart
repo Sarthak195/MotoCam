@@ -108,4 +108,48 @@ void main() {
       );
     });
   });
+
+  cameraExceptionCodeTests();
+}
+
+void cameraExceptionCodeTests() {
+  group('cameraInitFailureForCameraExceptionCode', () {
+    CameraInitFailureReason? reasonFor(String code) =>
+        cameraInitFailureForCameraExceptionCode(code)?.reason;
+
+    test('maps camera permission codes', () {
+      expect(
+        reasonFor('CameraAccessDenied'),
+        CameraInitFailureReason.cameraPermissionDenied,
+      );
+      expect(
+        reasonFor('CameraAccessDeniedWithoutPrompt'),
+        CameraInitFailureReason.cameraPermissionPermanentlyDenied,
+      );
+      expect(
+        reasonFor('CameraAccessRestricted'),
+        CameraInitFailureReason.cameraPermissionPermanentlyDenied,
+      );
+    });
+
+    test('maps microphone permission codes', () {
+      expect(
+        reasonFor('AudioAccessDenied'),
+        CameraInitFailureReason.microphonePermissionDenied,
+      );
+      expect(
+        reasonFor('AudioAccessDeniedWithoutPrompt'),
+        CameraInitFailureReason.microphonePermissionPermanentlyDenied,
+      );
+      expect(
+        reasonFor('AudioAccessRestricted'),
+        CameraInitFailureReason.microphonePermissionPermanentlyDenied,
+      );
+    });
+
+    test('returns null for other codes', () {
+      expect(cameraInitFailureForCameraExceptionCode('cameraNotFound'), isNull);
+      expect(cameraInitFailureForCameraExceptionCode(''), isNull);
+    });
+  });
 }

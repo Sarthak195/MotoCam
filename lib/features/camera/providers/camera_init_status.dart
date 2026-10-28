@@ -105,3 +105,34 @@ CameraInitFailure? cameraInitFailureForPermissions({
   }
   return null;
 }
+
+/// Maps the code of a `CameraException` thrown while opening the camera to
+/// the permission failure it names, or `null` for any other code.
+///
+/// Covers the plugin's `CameraAccessDenied`, `AudioAccessDenied` and their
+/// `*WithoutPrompt` and `*Restricted` variants. The latter two cannot be asked
+/// for again, so they map to the permanently denied reasons. This catches a
+/// permission revoked between the status check and the controller opening.
+CameraInitFailure? cameraInitFailureForCameraExceptionCode(String code) {
+  switch (code) {
+    case 'CameraAccessDenied':
+      return const CameraInitFailure(
+        CameraInitFailureReason.cameraPermissionDenied,
+      );
+    case 'CameraAccessDeniedWithoutPrompt':
+    case 'CameraAccessRestricted':
+      return const CameraInitFailure(
+        CameraInitFailureReason.cameraPermissionPermanentlyDenied,
+      );
+    case 'AudioAccessDenied':
+      return const CameraInitFailure(
+        CameraInitFailureReason.microphonePermissionDenied,
+      );
+    case 'AudioAccessDeniedWithoutPrompt':
+    case 'AudioAccessRestricted':
+      return const CameraInitFailure(
+        CameraInitFailureReason.microphonePermissionPermanentlyDenied,
+      );
+  }
+  return null;
+}

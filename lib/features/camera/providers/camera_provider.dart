@@ -582,6 +582,7 @@ class CameraProvider extends ChangeNotifier {
 
       final requestedPreset = _resolutionPreset;
       final requestedFps = _recordingFps;
+      _controllerPermissionFailure = null;
       CameraController? initializedController;
       ResolutionPreset? initializedPreset;
       var initializedFps = requestedFps;
@@ -639,8 +640,13 @@ class CameraProvider extends ChangeNotifier {
         // that each preset is unsupported; forget this attempt's marks so
         // the next init retries the rider's request.
         _clearCapabilityCachesForCamera(selectedCamera.name);
+        // A permission revoked since the status check is named as such; any
+        // other plugin error stays "unavailable".
         _failInit(
-          const CameraInitFailure(CameraInitFailureReason.cameraUnavailable),
+          _controllerPermissionFailure ??
+              const CameraInitFailure(
+                CameraInitFailureReason.cameraUnavailable,
+              ),
         );
         return;
       }
@@ -847,6 +853,10 @@ class CameraProvider extends ChangeNotifier {
     _supportedFpsCache.removeWhere((key, _) => key.startsWith(prefix));
   }
 
+  // The permission failure a CameraException named during the current
+  // initialization, if any (see cameraInitFailureForCameraExceptionCode).
+  CameraInitFailure? _controllerPermissionFailure;
+
   Future<CameraController?> _tryInitializeController({
     required CameraDescription camera,
     required ResolutionPreset preset,
@@ -870,6 +880,10 @@ class CameraProvider extends ChangeNotifier {
       return controller;
     } catch (e) {
       _log('Camera init failed for preset $preset at ${fps}fps: $e');
+      if (e is CameraException) {
+        _controllerPermissionFailure ??=
+            cameraInitFailureForCameraExceptionCode(e.code);
+      }
       try {
         await controller.dispose();
       } catch (_) {
