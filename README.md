@@ -21,7 +21,7 @@ MotoCam is a Flutter dashcam app for motorcycle riders. It records video in fixe
 
 | Platform | Status |
 |---|---|
-| Android | Supported. All five native method channels are implemented in Kotlin. Builds target SDK 36 with `minSdk` from Flutter (`flutter.minSdkVersion`, 24, that is Android 7.0, with Flutter 3.41.2). The v0.1.11 and v0.1.12 release notes list the devices those releases were tested on: RMX1801 (Android 10) and I2011 (Android 11). No later release notes list test devices. |
+| Android | Supported. All six native method channels are implemented in Kotlin. Builds target SDK 36 with `minSdk` from Flutter (`flutter.minSdkVersion`, 24, that is Android 7.0, with Flutter 3.41.2). The v0.1.11 and v0.1.12 release notes list the devices those releases were tested on: RMX1801 (Android 10) and I2011 (Android 11). No later release notes list test devices. |
 | iOS | Builds, but the Android-native features are unavailable: there is no background recording service, notification Stop, Picture-in-Picture, device status, gallery export or ride signing. Recording needs the app in the foreground with the screen on. No iOS build has been released. See [docs/platform-integration.md](docs/platform-integration.md#ios-current-state). |
 | Web, desktop | Not targeted. The repository has no web or desktop platform folders. |
 
@@ -35,14 +35,14 @@ The UI is portrait-only and always dark (Material 3). There is no localization; 
 
 ## Key features
 
-- **Segmented loop recording.** Segment length from 5 s to 10 min (default 5 min) and a loop of 6 to 48 unlocked segments per ride (default 24). When the loop is full, the ride's oldest unlocked segment is deleted. Locked segments and earlier rides are never deleted automatically. Resolution 480p to 4K, 24/30/60 FPS, optional audio, with automatic fallback to a lower resolution if the camera refuses the chosen one. The bitrate setting has no effect on Android, where the camera plugin ignores it. Recording does not start when free storage is too low for another segment, and a running ride stops and is saved when storage runs low.
+- **Segmented loop recording.** Segment length from 5 s to 10 min (default 5 min) and a loop of 6 to 48 unlocked segments per ride (default 24). When the loop is full, the ride's oldest unlocked segment is deleted. Locked segments are never deleted automatically, and earlier rides are not either unless the rider turns on the storage budget (Off, 4, 8, 16, 32 or 64 GB; default Off): with it on, the oldest unlocked rides are deleted while recording when all rides together exceed it, and locked rides are never deleted. Resolution 480p to 4K, 24/30/60 FPS, optional audio, with automatic fallback to a lower resolution if the camera refuses the chosen one. The bitrate setting has no effect on Android, where the camera plugin ignores it. Recording does not start when free storage is too low for another segment, and a running ride stops and is saved when storage runs low.
 - **Start preflight.** Every START runs a permission audit and a checklist (permissions, location services, camera readiness, media write access, plus warnings for the Android notification permission and battery-optimization exemption, a missing motion sensor, battery level and temperature).
 - **Live telemetry.** Speed, ride duration, distance, battery and temperature tiles on the recording screen (battery and temperature on Android only).
 - **Incident detection and locking.** While recording, gravity-removed acceleration at or above a sensitivity-dependent threshold (Low 4.5 g, Medium 3.5 g, High 2.8 g), sustained for at least 40 ms, locks the two previous segments and the current one. A LOCK button does the same manually.
 - **Background recording support (Android).** While recording, a foreground service with an ongoing notification, a Stop action and a wake lock runs, and the app enters Picture-in-Picture automatically when the rider leaves it. While that service runs, the camera is kept open when the screen turns off or the app leaves the foreground, so recording is designed to continue (not yet confirmed on a device). The screen is kept on while recording unless the rider turns that off (see the limitations above and [docs/features.md](docs/features.md#picture-in-picture-and-screen-off-recording)).
 - **Crash-safe ride files.** Once the first segment is saved, the ride's telemetry JSON is written as a checkpoint whenever a segment or lock is added and every 30 s, so a ride survives a crash or kill before STOP. A failed save can be retried.
 - **Blackout mode.** Hides the preview behind a black screen while recording continues; hold for 2 s to exit.
-- **Ride history and playback.** Rides grouped into Locked Clips and All Rides, plus video-only entries for videos without a ride file. Rides can be unlocked and deleted after a confirmation. Playback runs all segments as one timeline, marks missing segments and gaps on the seekbar, and shows a telemetry overlay, a speed graph with incident and lock markers, and a collapsible OpenStreetMap route map that loads tiles only after a one-time consent.
+- **Ride history and playback.** Rides grouped into Locked Clips and All Rides, plus video-only entries for videos without a ride file. Rides can be unlocked and deleted after a confirmation. On Android, "Import rides from an older version" copies the rides that v0.1.11 and v0.1.12 left in the public `Movies/MotoCam/Recordings` folder (readable by other apps, GPS routes included, and kept after uninstall) into private storage through the system folder picker, and then offers to delete the originals. Playback runs all segments as one timeline, marks missing segments and gaps on the seekbar, and shows a telemetry overlay, a speed graph with incident and lock markers, and a collapsible OpenStreetMap route map that loads tiles only after a one-time consent.
 - **Integrity checks.** Each ride's telemetry file carries a SHA-256 integrity check over its payload and every segment file. On Android the final save is also signed with a key that never leaves the phone's Android Keystore. The signature shows that the files were not changed by anyone without this app's key on this phone; it does not prove the footage is genuine (a rooted phone or a modified app can sign anything). A ride shows as signed only on the phone and install that recorded it: a copy on another phone shows only as data unmodified, a reinstall creates a new key (older rides then count as signed by another key), and iOS rides are not signed. Unsigned rides keep only the checksum, which detects accidental corruption and naive edits but which anyone who can rewrite the files can recompute. The rides list checks the ride data only and shows one of `INTEGRITY WARNING`, `SIMULATED GPS` (fixes from a mock location provider), `SIGNED ON THIS PHONE`, `DATA UNMODIFIED` or `UNVERIFIED`, plus `VIDEOS VERIFIED` or `VIDEO CHECK FAILED` once the ride's segments were checked. Separate badges mark segment paths outside the ride's folder, which are quarantined and not played (`QUARANTINED n`), missing segment files (`INCOMPLETE`) and rides kept only as a checkpoint (`RECOVERED (INCOMPLETE)`). Opening a ride hashes its segment files one at a time in the background, starting with the segment about to play; leaving the screen stops the check, and results are kept in a ride index cache (which also spares the list from re-reading unchanged ride files), so an unchanged segment is not hashed again. Segments that fail the check still play and are marked on the seekbar; "Check videos again" re-hashes them all.
 - **Private storage.** On Android, rides (videos and telemetry) are stored in the app's private internal storage (`files/MotoCam Recordings`): other apps cannot read them on any Android version, they are excluded from backup and device transfer, they are not reachable over USB or with a file manager (use the gallery export to get clips out), and they are deleted with the app, as before. Rides recorded by earlier builds in `Android/data/com.example.motocam/files` (or the old fallback folders) are moved there in the background whenever the app is not recording, with a progress banner and a summary; rides that do not fit in internal storage, or whose file names clash, stay in the old folder and remain listed.
 - **Gallery export (Android, opt-in).** Off by default. When the rider turns it on, locked segments are copied to the device gallery (`Movies/MotoCam/Recordings`) when recording stops. MotoCam never removes these copies. There is no manual export button.
@@ -128,6 +128,7 @@ lib/
 │   │   ├── app_permission_service.dart         Runtime permission audit
 │   │   ├── background_recording_service.dart   Android foreground-service bridge
 │   │   ├── device_status_service.dart          Battery, temperature and thermal status (Android)
+│   │   ├── legacy_recordings_access.dart       Folder picker and documents of the old public folder (Android)
 │   │   ├── pip_service.dart                    Picture-in-Picture bridge
 │   │   └── ride_signing_service.dart           Ride signing key channel and signed-ride registry (Android)
 │   ├── ride_file/
@@ -143,7 +144,8 @@ lib/
     │   ├── camera_init_status.dart             Camera init state and failure reasons
     │   ├── camera_provider.dart                Camera lifecycle, segments, locks, retention, gallery export
     │   ├── recording_retention.dart            Pure loop-retention, LOCKED badge and orphan-sidecar rules
-    │   └── recordings_migration.dart           Moves rides from the legacy roots into private storage
+    │   ├── recordings_migration.dart           Moves rides from the legacy roots into private storage
+    │   └── storage_budget.dart                 Storage budget: which whole rides to delete, oldest first
     ├── history/
     │   ├── models/
     │   │   ├── ride_history_loader.dart        Loads rides (and video-only rides) off the UI isolate, through the ride index
@@ -151,6 +153,9 @@ lib/
     │   │   ├── ride_record.dart                Ride model, integrity verification, quarantine, lock state
     │   │   └── segment_verifier.dart           Per-segment, cancellable video checks stored in the index
     │   ├── rides_list_screen.dart              Ride History list
+    │   ├── services/
+    │   │   ├── legacy_ride_import.dart         Import of rides from the old public folder
+    │   │   └── ride_deletion.dart              Shared ride deletion (files, ride index, signed-ride registry)
     │   ├── ride_playback_screen.dart           Multi-segment playback with telemetry
     │   └── widgets/
     │       ├── playback_controls.dart          Transport buttons and segment label
