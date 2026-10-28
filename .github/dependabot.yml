@@ -1,0 +1,14 @@
+version: 2
+updates:
+  # Dart/Flutter packages (pubspec.yaml / pubspec.lock). CI validates each PR
+  # with `flutter pub get --enforce-lockfile`.
+  - package-ecosystem: pub
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

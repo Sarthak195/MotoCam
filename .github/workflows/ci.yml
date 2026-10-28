@@ -2,24 +2,45 @@ name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Keep in step with the toolchain the project is developed on (.metadata,
+# pubspec.yaml environment) and bump together with the Gradle plugin versions.
+env:
+  FLUTTER_VERSION: 3.41.2
 
 jobs:
   validate:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
+
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
 
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
           channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
           cache: true
 
       - name: Install dependencies
-        run: flutter pub get
+        run: flutter pub get --enforce-lockfile
 
       - name: Run analyzer
         run: flutter analyze
@@ -29,4 +50,35 @@ jobs:
         run: ./scripts/release-security-precheck.ps1 -SkipTests -SkipAnalyze
 
       - name: Run tests
-        run: flutter test
+        run: flutter test --coverage
+
+      # Compiles the Kotlin bridges and Gradle scripts; a debug build needs no
+      # signing secrets.
+      - name: Build Android debug APK
+        run: flutter build apk --debug
+
+      # Last, so a formatting-only failure does not hide analyzer, test or
+      # build results.
+      - name: Check formatting
+        run: dart format --output=none --set-exit-if-changed lib test
+
+  ios:
+    runs-on: macos-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+
+      - name: Install dependencies
+        run: flutter pub get --enforce-lockfile
+
+      - name: Build iOS simulator app
+        run: flutter build ios --simulator --no-codesign
