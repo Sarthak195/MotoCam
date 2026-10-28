@@ -2,12 +2,24 @@
 <data-extraction-rules>
     <cloud-backup>
         <exclude domain="root" path="." />
-        <!-- getExternalFilesDir(): every recording and ride telemetry file. -->
+        <!-- getFilesDir() (getApplicationSupportDirectory()): every
+             recording and ride telemetry file (MotoCam Recordings), the
+             ride migration journal (ride_migration) and the ride index
+             (ride_index). -->
+        <exclude domain="file" path="." />
+        <!-- getExternalFilesDir(): the legacy recordings root of earlier
+             builds, until the migration has moved its rides. -->
         <exclude domain="external" path="." />
     </cloud-backup>
     <device-transfer>
         <exclude domain="root" path="." />
-        <!-- getExternalFilesDir(): every recording and ride telemetry file. -->
+        <!-- getFilesDir() (getApplicationSupportDirectory()): every
+             recording and ride telemetry file (MotoCam Recordings), the
+             ride migration journal (ride_migration) and the ride index
+             (ride_index). -->
+        <exclude domain="file" path="." />
+        <!-- getExternalFilesDir(): the legacy recordings root of earlier
+             builds, until the migration has moved its rides. -->
         <exclude domain="external" path="." />
     </device-transfer>
 </data-extraction-rules>

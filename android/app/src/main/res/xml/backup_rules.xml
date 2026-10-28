@@ -1,6 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <full-backup-content>
     <exclude domain="root" path="." />
-    <!-- getExternalFilesDir(): every recording and ride telemetry file. -->
+    <!-- getFilesDir() (getApplicationSupportDirectory()): every recording
+         and ride telemetry file (MotoCam Recordings), the ride migration
+         journal (ride_migration) and the ride index (ride_index). -->
+    <exclude domain="file" path="." />
+    <!-- getExternalFilesDir(): the legacy recordings root of earlier
+         builds, until the migration has moved its rides. -->
     <exclude domain="external" path="." />
 </full-backup-content>
