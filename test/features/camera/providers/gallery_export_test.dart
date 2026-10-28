@@ -14,6 +14,7 @@ final String _sep = Platform.pathSeparator;
 class _FakeNative {
   final List<String> calls = <String>[];
   final List<String> sources = <String>[];
+  final List<DateTime> queuedAts = <DateTime>[];
   final Map<String, List<String>> errors = <String, List<String>>{};
 
   /// Runs while the copy of a file "is made", before the answer.
@@ -22,8 +23,10 @@ class _FakeNative {
   Future<String?> call({
     required String sourcePath,
     required String displayName,
+    required DateTime queuedAt,
   }) async {
     calls.add(displayName);
+    queuedAts.add(queuedAt);
     sources.add(sourcePath);
     await during?.call(displayName);
     final queued = errors[displayName];
@@ -358,10 +361,13 @@ void main() {
     final store = GalleryLinkStore(storeFile);
     final queue = exporter(store: store);
     await queue.enqueue(<GalleryExportItem>[item('r1', old)]);
+    final queuedAt = (await store.read()).pending['r1|m.mp4']!.queuedAt;
     final run = await queue.drain();
     expect(run.exported, 1);
     expect(run.missing, 0);
     expect(native.sources, <String>[old.path, '${root.path}${_sep}m.mp4']);
+    // Both calls carry when the segment was queued (for reuseExisting).
+    expect(native.queuedAts, <DateTime>[queuedAt, queuedAt]);
     expect((await store.read()).links.keys, <String>['r1|m.mp4']);
   });
 

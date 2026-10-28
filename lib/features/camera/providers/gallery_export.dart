@@ -39,10 +39,13 @@ class GalleryExportItem {
 
 /// Copies the file at [sourcePath] to the gallery under [displayName] and
 /// returns the copy's content URI (the `exportVideoToGallery` call).
+/// [queuedAt] is when the segment was queued: only a copy added since then
+/// may be reused instead of copying again.
 typedef GalleryExportCall =
     Future<String?> Function({
       required String sourcePath,
       required String displayName,
+      required DateTime queuedAt,
     });
 
 /// Finds the file of a pending entry now, or returns `null` when it is gone.
@@ -369,6 +372,7 @@ class GalleryExporter {
           uri = await exportVideo(
             sourcePath: from,
             displayName: entry.fileName,
+            queuedAt: entry.queuedAt,
           );
         } on PlatformException catch (e) {
           sourceGone = e.code == 'SOURCE_NOT_FOUND';

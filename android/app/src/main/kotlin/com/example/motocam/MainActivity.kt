@@ -22,6 +22,7 @@ import android.provider.MediaStore
 import android.util.Log
 import android.util.Rational
 import android.view.WindowManager
+import androidx.annotation.RequiresApi
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.LifecycleRegistry
@@ -390,8 +391,12 @@ class MainActivity: FlutterActivity() {
                         val displayName = call.argument<String>("displayName")
                         val relativePath = call.argument<String>("relativePath") ?: "Movies/MotoCam/Videos"
                         // Optional (default false): link a finished copy of
-                        // the same name and size instead of copying again.
+                        // the same name and size instead of copying again
+                        // (API 29+ only).
                         val reuseExisting = call.argument<Boolean>("reuseExisting") ?: false
+                        // Optional (default 0, no limit): when the segment was
+                        // queued; only a copy added since then is reused.
+                        val queuedAtMs = call.argument<Number>("queuedAtMs")?.toLong() ?: 0L
 
                         if (sourcePath.isNullOrBlank() || displayName.isNullOrBlank()) {
                             result.error("INVALID_ARGS", "sourcePath and displayName are required", null)
@@ -418,8 +423,13 @@ class MainActivity: FlutterActivity() {
                                     return@Thread
                                 }
 
-                                val existingUri = if (reuseExisting) {
-                                    findExistingGalleryCopy(sourceFile, displayName, relativePath)
+                                // Below API 29 a file of the same name may be
+                                // the rider's own (an original kept after the
+                                // import), so it is never reused there.
+                                val existingUri = if (reuseExisting &&
+                                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
+                                ) {
+                                    findExistingGalleryCopy(sourceFile, displayName, relativePath, queuedAtMs)
                                 } else {
                                     null
                                 }
@@ -467,23 +477,36 @@ class MainActivity: FlutterActivity() {
                                         targetDir.mkdirs()
                                     }
 
-                                    // Never over another file: a name in use
-                                    // gets a numbered suffix.
-                                    val targetFile = uniqueTarget(targetDir, displayName)
+                                    // Written under a hidden name that is not a
+                                    // video name (the media scanner skips it)
+                                    // and renamed once complete, so a killed
+                                    // copy never shows in the gallery; one left
+                                    // by a killed process is deleted here.
+                                    val partFile = File(targetDir, ".$displayName.partial")
+                                    partFile.delete()
+                                    var targetFile: File? = null
                                     try {
                                         sourceFile.inputStream().use { inStream ->
-                                            FileOutputStream(targetFile).use { outStream ->
+                                            FileOutputStream(partFile).use { outStream ->
                                                 inStream.copyTo(outStream)
                                                 outStream.fd.sync()
                                             }
                                         }
+                                        // Never over another file: a name in use
+                                        // gets a numbered suffix.
+                                        val target = uniqueTarget(targetDir, displayName)
+                                        if (!partFile.renameTo(target)) {
+                                            throw IllegalStateException("Could not rename the copy")
+                                        }
+                                        targetFile = target
                                         // Only the public copy is scanned, never
                                         // the private source; the scan gives the
                                         // copy's content URI.
-                                        scanForUri(targetFile)
+                                        scanForUri(target)
                                             ?: throw IllegalStateException("Media scan gave no URI")
                                     } catch (e: Exception) {
-                                        targetFile.delete()
+                                        partFile.delete()
+                                        targetFile?.delete()
                                         throw e
                                     }
                                 }
@@ -506,42 +529,45 @@ class MainActivity: FlutterActivity() {
     /**
      * The content URI of a finished gallery copy of [source] named
      * [displayName] in [relativePath] with the same size (one a killed
-     * process made before Dart could record it), or null. On API 29+ the
-     * query sees only media this app inserted; below it, the public file is
-     * checked and scanned.
+     * process made before Dart could record it), or null. API 29+ only: the
+     * query sees only media this app inserted, and with [queuedAtMs] above
+     * zero only rows added since the segment was queued (never a recording
+     * an older version of the app wrote there).
      */
+    @RequiresApi(Build.VERSION_CODES.Q)
     private fun findExistingGalleryCopy(
         source: File,
         displayName: String,
         relativePath: String,
+        queuedAtMs: Long,
     ): String? {
         val size = source.length()
         return try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                val collection = MediaStore.Video.Media.EXTERNAL_CONTENT_URI
-                val folder = relativePath.trimEnd('/') + "/"
-                contentResolver.query(
-                    collection,
-                    arrayOf(MediaStore.Video.Media._ID, MediaStore.Video.Media.SIZE),
-                    "${MediaStore.Video.Media.DISPLAY_NAME}=? AND " +
-                        "${MediaStore.Video.Media.RELATIVE_PATH}=?",
-                    arrayOf(displayName, folder),
-                    null,
-                )?.use { cursor ->
-                    var found: String? = null
-                    while (found == null && cursor.moveToNext()) {
-                        if (cursor.getLong(1) == size) {
-                            found = ContentUris.withAppendedId(collection, cursor.getLong(0))
-                                .toString()
-                        }
+            val collection = MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+            val folder = relativePath.trimEnd('/') + "/"
+            var selection = "${MediaStore.Video.Media.DISPLAY_NAME}=? AND " +
+                "${MediaStore.Video.Media.RELATIVE_PATH}=?"
+            val args = mutableListOf(displayName, folder)
+            if (queuedAtMs > 0) {
+                // DATE_ADDED is in seconds.
+                selection += " AND ${MediaStore.Video.Media.DATE_ADDED}>=?"
+                args.add((queuedAtMs / 1000).toString())
+            }
+            contentResolver.query(
+                collection,
+                arrayOf(MediaStore.Video.Media._ID, MediaStore.Video.Media.SIZE),
+                selection,
+                args.toTypedArray(),
+                null,
+            )?.use { cursor ->
+                var found: String? = null
+                while (found == null && cursor.moveToNext()) {
+                    if (cursor.getLong(1) == size) {
+                        found = ContentUris.withAppendedId(collection, cursor.getLong(0))
+                            .toString()
                     }
-                    found
                 }
-            } else {
-                @Suppress("DEPRECATION")
-                val folder = File(Environment.getExternalStorageDirectory(), relativePath)
-                val target = File(folder, displayName)
-                if (target.isFile && target.length() == size) scanForUri(target) else null
+                found
             }
         } catch (e: Exception) {
             Log.w("MotoCam", "existing gallery copy lookup failed", e)

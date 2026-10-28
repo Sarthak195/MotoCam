@@ -2303,14 +2303,16 @@ class CameraProvider extends ChangeNotifier {
   Future<String?> _exportVideoToGallery({
     required String sourcePath,
     required String displayName,
+    required DateTime queuedAt,
   }) {
     return platform.invokeMethod<String>('exportVideoToGallery', {
       'sourcePath': sourcePath,
       'displayName': displayName,
       'relativePath': _galleryRelativePath,
       // A copy that a killed process already finished is linked, not made
-      // again.
+      // again (API 29+, and only one added since the segment was queued).
       'reuseExisting': true,
+      'queuedAtMs': queuedAt.millisecondsSinceEpoch,
     });
   }
 
