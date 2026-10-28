@@ -126,6 +126,19 @@ const int backgroundCaptureStallAllowanceBytes = 256 * 1024;
 /// background (a segment roll) that can count as evidence.
 const Duration backgroundCaptureMinNewFileWindow = Duration(seconds: 2);
 
+/// Shortest span, ending at the final probe, over which the in-progress
+/// file must still be growing. Several seconds long because the MP4 writer
+/// writes in bursts.
+const Duration backgroundCaptureRecentWindow = Duration(seconds: 5);
+
+/// Oldest sample, counted back from the final probe, that can start the
+/// recent-growth span. Older samples are dropped, so a span that would
+/// reach back to the start of a long background period never counts.
+const Duration backgroundCaptureRecentLookback = Duration(seconds: 10);
+
+/// Size of the observed file at one probe.
+typedef RecordingFileSizePoint = ({DateTime at, int sizeBytes});
+
 /// One probe of the newest in-progress recording file.
 @immutable
 class RecordingFileSample {
@@ -183,13 +196,15 @@ Future<RecordingFileSample?> newestRecordingFileIn(Directory directory) async {
 class RecordingFileObservation {
   /// Creates an observation of [path] that started with [firstSizeBytes] at
   /// [firstSeenAt] and was last seen with [latestSizeBytes] at
-  /// [latestSeenAt].
+  /// [latestSeenAt]. [recentPoints] are the probes of the last
+  /// [backgroundCaptureRecentLookback], oldest first.
   const RecordingFileObservation({
     required this.path,
     required this.firstSizeBytes,
     required this.firstSeenAt,
     required this.latestSizeBytes,
     required this.latestSeenAt,
+    this.recentPoints = const <RecordingFileSizePoint>[],
   });
 
   /// Starts an observation from a single sample taken at [at].
@@ -203,6 +218,9 @@ class RecordingFileObservation {
       firstSeenAt: at,
       latestSizeBytes: sample.sizeBytes,
       latestSeenAt: at,
+      recentPoints: List<RecordingFileSizePoint>.unmodifiable(
+        <RecordingFileSizePoint>[(at: at, sizeBytes: sample.sizeBytes)],
+      ),
     );
   }
 
@@ -221,6 +239,10 @@ class RecordingFileObservation {
   /// When the latest probe was taken.
   final DateTime latestSeenAt;
 
+  /// Probes taken at most [backgroundCaptureRecentLookback] before
+  /// [latestSeenAt], oldest first, including the latest one.
+  final List<RecordingFileSizePoint> recentPoints;
+
   /// This observation extended by [sample] taken at [at]; a sample of
   /// another file starts a new observation.
   RecordingFileObservation extendedWith(
@@ -230,12 +252,18 @@ class RecordingFileObservation {
     if (sample.path != path) {
       return RecordingFileObservation.first(sample, at);
     }
+    final oldest = at.subtract(backgroundCaptureRecentLookback);
     return RecordingFileObservation(
       path: path,
       firstSizeBytes: firstSizeBytes,
       firstSeenAt: firstSeenAt,
       latestSizeBytes: sample.sizeBytes,
       latestSeenAt: at,
+      recentPoints:
+          List<RecordingFileSizePoint>.unmodifiable(<RecordingFileSizePoint>[
+            ...recentPoints.where((point) => !point.at.isBefore(oldest)),
+            (at: at, sizeBytes: sample.sizeBytes),
+          ]),
     );
   }
 }
@@ -250,16 +278,28 @@ class RecordingFileObservation {
 ///   [minBytesPerSecond] per second observed plus [stallAllowanceBytes], or
 /// - [latest] is a newer file (a segment roll in the background) that was
 ///   observed for at least [minNewFileWindow] and grew by at least
-///   [minBytesPerSecond] per second in that time.
+///   [minBytesPerSecond] per second in that time,
 ///
-/// Anything else (no file, a probe that failed, too little growth) returns
-/// `false`, and the caller keeps the default stall recovery.
+/// and, in both cases, [latest] was still growing just before the return:
+/// from its newest probe taken between [minRecentWindow] and
+/// [maxRecentWindow] before the final probe, it grew by at least
+/// [minBytesPerSecond] per second. This catches a capture that stopped
+/// partway through the background period, whose total growth can still
+/// pass. A stall shorter than that span before the return is not caught.
+///
+/// Anything else (no file, a probe that failed, too little growth, no
+/// probe in the recent span) returns `false`, and the caller keeps the
+/// default stall recovery. Probes older than
+/// [backgroundCaptureRecentLookback] are not kept, so a [maxRecentWindow]
+/// longer than that finds nothing older.
 bool backgroundCaptureContinued({
   required RecordingFileObservation? initial,
   required RecordingFileObservation? latest,
   int minBytesPerSecond = backgroundCaptureMinBytesPerSecond,
   int stallAllowanceBytes = backgroundCaptureStallAllowanceBytes,
   Duration minNewFileWindow = backgroundCaptureMinNewFileWindow,
+  Duration minRecentWindow = backgroundCaptureRecentWindow,
+  Duration maxRecentWindow = backgroundCaptureRecentLookback,
 }) {
   if (initial == null || latest == null) {
     return false;
@@ -267,13 +307,30 @@ bool backgroundCaptureContinued({
   int requiredBytes(Duration window) =>
       (minBytesPerSecond * window.inMilliseconds) ~/ 1000;
 
+  bool grewRecently() {
+    RecordingFileSizePoint? reference;
+    for (final point in latest.recentPoints) {
+      final age = latest.latestSeenAt.difference(point.at);
+      if (age >= minRecentWindow && age <= maxRecentWindow) {
+        reference = point;
+      }
+    }
+    if (reference == null) {
+      return false;
+    }
+    final window = latest.latestSeenAt.difference(reference.at);
+    return latest.latestSizeBytes - reference.sizeBytes >=
+        requiredBytes(window);
+  }
+
   if (latest.path == initial.path) {
     final window = latest.latestSeenAt.difference(initial.firstSeenAt);
     if (window <= Duration.zero) {
       return false;
     }
     final growth = latest.latestSizeBytes - initial.firstSizeBytes;
-    return growth >= requiredBytes(window) + stallAllowanceBytes;
+    return growth >= requiredBytes(window) + stallAllowanceBytes &&
+        grewRecently();
   }
 
   final window = latest.latestSeenAt.difference(latest.firstSeenAt);
@@ -281,7 +338,7 @@ bool backgroundCaptureContinued({
     return false;
   }
   final growth = latest.latestSizeBytes - latest.firstSizeBytes;
-  return growth >= requiredBytes(window);
+  return growth >= requiredBytes(window) && grewRecently();
 }
 
 /// Watches the in-progress recording file while the app is in the

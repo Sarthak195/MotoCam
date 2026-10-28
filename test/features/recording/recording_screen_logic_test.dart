@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -302,21 +303,34 @@ void main() {
       int firstSize,
       int firstSecond,
       int latestSize,
-      int latestSecond,
-    ) {
+      int latestSecond, {
+      Map<int, int> recent = const <int, int>{},
+    }) {
       return RecordingFileObservation(
         path: path,
         firstSizeBytes: firstSize,
         firstSeenAt: t0.add(Duration(seconds: firstSecond)),
         latestSizeBytes: latestSize,
         latestSeenAt: t0.add(Duration(seconds: latestSecond)),
+        recentPoints: [
+          for (final entry in recent.entries)
+            (at: t0.add(Duration(seconds: entry.key)), sizeBytes: entry.value),
+          (at: t0.add(Duration(seconds: latestSecond)), sizeBytes: latestSize),
+        ],
       );
     }
 
     test('same file that kept growing counts as alive', () {
       final initial = obs('/c/REC1.mp4', 1000, 0, 1000, 0);
       // 60 s at about 1 MB/s.
-      final latest = obs('/c/REC1.mp4', 1000, 0, 60 * 1000 * 1000, 60);
+      final latest = obs(
+        '/c/REC1.mp4',
+        1000,
+        0,
+        60 * 1000 * 1000,
+        60,
+        recent: {54: 54 * 1000 * 1000, 55: 55 * 1000 * 1000},
+      );
       expect(
         backgroundCaptureContinued(initial: initial, latest: latest),
         isTrue,
@@ -335,8 +349,23 @@ void main() {
 
     test('the floor scales with the time in the background', () {
       final initial = obs('/c/REC1.mp4', 0, 0, 0, 0);
-      final justEnough = obs('/c/REC1.mp4', 0, 0, rate * 30 + allowance, 30);
-      final tooLittle = obs('/c/REC1.mp4', 0, 0, rate * 30 + allowance - 1, 30);
+      const enough = rate * 30 + allowance;
+      final justEnough = obs(
+        '/c/REC1.mp4',
+        0,
+        0,
+        enough,
+        30,
+        recent: {25: enough - rate * 5},
+      );
+      final tooLittle = obs(
+        '/c/REC1.mp4',
+        0,
+        0,
+        enough - 1,
+        30,
+        recent: {25: enough - 1 - rate * 5},
+      );
       expect(
         backgroundCaptureContinued(initial: initial, latest: justEnough),
         isTrue,
@@ -347,9 +376,82 @@ void main() {
       );
     });
 
+    test('a file that grew early and then stayed flat is not alive', () {
+      final initial = obs('/c/REC1.mp4', 0, 0, 0, 0);
+      // About 200 MB in the first 3 minutes, then nothing for a minute.
+      const size = 200 * 1000 * 1000;
+      final latest = obs(
+        '/c/REC1.mp4',
+        0,
+        0,
+        size,
+        240,
+        recent: {for (var s = 230; s < 240; s++) s: size},
+      );
+      expect(
+        backgroundCaptureContinued(initial: initial, latest: latest),
+        isFalse,
+      );
+    });
+
+    test('growth only right after the leave is not alive', () {
+      // The writer flushed more than the allowance when capture stopped.
+      final initial = obs('/c/REC1.mp4', 5000000, 0, 5000000, 0);
+      const size = 5000000 + 2 * 1000 * 1000;
+      final latest = obs(
+        '/c/REC1.mp4',
+        5000000,
+        0,
+        size,
+        20,
+        recent: {for (var s = 10; s < 20; s++) s: size},
+      );
+      expect(
+        backgroundCaptureContinued(initial: initial, latest: latest),
+        isFalse,
+      );
+    });
+
+    test('the recent span must be long enough and within the lookback', () {
+      final initial = obs('/c/REC1.mp4', 0, 0, 0, 0);
+      // Only probes too close to the return.
+      final tooRecent = obs(
+        '/c/REC1.mp4',
+        0,
+        0,
+        60 * 1000 * 1000,
+        60,
+        recent: {57: 57 * 1000 * 1000, 59: 59 * 1000 * 1000},
+      );
+      // Only a probe from before the lookback (no ticks for half a minute).
+      final tooOld = obs(
+        '/c/REC1.mp4',
+        0,
+        0,
+        60 * 1000 * 1000,
+        60,
+        recent: {30: 30 * 1000 * 1000},
+      );
+      expect(
+        backgroundCaptureContinued(initial: initial, latest: tooRecent),
+        isFalse,
+      );
+      expect(
+        backgroundCaptureContinued(initial: initial, latest: tooOld),
+        isFalse,
+      );
+    });
+
     test('a roll in the background: a newer file that grows is alive', () {
       final initial = obs('/c/REC1.mp4', 1000, 0, 30000000, 40);
-      final latest = obs('/c/REC2.mp4', 500000, 41, 20000000, 60);
+      final latest = obs(
+        '/c/REC2.mp4',
+        500000,
+        41,
+        20000000,
+        60,
+        recent: {55: 15000000},
+      );
       expect(
         backgroundCaptureContinued(initial: initial, latest: latest),
         isTrue,
@@ -359,7 +461,24 @@ void main() {
     test('a roll in the background: a newer file that stays empty is not '
         'alive', () {
       final initial = obs('/c/REC1.mp4', 1000, 0, 1000, 40);
-      final latest = obs('/c/REC2.mp4', 0, 41, 0, 60);
+      final latest = obs('/c/REC2.mp4', 0, 41, 0, 60, recent: {55: 0});
+      expect(
+        backgroundCaptureContinued(initial: initial, latest: latest),
+        isFalse,
+      );
+    });
+
+    test('a roll in the background: a newer file that grew and then stopped '
+        'is not alive', () {
+      final initial = obs('/c/REC1.mp4', 1000, 0, 30000000, 40);
+      final latest = obs(
+        '/c/REC2.mp4',
+        500000,
+        41,
+        20000000,
+        60,
+        recent: {for (var s = 50; s < 60; s++) s: 20000000},
+      );
       expect(
         backgroundCaptureContinued(initial: initial, latest: latest),
         isFalse,
@@ -379,6 +498,51 @@ void main() {
       final some = obs('/c/REC1.mp4', 0, 0, 90000000, 60);
       expect(backgroundCaptureContinued(initial: null, latest: some), isFalse);
       expect(backgroundCaptureContinued(initial: some, latest: null), isFalse);
+    });
+  });
+
+  group('RecordingFileObservation', () {
+    final t0 = DateTime(2026, 1, 1, 12);
+    final modified = DateTime(2026, 1, 1, 12);
+
+    RecordingFileSample sample(String path, int size) =>
+        RecordingFileSample(path: path, sizeBytes: size, modified: modified);
+
+    test('keeps only the probes of the recent lookback', () {
+      var observation = RecordingFileObservation.first(
+        sample('/c/REC1.mp4', 0),
+        t0,
+      );
+      for (var s = 1; s <= 30; s++) {
+        observation = observation.extendedWith(
+          sample('/c/REC1.mp4', s * 1000),
+          t0.add(Duration(seconds: s)),
+        );
+      }
+      expect(observation.firstSizeBytes, 0);
+      expect(
+        observation.recentPoints.first.at,
+        observation.latestSeenAt.subtract(backgroundCaptureRecentLookback),
+      );
+      expect(observation.recentPoints.last.sizeBytes, 30000);
+      expect(
+        observation.recentPoints,
+        hasLength(backgroundCaptureRecentLookback.inSeconds + 1),
+      );
+    });
+
+    test('a sample of another file starts over', () {
+      final observation =
+          RecordingFileObservation.first(
+            sample('/c/REC1.mp4', 5),
+            t0,
+          ).extendedWith(
+            sample('/c/REC2.mp4', 7),
+            t0.add(const Duration(seconds: 1)),
+          );
+      expect(observation.path, '/c/REC2.mp4');
+      expect(observation.firstSizeBytes, 7);
+      expect(observation.recentPoints, hasLength(1));
     });
   });
 
@@ -404,22 +568,67 @@ void main() {
       };
     }
 
+    /// Runs one background period of [seconds] s with a probe each second,
+    /// as the 1 s timer does, the file being [fileAt] at each second.
+    Future<bool> runTicks(
+      int seconds,
+      RecordingFileSample Function(int second) fileAt,
+    ) async {
+      var second = 0;
+      final monitor = BackgroundCaptureMonitor(
+        probe: () async => fileAt(second),
+      );
+      await monitor.start(t0);
+      expect(monitor.isObserving, isTrue);
+      for (second = 1; second < seconds; second++) {
+        await monitor.sample(t0.add(Duration(seconds: second)));
+      }
+      final continued = await monitor.finish(
+        t0.add(Duration(seconds: seconds)),
+      );
+      expect(monitor.isObserving, isFalse);
+      return continued;
+    }
+
     test('alive: the same file grew through the background period', () async {
+      final continued = await runTicks(
+        60,
+        (s) => sample('/c/REC1.mp4', 1000 + s * 1000000),
+      );
+      expect(continued, isTrue);
+    });
+
+    test('stalled late: the file grew early, then stayed flat', () async {
+      final continued = await runTicks(
+        240,
+        (s) => sample('/c/REC1.mp4', math.min(s, 180) * 1000000),
+      );
+      expect(continued, isFalse);
+    });
+
+    test('roll during the background: a newer file that grows through the '
+        'return is alive', () async {
+      final continued = await runTicks(
+        60,
+        (s) => s < 35
+            ? sample('/c/REC1.mp4', s * 1000000)
+            : sample('/c/REC2.mp4', (s - 35) * 1000000),
+      );
+      expect(continued, isTrue);
+    });
+
+    test('no ticks while away: the result is unknown', () async {
       final monitor = BackgroundCaptureMonitor(
         probe: probeOf([
           sample('/c/REC1.mp4', 1000),
-          sample('/c/REC1.mp4', 30000000),
           sample('/c/REC1.mp4', 60000000),
         ]),
       );
       await monitor.start(t0);
-      expect(monitor.isObserving, isTrue);
-      await monitor.sample(t0.add(const Duration(seconds: 30)));
-      final continued = await monitor.finish(
-        t0.add(const Duration(seconds: 60)),
+      expect(
+        await monitor.finish(t0.add(const Duration(seconds: 60))),
+        isFalse,
       );
-      expect(continued, isTrue);
-      expect(monitor.isObserving, isFalse);
     });
 
     test('stalled: the file stopped growing', () async {
@@ -438,19 +647,8 @@ void main() {
       );
     });
 
-    test('roll during the background: the new file is judged on its own '
-        'growth', () async {
-      final alive = BackgroundCaptureMonitor(
-        probe: probeOf([
-          sample('/c/REC1.mp4', 1000),
-          sample('/c/REC2.mp4', 100000),
-          sample('/c/REC2.mp4', 25000000),
-        ]),
-      );
-      await alive.start(t0);
-      await alive.sample(t0.add(const Duration(seconds: 35)));
-      expect(await alive.finish(t0.add(const Duration(seconds: 60))), isTrue);
-
+    test('roll during the background: a newer file that stays empty is not '
+        'alive', () async {
       final stalled = BackgroundCaptureMonitor(
         probe: probeOf([
           sample('/c/REC1.mp4', 1000),
@@ -549,7 +747,8 @@ void main() {
         },
       );
       unawaited(monitor.start(t0));
-      final result = monitor.finish(t0.add(const Duration(seconds: 60)));
+      // A short period: the first probe also starts the recent span.
+      final result = monitor.finish(t0.add(const Duration(seconds: 8)));
       gate.complete();
       expect(await result, isTrue);
     });
