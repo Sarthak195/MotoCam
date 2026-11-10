@@ -95,7 +95,7 @@ class BackgroundRecordingService : Service() {
     // recording one (and its Stop action) again.
     private var isStopRequested = false
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val stopRequestTimeout = Runnable { tearDown() }
+    private val stopRequestTimeout = Runnable { tearDown("stopRequestTimeout") }
 
     private val openAppPendingIntent: PendingIntent by lazy {
         val launchIntent =
@@ -143,20 +143,19 @@ class BackgroundRecordingService : Service() {
                 try {
                     val notification = buildNotification(elapsedMs)
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                        startForeground(
-                            NOTIFICATION_ID,
-                            notification,
-                            grantedForegroundServiceTypes(this),
-                        )
+                        val types = grantedForegroundServiceTypes(this)
+                        startForeground(NOTIFICATION_ID, notification, types)
+                        Log.i(TAG, "F004 service START token=$holdToken types=$types")
                     } else {
                         startForeground(NOTIFICATION_ID, notification)
+                        Log.i(TAG, "F004 service START token=$holdToken")
                     }
                     isForegroundActive = true
                 } catch (e: Exception) {
                     // Last resort: MainActivity only starts the service when a
                     // permitted type exists, so this should not happen.
                     Log.e(TAG, "startForeground failed", e)
-                    tearDown()
+                    tearDown("startForegroundFailed")
                 }
             }
             ACTION_UPDATE -> {
@@ -175,11 +174,11 @@ class BackgroundRecordingService : Service() {
                 manager.notify(NOTIFICATION_ID, buildNotification(elapsedMs))
             }
             ACTION_STOP -> {
-                tearDown()
+                tearDown("ACTION_STOP")
             }
             ACTION_STOP_FROM_NOTIFICATION -> {
                 if (!isForegroundActive) {
-                    tearDown()
+                    tearDown("notificationStopNotForeground")
                     return START_NOT_STICKY
                 }
                 // Only request the stop. The foreground service and wake lock
@@ -208,11 +207,13 @@ class BackgroundRecordingService : Service() {
 
     override fun onTaskRemoved(rootIntent: Intent?) {
         // The activity, and with it the Flutter engine and camera, is gone.
-        tearDown()
+        tearDown("onTaskRemoved")
         super.onTaskRemoved(rootIntent)
     }
 
-    private fun tearDown() {
+    // [via] only labels the F004 log line.
+    private fun tearDown(via: String) {
+        Log.i(TAG, "F004 service stop token=$holdToken via=$via")
         mainHandler.removeCallbacks(stopRequestTimeout)
         releaseWakeLockIfHeld()
         isForegroundActive = false

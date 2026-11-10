@@ -83,14 +83,35 @@ class MainActivity: FlutterActivity() {
     // not drop below STARTED, so CameraX keeps the camera open with the
     // screen off. ON_DESTROY is always forwarded, so the hold never outlives
     // the activity. FlutterActivity dispatches its own events to its private
-    // registry, so only external callers see the mirror: the engine's
-    // plugin binding (FlutterActivityAndFragmentDelegate passes
-    // host.getLifecycle() to every plugin) and CameraX through the camera
-    // plugin. Of the app's plugins only camera_android_camerax observes the
-    // activity lifecycle. This relies on the camera plugin binding to the
-    // activity lifecycle: re-check it on every camera plugin upgrade.
+    // registry; the mirror is what the engine's plugin binding
+    // (FlutterActivityAndFragmentDelegate passes host.getLifecycle() to
+    // every plugin) and CameraX, through the camera plugin, see. Of the
+    // app's plugins only camera_android_camerax observes the activity
+    // lifecycle. This relies on the camera plugin binding to the activity
+    // lifecycle: re-check it on every camera plugin upgrade.
+    //
+    // Only syncRecordingLifecycle may move the mirror. AndroidX
+    // lifecycle-process (its ProcessLifecycleInitializer is merged into the
+    // manifest) attaches ReportFragment to every activity, and on API 29+
+    // ReportFragment calls handleLifecycleEvent on activity.getLifecycle()
+    // whenever that is a LifecycleRegistry. That pushed ON_STOP into the
+    // mirror at screen off before FlutterActivity's onStop reached
+    // syncRecordingLifecycle, so CameraX detached every use case and the
+    // clip had no video while the screen was off (phone check 2026-11-10,
+    // Android 13). The mirror therefore logs and ignores
+    // handleLifecycleEvent; syncRecordingLifecycle moves it through
+    // currentState, which does not go through handleLifecycleEvent.
     // Everything here runs on the main thread.
-    private val recordingLifecycle = LifecycleRegistry(this)
+    private val recordingLifecycle = object : LifecycleRegistry(this@MainActivity) {
+        override fun handleLifecycleEvent(event: Lifecycle.Event) {
+            Log.i(
+                "MotoCam",
+                "F004 mirror ignored external $event (mirror=$currentState " +
+                    "real=${realLifecycleState()} engaged=$isCameraHoldEngaged " +
+                    "from ${externalCaller()})",
+            )
+        }
+    }
     private var isCameraHoldEngaged = false
 
     // Token of the engaged hold, sent with ACTION_START and echoed by the
@@ -122,37 +143,63 @@ class MainActivity: FlutterActivity() {
      */
     private fun syncRecordingLifecycle() {
         val real = super.lifecycle.currentState
+        val mirror = recordingLifecycle.currentState
         val target = if (
             isCameraHoldEngaged &&
             real == Lifecycle.State.CREATED &&
-            recordingLifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)
+            mirror.isAtLeast(Lifecycle.State.STARTED)
         ) {
             Lifecycle.State.STARTED
         } else {
             real
         }
-        if (recordingLifecycle.currentState != target) {
+        if (mirror != target) {
             recordingLifecycle.currentState = target
+            Log.i("MotoCam", "F004 mirror $mirror -> $target (real=$real engaged=$isCameraHoldEngaged)")
+        } else if (target != real) {
+            Log.i("MotoCam", "F004 hold kept $target (real=$real)")
         }
     }
+
+    // FlutterActivity's own lifecycle state, for the F004 log lines.
+    private fun realLifecycleState(): Lifecycle.State = super.lifecycle.currentState
+
+    // The two frames above the mirror's handleLifecycleEvent (short class
+    // and method names), so the F004 log line names who tried to drive it.
+    private fun externalCaller(): String =
+        Throwable().stackTrace
+            .drop(2)
+            .take(2)
+            .joinToString(" <- ") { "${it.className.substringAfterLast('.')}.${it.methodName}" }
 
     private fun engageCameraHold(token: Long) {
         cameraHoldToken = token
         isCameraHoldEngaged = true
+        Log.i(
+            "MotoCam",
+            "F004 hold engaged token=$token real=${realLifecycleState()} " +
+                "mirror=${recordingLifecycle.currentState}",
+        )
         syncRecordingLifecycle()
     }
 
     /**
      * Releases the hold. When the activity is stopped (screen off, app in
      * the background) the mirrored lifecycle falls to CREATED and CameraX
-     * closes the camera.
+     * closes the camera. [reason] only labels the F004 log line.
      */
-    private fun releaseCameraHold() {
+    private fun releaseCameraHold(reason: String) {
+        val token = cameraHoldToken
         cameraHoldToken = 0L
         if (!isCameraHoldEngaged) {
             return
         }
         isCameraHoldEngaged = false
+        Log.i(
+            "MotoCam",
+            "F004 hold released reason=$reason token=$token real=${realLifecycleState()} " +
+                "mirror=${recordingLifecycle.currentState}",
+        )
         syncRecordingLifecycle()
     }
 
@@ -181,9 +228,10 @@ class MainActivity: FlutterActivity() {
                         BackgroundRecordingService.EXTRA_HOLD_TOKEN,
                         0L,
                     )
+                    Log.i("MotoCam", "F004 FOREGROUND_STOPPED token=$token current=$cameraHoldToken")
                     if (token != 0L && token == cameraHoldToken) {
                         isForegroundServiceStarted = false
-                        releaseCameraHold()
+                        releaseCameraHold("foregroundStopped")
                         if (isRecordingActive) {
                             try {
                                 backgroundRecordingMethodChannel
@@ -301,7 +349,7 @@ class MainActivity: FlutterActivity() {
                         isForegroundServiceStarted = false
                         keepScreenOnRequested = false
                         applyKeepScreenOn()
-                        releaseCameraHold()
+                        releaseCameraHold("stopForegroundRecording")
                         stopBackgroundRecordingService()
                         result.success(true)
                     }
@@ -309,7 +357,7 @@ class MainActivity: FlutterActivity() {
                         // Capture has stopped; the service and wake lock stay
                         // up until stopForegroundRecording, while the ride is
                         // saved, but the camera no longer needs to stay open.
-                        releaseCameraHold()
+                        releaseCameraHold("captureStopped")
                         result.success(true)
                     }
                     "setKeepScreenOn" -> {
@@ -772,7 +820,7 @@ class MainActivity: FlutterActivity() {
         isRecordingActive = false
         keepScreenOnRequested = false
         applyKeepScreenOn()
-        releaseCameraHold()
+        releaseCameraHold("onDestroy")
         if (isForegroundServiceStarted) {
             isForegroundServiceStarted = false
             stopBackgroundRecordingService()
