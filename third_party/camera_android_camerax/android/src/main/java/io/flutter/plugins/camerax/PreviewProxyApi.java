@@ -34,6 +34,30 @@ class PreviewProxyApi extends PigeonApiPreview {
     super(pigeonRegistrar);
   }
 
+  /**
+   * MotoCam patch: releases every SurfaceProducer handed to a Preview. The plugin calls this when it
+   * detaches from the engine, which happens while FlutterJNI is still attached. A camera frame that
+   * was already in flight then reaches a released producer, which closes the image and returns,
+   * instead of asking a detached engine for a frame (the "FlutterJNI is not attached to native"
+   * crash seen when MotoCam was swiped from Recents while recording).
+   *
+   * @return how many producers were released
+   */
+  int releaseAllSurfaceProducers() {
+    int released = 0;
+    for (TextureRegistry.SurfaceProducer surfaceProducer : surfaceProducers.values()) {
+      try {
+        surfaceProducer.release();
+        released++;
+      } catch (RuntimeException e) {
+        // Keep going: the remaining producers and the plugin teardown still have to run.
+        android.util.Log.w("MotoCamCameraX", "Preview surface release failed: " + e);
+      }
+    }
+    surfaceProducers.clear();
+    return released;
+  }
+
   @NonNull
   @Override
   public ProxyApiRegistrar getPigeonRegistrar() {

@@ -38,6 +38,11 @@ public final class CameraAndroidCameraxPlugin implements FlutterPlugin, Activity
   @Override
   public void onDetachedFromEngine(@NonNull FlutterPluginBinding binding) {
     if (proxyApiRegistrar != null) {
+      // MotoCam patch: release the preview surfaces first, while FlutterJNI is still attached, so
+      // camera frames still in flight are dropped (see PreviewProxyApi#releaseAllSurfaceProducers).
+      final int released = proxyApiRegistrar.releasePreviewSurfaceProducers();
+      android.util.Log.i(
+          "MotoCamCameraX", "Released " + released + " preview surface(s) on engine detach");
       proxyApiRegistrar.setIgnoreCallsToDart(true);
       proxyApiRegistrar.tearDown();
       proxyApiRegistrar.getInstanceManager().stopFinalizationListener();

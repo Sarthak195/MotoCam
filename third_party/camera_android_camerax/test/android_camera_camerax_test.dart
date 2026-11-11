@@ -3299,6 +3299,90 @@ void main() {
       },
     );
 
+    // MotoCam patch: keepVideoCaptureBoundOnNextStop (segment rolls).
+    test(
+      'VideoCapture stays bound when keepVideoCaptureBoundOnNextStop is set, '
+      'and the flag is cleared by that stop',
+      () async {
+        final camera = AndroidCameraCameraX();
+        final recording = MockRecording();
+        final processCameraProvider = MockProcessCameraProvider();
+        final videoCapture = MockVideoCapture();
+        const videoOutputPath = '/test/output/path';
+
+        camera.processCameraProvider = processCameraProvider;
+        camera.recording = recording;
+        camera.videoCapture = videoCapture;
+        camera.videoOutputPath = videoOutputPath;
+        camera.keepVideoCaptureBoundOnNextStop = true;
+
+        when(
+          camera.processCameraProvider!.isBound(videoCapture),
+        ).thenAnswer((_) async => true);
+
+        AndroidCameraCameraX.videoRecordingEventStreamController.add(
+          VideoRecordEventFinalize.pigeon_detached(),
+        );
+
+        final XFile file = await camera.stopVideoRecording(90);
+        expect(file.path, videoOutputPath);
+        verifyNever(processCameraProvider.unbind(<UseCase>[videoCapture]));
+        expect(camera.keepVideoCaptureBoundOnNextStop, isFalse);
+
+        verify(recording.close());
+        verifyNoMoreInteractions(recording);
+      },
+    );
+
+    test(
+      'keepVideoCaptureBoundOnNextStop applies to one stop only',
+      () async {
+        final camera = AndroidCameraCameraX();
+        final processCameraProvider = MockProcessCameraProvider();
+        final videoCapture = MockVideoCapture();
+        const videoOutputPath = '/test/output/path';
+
+        camera.processCameraProvider = processCameraProvider;
+        camera.videoCapture = videoCapture;
+        camera.videoOutputPath = videoOutputPath;
+        when(
+          camera.processCameraProvider!.isBound(videoCapture),
+        ).thenAnswer((_) async => true);
+
+        // First stop: a segment roll, VideoCapture stays bound.
+        camera.recording = MockRecording();
+        camera.keepVideoCaptureBoundOnNextStop = true;
+        AndroidCameraCameraX.videoRecordingEventStreamController.add(
+          VideoRecordEventFinalize.pigeon_detached(),
+        );
+        await camera.stopVideoRecording(90);
+        verifyNever(processCameraProvider.unbind(<UseCase>[videoCapture]));
+
+        // Second stop without the flag: upstream behaviour, VideoCapture is unbound.
+        camera.recording = MockRecording();
+        camera.videoOutputPath = videoOutputPath;
+        AndroidCameraCameraX.videoRecordingEventStreamController.add(
+          VideoRecordEventFinalize.pigeon_detached(),
+        );
+        await camera.stopVideoRecording(90);
+        verify(processCameraProvider.unbind(<UseCase>[videoCapture])).called(1);
+      },
+    );
+
+    test(
+      'keepVideoCaptureBoundOnNextStop is cleared even when the stop throws',
+      () async {
+        final camera = AndroidCameraCameraX();
+        camera.recording = null;
+        camera.keepVideoCaptureBoundOnNextStop = true;
+
+        await expectLater(() async {
+          await camera.stopVideoRecording(0);
+        }, throwsA(isA<CameraException>()));
+        expect(camera.keepVideoCaptureBoundOnNextStop, isFalse);
+      },
+    );
+
     test('setDescriptionWhileRecording changes the camera description', () async {
       final camera = AndroidCameraCameraX();
       final mockRecording = MockRecording();

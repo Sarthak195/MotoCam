@@ -14,6 +14,7 @@ import 'camera_init_status.dart';
 import 'gallery_export.dart';
 import 'recording_retention.dart';
 import 'recordings_migration.dart';
+import 'segment_roll_binding.dart';
 import 'storage_budget.dart';
 import '../../history/models/ride_index.dart';
 import '../../history/models/ride_record.dart';
@@ -1738,7 +1739,7 @@ class CameraProvider extends ChangeNotifier {
       _log(
         'Rolling recording segment after ${_segmentDuration.inSeconds} seconds',
       );
-      await _cycleSegment();
+      await _cycleSegment(keepVideoStreamBound: true);
       _consecutiveRollStopFailures = 0;
     } catch (e) {
       _logError('Error while rolling segment: $e');
@@ -1771,7 +1772,11 @@ class CameraProvider extends ChangeNotifier {
   // Stops the current segment, restarts recording immediately, then
   // registers the stopped file while the next segment records. Returns
   // whether recording was restarted. Throws when the stop itself fails.
-  Future<bool> _cycleSegment() async {
+  //
+  // keepVideoStreamBound: only the timed roll passes true. It keeps CameraX's
+  // video stream bound across this one stop so the next file starts without
+  // a camera session rebuild. Stall recovery keeps the full rebuild on purpose.
+  Future<bool> _cycleSegment({bool keepVideoStreamBound = false}) async {
     final controller = _controller!;
 
     // Checked before the stop so the platform call does not widen the gap
@@ -1784,6 +1789,11 @@ class CameraProvider extends ChangeNotifier {
     final stoppedSequence = _activeSegmentSequence;
     final stoppedStartMs = _currentSegmentStartMs;
 
+    // Set right before the stop (no await in between), and only when this
+    // roll will restart recording at once.
+    if (keepVideoStreamBound && hasRoom && !_isStoppingRecording) {
+      keepVideoStreamBoundForNextStop();
+    }
     final file = await controller.stopVideoRecording();
     final stoppedEndMs = _elapsedRideMs();
     final stopElapsedMs = DateTime.now()

@@ -223,6 +223,11 @@ public class ProxyApiRegistrar extends CameraXLibraryPigeonProxyApiRegistrar {
     return new DeviceOrientationManagerProxyApi(this);
   }
 
+  /** MotoCam patch: see {@link PreviewProxyApi#releaseAllSurfaceProducers()}. */
+  public int releasePreviewSurfaceProducers() {
+    return previewProxyApi == null ? 0 : previewProxyApi.releaseAllSurfaceProducers();
+  }
+
   @NonNull
   @Override
   public PigeonApiPreview getPigeonApiPreview() {

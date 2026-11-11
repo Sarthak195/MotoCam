@@ -9,6 +9,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.reset;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
@@ -98,6 +99,37 @@ public class PreviewTest {
 
     assertEquals(textureId, api.setSurfaceProvider(instance, systemServicesManager));
     verify(instance).setSurfaceProvider(any(Preview.SurfaceProvider.class));
+  }
+
+  // MotoCam patch: the preview surfaces are released before the engine detaches.
+  @Test
+  public void releaseAllSurfaceProducers_releasesEveryProducerOnce() {
+    final TextureRegistry mockTextureRegistry = mock(TextureRegistry.class);
+    final TextureRegistry.SurfaceProducer mockSurfaceProducer =
+        mock(TextureRegistry.SurfaceProducer.class);
+    when(mockSurfaceProducer.id()).thenReturn(0L);
+    when(mockTextureRegistry.createSurfaceProducer()).thenReturn(mockSurfaceProducer);
+    final TestProxyApiRegistrar registrar =
+        new TestProxyApiRegistrar() {
+          @NonNull
+          @Override
+          TextureRegistry getTextureRegistry() {
+            return mockTextureRegistry;
+          }
+        };
+    final PigeonApiPreview api = registrar.getPigeonApiPreview();
+    api.setSurfaceProvider(mock(Preview.class), mock(SystemServicesManager.class));
+
+    assertEquals(1, registrar.releasePreviewSurfaceProducers());
+    verify(mockSurfaceProducer).release();
+    // A second detach finds nothing left to release.
+    assertEquals(0, registrar.releasePreviewSurfaceProducers());
+    verify(mockSurfaceProducer, times(1)).release();
+  }
+
+  @Test
+  public void releasePreviewSurfaceProducers_withoutPreviewApi_returnsZero() {
+    assertEquals(0, new TestProxyApiRegistrar().releasePreviewSurfaceProducers());
   }
 
   @Test

@@ -126,6 +126,17 @@ class AndroidCameraCameraX extends CameraPlatform {
 
   bool _previewIsPaused = false;
 
+  /// MotoCam patch (segment rolls): when true, the next [stopVideoRecording]
+  /// leaves [videoCapture] bound, so the following [startVideoCapturing] finds
+  /// it bound and skips the bind. CameraX then keeps its capture session and
+  /// video encoder, instead of rebuilding both for every new file.
+  ///
+  /// Read and cleared at the start of that one stop, whatever its outcome, so
+  /// it never applies to a later stop. Defaults to false (upstream behaviour:
+  /// every stop unbinds [videoCapture]). The app sets it only right before a
+  /// timed segment roll that restarts recording at once.
+  bool keepVideoCaptureBoundOnNextStop = false;
+
   /// The prefix used to create the filename for video recording files.
   @visibleForTesting
   final String videoPrefix = 'REC';
@@ -1222,6 +1233,10 @@ class AndroidCameraCameraX extends CameraPlatform {
   /// so starting a new recording is possible.
   @override
   Future<XFile> stopVideoRecording(int cameraId) async {
+    // MotoCam patch: one stop only, see [keepVideoCaptureBoundOnNextStop].
+    final bool keepVideoCaptureBound = keepVideoCaptureBoundOnNextStop;
+    keepVideoCaptureBoundOnNextStop = false;
+
     if (recording == null) {
       throw CameraException(
         'videoRecordingFailed',
@@ -1249,7 +1264,9 @@ class AndroidCameraCameraX extends CameraPlatform {
       );
     }
 
-    await _unbindUseCaseFromLifecycle(videoCapture!);
+    if (!keepVideoCaptureBound) {
+      await _unbindUseCaseFromLifecycle(videoCapture!);
+    }
     final videoFile = XFile(videoOutputPath!);
     cameraEventStreamController.add(
       VideoRecordedEvent(cameraId, videoFile, /* duration */ null),
