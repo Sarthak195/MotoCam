@@ -42,12 +42,11 @@ packages:
     source: hosted
     version: "0.12.0+2"
   camera_android_camerax:
-    dependency: transitive
+    dependency: "direct overridden"
     description:
-      name: camera_android_camerax
-      sha256: b5064cf25a2787d122d0bf12e77c7b1033a2b983d0730e3091f770ee376efde5
-      url: "https://pub.dev"
-    source: hosted
+      path: "third_party/camera_android_camerax"
+      relative: true
+    source: path
     version: "0.7.2"
   camera_avfoundation:
     dependency: transitive

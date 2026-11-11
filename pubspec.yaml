@@ -49,5 +49,12 @@ dev_dependencies:
     sdk: flutter
   flutter_lints: ^6.0.0
 
+# camera_android_camerax 0.7.2 is vendored with MotoCam patches (segment rolls
+# keep the video stream bound; the preview surface is released before the engine
+# detaches). See third_party/camera_android_camerax/MOTOCAM_PATCHES.md.
+dependency_overrides:
+  camera_android_camerax:
+    path: third_party/camera_android_camerax
+
 flutter:
   uses-material-design: true
