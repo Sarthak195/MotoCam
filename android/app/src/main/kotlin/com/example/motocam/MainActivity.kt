@@ -100,15 +100,25 @@ class MainActivity: FlutterActivity() {
     // clip had no video while the screen was off (phone check 2026-11-10,
     // Android 13). The mirror therefore logs and ignores
     // handleLifecycleEvent; syncRecordingLifecycle moves it through
-    // currentState, which does not go through handleLifecycleEvent.
+    // currentState, which does not go through handleLifecycleEvent. Nothing
+    // outside this class calls setCurrentState or markState on it today
+    // (dex check of the 2026-11-10 build): re-check that on every
+    // androidx.lifecycle, Flutter or camera plugin upgrade.
     // Everything here runs on the main thread.
     private val recordingLifecycle = object : LifecycleRegistry(this@MainActivity) {
         override fun handleLifecycleEvent(event: Lifecycle.Event) {
+            // The three frames above this method name who tried to drive the
+            // mirror. Found by class here, so synthetic accessors and R8
+            // renaming do not shift them.
+            val caller = Throwable().stackTrace
+                .dropWhile { it.className != javaClass.name }
+                .drop(1)
+                .take(3)
+                .joinToString(" <- ") { "${it.className.substringAfterLast('.')}.${it.methodName}" }
             Log.i(
                 "MotoCam",
                 "F004 mirror ignored external $event (mirror=$currentState " +
-                    "real=${realLifecycleState()} engaged=$isCameraHoldEngaged " +
-                    "from ${externalCaller()})",
+                    "real=${realLifecycleState()} engaged=$isCameraHoldEngaged from $caller)",
             )
         }
     }
@@ -163,14 +173,6 @@ class MainActivity: FlutterActivity() {
 
     // FlutterActivity's own lifecycle state, for the F004 log lines.
     private fun realLifecycleState(): Lifecycle.State = super.lifecycle.currentState
-
-    // The two frames above the mirror's handleLifecycleEvent (short class
-    // and method names), so the F004 log line names who tried to drive it.
-    private fun externalCaller(): String =
-        Throwable().stackTrace
-            .drop(2)
-            .take(2)
-            .joinToString(" <- ") { "${it.className.substringAfterLast('.')}.${it.methodName}" }
 
     private fun engageCameraHold(token: Long) {
         cameraHoldToken = token
