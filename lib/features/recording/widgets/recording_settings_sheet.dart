@@ -490,15 +490,6 @@ class _RecordingSettingsSheetState extends State<RecordingSettingsSheet> {
                     });
                   },
                 ),
-                if (!cameraProvider.supportsVideoBitrateControl)
-                  const Padding(
-                    padding: EdgeInsets.only(top: 6),
-                    child: Text(
-                      'No effect on this device: the Android camera plugin '
-                      'records at its own bitrate for the chosen resolution.',
-                      style: TextStyle(color: Colors.orange, fontSize: 12),
-                    ),
-                  ),
                 const SizedBox(height: 12),
                 _buildSettingsLabel('Segment length'),
                 DropdownButtonFormField<int>(

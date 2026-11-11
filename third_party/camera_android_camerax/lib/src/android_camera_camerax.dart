@@ -452,7 +452,14 @@ class AndroidCameraCameraX extends CameraPlatform {
     );
 
     // Configure VideoCapture and Recorder instances.
-    recorder = Recorder(qualitySelector: presetQualitySelector);
+    // MotoCam patch 4 (backport of upstream 0.7.3, "Fixes `videoBitrate`
+    // configuration being ignored during video recording"): pass the requested
+    // bitrate to the Recorder. 0.7.2 dropped it, so CameraX recorded at its
+    // default for the quality (about 20 Mbps for FHD on the test phone).
+    recorder = Recorder(
+      qualitySelector: presetQualitySelector,
+      targetVideoEncodingBitRate: mediaSettings?.videoBitrate,
+    );
     videoCapture = VideoCapture.withOutput(
       videoOutput: recorder!,
       targetFpsRange: _targetFpsRange,

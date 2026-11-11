@@ -96,7 +96,7 @@ Each segment's start and end, measured from the ride start, are stored in the ri
 
 - Audio is recorded when **Record audio** is on (`enableAudio` on the `CameraController`). Microphone permission is required only in that case. With audio off, the Android camera plugin still opens the microphone and records a muted track.
 - Resolution is requested as 480p/720p/1080p/2160p and mapped to a camera `ResolutionPreset` (`CameraProvider.presetForResolution`: 480 to `medium`, 720 to `high`, 1080 to `veryHigh`, 2160 to `ultraHigh`). Presets and frame rates that fail on the device are remembered in memory until the app restarts and are skipped; when every preset fails (for example because another app holds the camera), that memory is cleared so the next attempt retries the rider's choice. While idle with a known-failing resolution saved, an orange notice under the START button reads `Current <n>p is unstable on this device. Recording will auto-fallback to <m>p.`, or asks the rider to choose `<m>p or lower` (or a lower resolution) in Settings when no fallback preset is known.
-- The bitrate setting is passed to the camera plugin, but the Android implementation (camera_android_camerax 0.7.2) does not read it. On Android the settings sheet says so under the bitrate field, and the ride's `appliedBitrateMbps` is `null`.
+- The bitrate setting is the video encoder's target. On Android the vendored camera plugin applies it (third_party/camera_android_camerax/MOTOCAM_PATCHES.md patch 4, a backport of upstream 0.7.3). Rides recorded on Android before that patch (2026-11-11) used the plugin's default instead (about 20 Mbps for FHD on the test phone) and have `appliedBitrateMbps: null`.
 
 ## Live HUD and telemetry strip
 
@@ -296,7 +296,7 @@ The gear icon opens [recording_settings_sheet.dart](../lib/features/recording/wi
 | Camera lens | first back camera | cameras reported by the device (the field is hidden when the list is empty) |
 | Recording resolution | 1080p | 480p, 720p, 1080p, 4K (2160p). Resolutions known to fail on this device are greyed out as `(unsupported)` and listed under the field |
 | Frame rate (FPS) | 30 | 24, 30, 60 (minus rates that failed). If the saved rate is no longer offered, the sheet starts at 30 (or the last offered rate) |
-| Video bitrate | 8 Mbps | 4, 8, 12, 16 Mbps. On Android: "No effect on this device: the Android camera plugin records at its own bitrate for the chosen resolution." |
+| Video bitrate | 8 Mbps | 4, 8, 12, 16 Mbps (the video encoder's target). |
 | Segment length | 5 min | 5 s to 10 min |
 | Loop buffer size | 24 segments | 6, 12, 18, 24, 36, 48 (unlocked segments kept per ride) |
 | Storage budget for all rides | Off | Off, 4, 8, 16, 32, 64 GB ("When recordings exceed it, the oldest unlocked rides are deleted while you record. Locked rides are never deleted."). Takes effect at the next START |

@@ -900,7 +900,8 @@ class _RecordingScreenState extends State<RecordingScreen>
         camera.resolutionPreset,
       ),
       'appliedFps': camera.recordingFps,
-      // null where the platform ignores the requested bitrate (Android).
+      // The encoder's target; null in rides recorded on Android before the
+      // camera plugin applied the bitrate there (MOTOCAM_PATCHES.md patch 4).
       'appliedBitrateMbps': camera.appliedVideoBitrateMbps,
       'appliedAudioEnabled': camera.audioEnabled,
       'appliedSegmentDurationSeconds': camera.segmentDurationSeconds,

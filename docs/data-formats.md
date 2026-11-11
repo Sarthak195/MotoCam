@@ -225,7 +225,7 @@ This object is built by `RecordingScreen._recordingSettingsSnapshot` in [recordi
 | `requestedCameraName` | string |
 | `requestedIncidentSensitivity` | string (enum `.name`, see [settings.md](settings.md)) |
 | `appliedResolution` (`CameraProvider.resolutionForPreset`), `appliedFps`, `appliedSegmentDurationSeconds`, `appliedLoopSegmentCount` | int (values from `CameraProvider`) |
-| `appliedBitrateMbps` | int, or `null` on Android, where the camera plugin ignores the requested bitrate (`CameraProvider.appliedVideoBitrateMbps`) |
+| `appliedBitrateMbps` | int: the bitrate the camera was configured with, the encoder's target (`CameraProvider.appliedVideoBitrateMbps`); `null` in rides recorded on Android before the camera plugin applied it (third_party/camera_android_camerax/MOTOCAM_PATCHES.md patch 4, 2026-11-11) |
 | `appliedAudioEnabled` | bool |
 | `appliedCameraName` | string |
 
@@ -255,7 +255,7 @@ This example was put together by hand from the writer code; the app did not prod
     "requestedSegmentDurationSeconds": 60, "requestedLoopSegmentCount": 12,
     "requestedAudioEnabled": true, "requestedCameraName": "0",
     "requestedIncidentSensitivity": "medium", "requestedSpeedRefreshMs": 100,
-    "appliedResolution": 1080, "appliedFps": 30, "appliedBitrateMbps": null,
+    "appliedResolution": 1080, "appliedFps": 30, "appliedBitrateMbps": 8,
     "appliedAudioEnabled": true, "appliedSegmentDurationSeconds": 60,
     "appliedLoopSegmentCount": 12, "appliedCameraName": "0"
   },

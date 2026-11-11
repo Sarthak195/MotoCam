@@ -64,7 +64,7 @@ Getters, grouped:
 | Group | Getters |
 |---|---|
 | State | `controller`, `isInitialized`, `isInitializing`, `initState` (`CameraInitState`: idle, initializing, ready, failed) and `initFailure` (`CameraInitFailure`, a reason and, for unknown errors, the error text), `isRecordingSegmentLocked`, `isRecording`, `isStartingRecording`, `isStoppingRecording`, `lastRecordingError`, `lastGalleryExportMessage`, `lastStorageBudgetMessage`, `isStorageBudgetRunning`, `recordingsDirectory`, `elapsedTime`, `recordingStartedAt`, `timerStream` (broadcast `Stream<Duration>`, one event per second while recording, no replay) |
-| Applied settings | `resolutionPreset`, `recordingFps`, `videoBitrateMbps`, `supportsVideoBitrateControl`, `appliedVideoBitrateMbps`, `audioEnabled`, `activeCameraName`, `segmentDurationSeconds`, `maxRollingSegments` |
+| Applied settings | `resolutionPreset`, `recordingFps`, `videoBitrateMbps`, `appliedVideoBitrateMbps`, `audioEnabled`, `activeCameraName`, `segmentDurationSeconds`, `maxRollingSegments` |
 | Session | `lastSessionSegmentPaths` (oldest first), `lastSessionSegmentTimeline` (list of `{path, startMs, endMs}`), `lockedSegmentPaths` (sorted by path, not by time), `lockedSegmentCount` |
 | Capability caches | `knownUnsupportedResolutionPresets` |
 
@@ -116,7 +116,7 @@ If every preset fails, the camera is treated as busy or unavailable: the FPS and
 
 The negotiated preset and FPS never overwrite the saved settings. When they differ, the profile bar under the header shows the applied value next to the saved one, for example `720p (set 1080p)` or `30 FPS (set 60)`.
 
-**Bitrate.** `videoBitrateBps` (settings Mbps × 1,000,000) is passed to `CameraController`. The Android implementation in use (camera_android_camerax 0.7.2) does not read `videoBitrate`; its recorder is created from a quality selector alone. `supportsVideoBitrateControl` is therefore `false` on Android and `appliedVideoBitrateMbps` is `null`. The settings sheet shows "No effect on this device" under the bitrate field, and the ride JSON stores `appliedBitrateMbps: null`.
+**Bitrate.** `videoBitrateBps` (settings Mbps × 1,000,000) is passed to `CameraController`. On Android the vendored camera_android_camerax passes it to the CameraX `Recorder` as `targetVideoEncodingBitRate` (third_party/camera_android_camerax/MOTOCAM_PATCHES.md patch 4, the same line as upstream 0.7.3; 0.7.2 created the recorder from a quality selector alone, so CameraX used its default, about 20 Mbps for FHD on the test phone). CameraX takes it as the encoder's average target and clamps it to the codec's range. `appliedVideoBitrateMbps` is the configured value and the ride JSON stores it as `appliedBitrateMbps` (`null` in rides recorded on Android before the patch).
 
 **Orientation and preview.** [main.dart](../lib/main.dart) locks the UI to `portraitUp`, and capture orientation is locked to `portraitUp` as described above. `RecordingScreen._buildCameraPreview` shows the preview in portrait. It inverts `controller.value.aspectRatio` when that ratio is above 1, and uses 16:9 (shown as 9:16) when the ratio is not finite or ≤ 0. The preview is keyed by preset, FPS, camera name and controller hash, so a new controller rebuilds it.
 
@@ -334,7 +334,7 @@ Setting `recordings_storage_budget_gb` (Off, 4, 8, 16, 32 or 64 GB; GB means 102
 
 `_hasRoomForNextSegment` runs before START and before the stop of every segment cycle. It asks `availableStorageBytes()`, which calls the native `getAvailableStorageBytes` method (Android `StatFs` on the recordings directory). With:
 
-- `segmentBytes = segmentDurationSeconds × max(videoBitrateBps, 20,000,000) ÷ 8` (20 Mbps is assumed because Android ignores the requested bitrate),
+- `segmentBytes = segmentDurationSeconds × max(videoBitrateBps, 20,000,000) ÷ 8` (a deliberate floor: the encoder can run above its target, and an estimate that is too low could run out of space in the middle of a segment),
 - `margin = 100 MiB` (100 × 1024 × 1024 bytes),
 - `reclaimable` = the size of the unlocked session segments the loop will delete once the segment being recorded is registered (`segmentsEvictedByNextRegistration`; 0 at START),
 
@@ -399,7 +399,6 @@ Segment registration and roll metrics do not notify listeners; the screen picks 
 - **Screen-off capture is unconfirmed on a device.** The camera lifecycle hold is designed to keep CameraX capturing while `MainActivity` is stopped, but no phone has confirmed it yet; keep-screen-on (on by default) is the fallback. The camera preview's Flutter surface may be released and re-requested while the activity is stopped. Removing the task from Recents still ends the recording.
 - **Gap at every rollover.** Each roll stops one recording and starts the next, so the segments are not continuous. About a second is lost at each boundary (the stop and restart steps of a roll). The timeline records the gap.
 - **iOS** has no foreground service, PiP, free-space or media channel handlers, and nothing disables the idle timer while recording, so Auto-Lock interrupts the capture. Recording relies only on the camera plugin while the app is in the foreground.
-- **Bitrate setting.** It has no effect on Android with camera_android_camerax 0.7.2. The ride JSON records `appliedBitrateMbps: null` there.
 - **Retention.** The loop is per session. Earlier rides are aged out only by the storage budget, which is off by default, runs only while recording, deletes whole unlocked rides and never deletes orphan videos of the current session; with it off, space is reclaimed only by deleting rides in Ride History. Files of no ride (an unreadable JSON) count toward the budget but are never deleted by it. The free-space checks stop a ride before storage runs out.
 - **Gallery export limits.** A copy that finished in the moment between the native reply and the store write is found again by name and size (`reuseExisting`) rather than copied twice, but a copy MediaStore renamed because of a name clash is not, so it could be copied again. Copies made by builds before the gallery-link store are not tracked and never offered for removal. A corrupt store file is read as empty, and the copies it listed are no longer offered for removal. On Android 9 and lower nothing is reused (a file of the same name there may be a kept original), so a copy killed after its rename but before the store write is made again under a numbered name, and a `.partial` file left by a killed copy stays hidden until the next copy of that segment deletes it. The launch retry runs once per process; when the recordings directory is first set up during a recording, the queue waits for the next stop.
 - **Failed saves.** Retry is offered only for the save that failed in the current stop. An earlier failed save that is still queued has no visible indicator.

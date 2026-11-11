@@ -382,17 +382,16 @@ class CameraProvider extends ChangeNotifier {
   /// Requested video bitrate in Mbps (rounded).
   int get videoBitrateMbps => (_videoBitrateBps / 1000000).round();
 
-  /// Whether the camera plugin applies the requested bitrate.
+  /// The bitrate in Mbps the active camera was configured with, which the
+  /// video encoder takes as its target (a clip's real rate can differ a
+  /// little).
   ///
-  /// `false` on Android: camera_android_camerax (0.7.1 and the locked 0.7.2)
-  /// never passes the bitrate to the CameraX Recorder, which uses its default
-  /// for the quality.
-  bool get supportsVideoBitrateControl => !Platform.isAndroid;
-
-  /// The bitrate actually applied in Mbps, or `null` when the platform
-  /// ignores the requested bitrate (see [supportsVideoBitrateControl]).
-  int? get appliedVideoBitrateMbps =>
-      supportsVideoBitrateControl ? videoBitrateMbps : null;
+  /// On Android the vendored camera_android_camerax passes it to the CameraX
+  /// Recorder (third_party/camera_android_camerax/MOTOCAM_PATCHES.md patch 4,
+  /// a backport of upstream 0.7.3). Before that patch the Recorder used its
+  /// own default for the quality (about 20 Mbps for FHD) and rides recorded
+  /// `appliedBitrateMbps: null`.
+  int get appliedVideoBitrateMbps => videoBitrateMbps;
 
   /// Whether audio is recorded with the video.
   bool get audioEnabled => _audioEnabled;
@@ -1417,7 +1416,10 @@ class CameraProvider extends ChangeNotifier {
   }
 
   // Estimated size of one segment: its duration at the higher of the
-  // requested bitrate and 20 Mbps (Android ignores the requested bitrate).
+  // requested bitrate and 20 Mbps. The floor is deliberate: the encoder's real
+  // rate can run above its target, and an estimate that is too high only
+  // stops recording a little early on a nearly full phone, while one that is
+  // too low can run out of space in the middle of a segment.
   int get _estimatedSegmentBytes {
     const assumedMinimumBitrateBps = 20 * 1000 * 1000;
     final bitrateBps = _videoBitrateBps > assumedMinimumBitrateBps

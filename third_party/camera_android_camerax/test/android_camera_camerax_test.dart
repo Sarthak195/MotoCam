@@ -1676,6 +1676,45 @@ void main() {
     },
   );
 
+  // MotoCam patch 4 (MOTOCAM_PATCHES.md): the requested video bitrate reaches
+  // the CameraX Recorder; without one the Recorder keeps CameraX's default.
+  test(
+    'createCameraWithSettings passes the requested video bitrate to the Recorder',
+    () async {
+      final camera = AndroidCameraCameraX();
+      const testCameraDescription = CameraDescription(
+        name: 'cameraName',
+        lensDirection: CameraLensDirection.back,
+        sensorOrientation: 90,
+      );
+      final mockProcessCameraProvider = MockProcessCameraProvider();
+      camera.processCameraProvider = mockProcessCameraProvider;
+      setUpOverridesForTestingUseCaseConfiguration(mockProcessCameraProvider);
+
+      final requestedBitrates = <int?>[];
+      PigeonOverrides.recorder_new =
+          ({
+            int? aspectRatio,
+            int? targetVideoEncodingBitRate,
+            QualitySelector? qualitySelector,
+          }) {
+            requestedBitrates.add(targetVideoEncodingBitRate);
+            return MockRecorder();
+          };
+
+      await camera.createCameraWithSettings(
+        testCameraDescription,
+        const MediaSettings(videoBitrate: 8000000),
+      );
+      await camera.createCameraWithSettings(
+        testCameraDescription,
+        const MediaSettings(),
+      );
+
+      expect(requestedBitrates, <int?>[8000000, null]);
+    },
+  );
+
   test(
     'createCamera properly selects specific back camera by specifying a CameraInfo',
     () async {
