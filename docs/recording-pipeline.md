@@ -227,7 +227,7 @@ If the stop itself throws, the stopped file is unknown and nothing is registered
 
 Recovery cycles log the same timings. Nothing is stored or read by the app.
 
-On camera_android_camerax 0.7.2, `stopVideoRecording` closes the recording, waits for the Finalize event and unbinds the VideoCapture use case. `startVideoRecording` binds it again, creates a new temporary file and waits for the Start event. No video is captured between the two calls. The timeline shows this gap: a segment's `endMs` is earlier than the next segment's `startMs`.
+On camera_android_camerax 0.7.2, `stopVideoRecording` closes the recording, waits for the Finalize event and unbinds the VideoCapture use case, and `startVideoRecording` binds it again, creates a new temporary file and waits for the Start event. A timed roll first sets the vendored plugin's `keepVideoCaptureBoundOnNextStop` (`segment_roll_binding.dart`, `third_party/camera_android_camerax/MOTOCAM_PATCHES.md` patch 1), so its stop keeps VideoCapture bound and the restart skips the bind: CameraX keeps its capture session and encoder. Stall recovery and the final STOP still unbind, and a retried restart binds afresh. No video is captured between the stop and the start (about 0.2 s per roll on the test phone). The timeline shows this gap: a segment's `endMs` is earlier than the next segment's `startMs`.
 
 ## Stop flow
 

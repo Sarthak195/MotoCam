@@ -609,7 +609,7 @@ The reader handles every generation through the same code, so older files load w
 | 76974c1, 2026-04-05 | `ride_<id>.telemetry.json` | adds `rideSessionId`, `sessionComplete`, `storagePolicy` (`"public-folder-only"`), `storageDirectory`, `recordingSettings` |
 | cd39097, 2026-07-07 | `ride_<id>.telemetry.json` | `storagePolicy` becomes `"hybrid-private-primary"`; adds `publicExportRelativePath` and `integrity` (version 1 envelope) |
 | schema 3 before signing | `ride_<id>.telemetry.json` | `schemaVersion: 3`; sealed checkpoints with `sessionComplete: false`; timestamps in UTC with `Z`; adds `mockLocationDetected`, `incidents`, sample `hasFix` and `fixAgeMs`; version 2 envelope (`envelopeVersion: 2`, bound payload hash); `appliedBitrateMbps` is `null` on Android; non-finite numbers written as `null` |
-| current code | `ride_<id>.telemetry.json` | Final saves on Android carry a version 3 envelope with `signature`; checkpoints, iOS saves and saves that could not be signed stay version 2 |
+| current code | `ride_<id>.telemetry.json` | Final saves on Android carry a version 3 envelope with `signature`; checkpoints, iOS saves and saves that could not be signed stay version 2; `appliedBitrateMbps` is an int on Android too (camera plugin patch 4, 2026-11-11) |
 
 Consequences:
 
