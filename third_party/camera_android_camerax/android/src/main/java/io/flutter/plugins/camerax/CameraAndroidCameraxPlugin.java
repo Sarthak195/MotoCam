@@ -41,9 +41,17 @@ public final class CameraAndroidCameraxPlugin implements FlutterPlugin, Activity
       // MotoCam patch: release the preview surfaces first, while FlutterJNI is still attached, so
       // camera frames still in flight are dropped (see PreviewProxyApi#releaseAllSurfaceProducers).
       final int released = proxyApiRegistrar.releasePreviewSurfaceProducers();
-      android.util.Log.i(
-          "MotoCamCameraX", "Released " + released + " preview surface(s) on engine detach");
       proxyApiRegistrar.setIgnoreCallsToDart(true);
+      // MotoCam patch: then stop recordings the detached Dart side can no longer stop, so they
+      // release the microphone and finalize their files (their events no longer reach Dart).
+      final int closed = proxyApiRegistrar.closeActiveRecordings();
+      android.util.Log.i(
+          "MotoCamCameraX",
+          "Released "
+              + released
+              + " preview surface(s) and closed "
+              + closed
+              + " recording(s) on engine detach");
       proxyApiRegistrar.tearDown();
       proxyApiRegistrar.getInstanceManager().stopFinalizationListener();
       proxyApiRegistrar = null;

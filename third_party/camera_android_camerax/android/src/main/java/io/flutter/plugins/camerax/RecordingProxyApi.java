@@ -20,6 +20,8 @@ class RecordingProxyApi extends PigeonApiRecording {
   @Override
   public void close(Recording pigeonInstance) {
     pigeonInstance.close();
+    // MotoCam patch: no longer open (ProxyApiRegistrar#closeActiveRecordings).
+    ((ProxyApiRegistrar) getPigeonRegistrar()).removeActiveRecording(pigeonInstance);
   }
 
   @Override
@@ -35,5 +37,7 @@ class RecordingProxyApi extends PigeonApiRecording {
   @Override
   public void stop(Recording pigeonInstance) {
     pigeonInstance.stop();
+    // MotoCam patch: no longer open (ProxyApiRegistrar#closeActiveRecordings).
+    ((ProxyApiRegistrar) getPigeonRegistrar()).removeActiveRecording(pigeonInstance);
   }
 }

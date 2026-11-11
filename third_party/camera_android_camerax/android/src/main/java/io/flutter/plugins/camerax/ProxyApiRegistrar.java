@@ -15,6 +15,7 @@ import android.view.WindowManager;
 import androidx.annotation.ChecksSdkIntAtLeast;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
+import androidx.camera.video.Recording;
 import androidx.lifecycle.LifecycleOwner;
 import io.flutter.plugin.common.BinaryMessenger;
 import io.flutter.view.TextureRegistry;
@@ -221,6 +222,44 @@ public class ProxyApiRegistrar extends CameraXLibraryPigeonProxyApiRegistrar {
   @Override
   public DeviceOrientationManagerProxyApi getPigeonApiDeviceOrientationManager() {
     return new DeviceOrientationManagerProxyApi(this);
+  }
+
+  // MotoCam patch: recordings started through this plugin and not yet closed, stopped or
+  // finalized. Only touched on the main thread (Pigeon handlers, the main executor that delivers
+  // VideoRecordEvents, and onDetachedFromEngine).
+  private final java.util.Set<Recording> activeRecordings = new java.util.LinkedHashSet<>();
+
+  /** MotoCam patch: see {@link #closeActiveRecordings()}. */
+  void addActiveRecording(@NonNull Recording recording) {
+    activeRecordings.add(recording);
+  }
+
+  /** MotoCam patch: see {@link #closeActiveRecordings()}. */
+  void removeActiveRecording(@NonNull Recording recording) {
+    activeRecordings.remove(recording);
+  }
+
+  /**
+   * MotoCam patch: closes (stops and finalizes) every recording this plugin started that is still
+   * open. Called when the plugin detaches from the engine: nothing on the Dart side can stop those
+   * recordings any more, and an open recording keeps the microphone and its file. Seen on the phone
+   * on 2026-11-11: once the Recents-swipe crash was fixed the process survived the swipe, and a
+   * later recording in the same process got no audio and wrote no file.
+   *
+   * @return how many recordings were closed
+   */
+  public int closeActiveRecordings() {
+    int closed = 0;
+    for (Recording recording : new java.util.ArrayList<>(activeRecordings)) {
+      try {
+        recording.close();
+        closed++;
+      } catch (RuntimeException e) {
+        Log.w("MotoCamCameraX", "Closing a recording on engine detach failed: " + e);
+      }
+    }
+    activeRecordings.clear();
+    return closed;
   }
 
   /** MotoCam patch: see {@link PreviewProxyApi#releaseAllSurfaceProducers()}. */

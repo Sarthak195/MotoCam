@@ -138,4 +138,55 @@ public class PendingRecordingTest {
       assertEquals(value, api.start(instance, listener));
     }
   }
+
+  // MotoCam patch: a started recording is tracked until closed, stopped or finalized.
+  @Test
+  public void start_tracksTheRecordingUntilFinalized() {
+    final TestProxyApiRegistrar registrar = new TestProxyApiRegistrar();
+    final PigeonApiPendingRecording api = registrar.getPigeonApiPendingRecording();
+    final PendingRecording instance = mock(PendingRecording.class);
+    final Recording value = mock(Recording.class);
+    final java.util.List<androidx.camera.video.VideoRecordEvent> forwarded = new java.util.ArrayList<>();
+    final VideoRecordEventListener listener = forwarded::add;
+
+    try (MockedStatic<ContextCompat> mockedContextCompat =
+        Mockito.mockStatic(ContextCompat.class)) {
+      mockedContextCompat
+          .when(() -> ContextCompat.getMainExecutor(any()))
+          .thenAnswer((Answer<Executor>) invocation -> mock(Executor.class));
+      final org.mockito.ArgumentCaptor<androidx.core.util.Consumer<androidx.camera.video.VideoRecordEvent>>
+          captor = org.mockito.ArgumentCaptor.forClass(androidx.core.util.Consumer.class);
+      when(instance.start(any(Executor.class), captor.capture())).thenReturn(value);
+
+      api.start(instance, listener);
+
+      // A finalize event is forwarded to the plugin listener and ends the tracking.
+      final androidx.camera.video.VideoRecordEvent.Finalize finalize =
+          mock(androidx.camera.video.VideoRecordEvent.Finalize.class);
+      captor.getValue().accept(finalize);
+      assertEquals(1, forwarded.size());
+      assertEquals(0, registrar.closeActiveRecordings());
+    }
+  }
+
+  @Test
+  public void start_recordingStillOpenIsClosedOnDetach() {
+    final TestProxyApiRegistrar registrar = new TestProxyApiRegistrar();
+    final PigeonApiPendingRecording api = registrar.getPigeonApiPendingRecording();
+    final PendingRecording instance = mock(PendingRecording.class);
+    final Recording value = mock(Recording.class);
+
+    try (MockedStatic<ContextCompat> mockedContextCompat =
+        Mockito.mockStatic(ContextCompat.class)) {
+      mockedContextCompat
+          .when(() -> ContextCompat.getMainExecutor(any()))
+          .thenAnswer((Answer<Executor>) invocation -> mock(Executor.class));
+      when(instance.start(any(Executor.class), any())).thenReturn(value);
+
+      api.start(instance, event -> {});
+
+      assertEquals(1, registrar.closeActiveRecordings());
+      Mockito.verify(value).close();
+    }
+  }
 }

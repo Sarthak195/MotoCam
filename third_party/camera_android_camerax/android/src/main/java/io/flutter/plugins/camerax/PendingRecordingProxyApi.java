@@ -10,6 +10,7 @@ import androidx.annotation.NonNull;
 import androidx.camera.video.ExperimentalPersistentRecording;
 import androidx.camera.video.PendingRecording;
 import androidx.camera.video.Recording;
+import androidx.camera.video.VideoRecordEvent;
 import androidx.core.content.ContextCompat;
 
 /**
@@ -55,7 +56,21 @@ class PendingRecordingProxyApi extends PigeonApiPendingRecording {
   @Override
   public Recording start(
       PendingRecording pigeonInstance, @NonNull VideoRecordEventListener listener) {
-    return pigeonInstance.start(
-        ContextCompat.getMainExecutor(getPigeonRegistrar().getContext()), listener::onEvent);
+    // MotoCam patch: track the recording until it is closed, stopped or finalized, so the plugin
+    // can stop it if the engine detaches first (ProxyApiRegistrar#closeActiveRecordings). Events
+    // run on the main executor, after this method has returned and filled the holder.
+    final Recording[] started = new Recording[1];
+    final Recording recording =
+        pigeonInstance.start(
+            ContextCompat.getMainExecutor(getPigeonRegistrar().getContext()),
+            event -> {
+              if (event instanceof VideoRecordEvent.Finalize && started[0] != null) {
+                getPigeonRegistrar().removeActiveRecording(started[0]);
+              }
+              listener.onEvent(event);
+            });
+    started[0] = recording;
+    getPigeonRegistrar().addActiveRecording(recording);
+    return recording;
   }
 }
