@@ -21,3 +21,21 @@ bool keepVideoStreamBoundForNextStop([CameraPlatform? platform]) {
   }
   return false;
 }
+
+/// Withdraws a [keepVideoStreamBoundForNextStop] request. The plugin clears it
+/// itself when the stop reaches it; this covers a stop that failed before.
+void clearKeepVideoStreamBound([CameraPlatform? platform]) {
+  final target = platform ?? CameraPlatform.instance;
+  if (target is AndroidCameraCameraX) {
+    target.keepVideoCaptureBoundOnNextStop = false;
+  }
+}
+
+/// Before retrying a failed segment restart: unbinds the idle video stream so
+/// the retry starts on a fresh camera session and encoder, as upstream did.
+Future<void> freshVideoStreamForRetry([CameraPlatform? platform]) async {
+  final target = platform ?? CameraPlatform.instance;
+  if (target is AndroidCameraCameraX) {
+    await target.unbindIdleVideoCapture();
+  }
+}

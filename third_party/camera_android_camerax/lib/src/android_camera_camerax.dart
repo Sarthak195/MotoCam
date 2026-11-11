@@ -137,6 +137,20 @@ class AndroidCameraCameraX extends CameraPlatform {
   /// timed segment roll that restarts recording at once.
   bool keepVideoCaptureBoundOnNextStop = false;
 
+  /// MotoCam patch (segment rolls): unbinds [videoCapture] while no recording
+  /// is active, so the next [startVideoCapturing] binds it fresh and CameraX
+  /// rebuilds the capture session and the video encoder (the upstream start).
+  /// The app calls this before retrying a segment restart that failed after a
+  /// stop that kept [videoCapture] bound. Does nothing while recording.
+  Future<void> unbindIdleVideoCapture() async {
+    if (recording != null ||
+        videoCapture == null ||
+        processCameraProvider == null) {
+      return;
+    }
+    await _unbindUseCaseFromLifecycle(videoCapture!);
+  }
+
   /// The prefix used to create the filename for video recording files.
   @visibleForTesting
   final String videoPrefix = 'REC';

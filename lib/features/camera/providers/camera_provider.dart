@@ -1791,10 +1791,21 @@ class CameraProvider extends ChangeNotifier {
 
     // Set right before the stop (no await in between), and only when this
     // roll will restart recording at once.
-    if (keepVideoStreamBound && hasRoom && !_isStoppingRecording) {
-      keepVideoStreamBoundForNextStop();
+    final keepBoundRequested =
+        keepVideoStreamBound &&
+        hasRoom &&
+        !_isStoppingRecording &&
+        keepVideoStreamBoundForNextStop();
+    final XFile file;
+    try {
+      file = await controller.stopVideoRecording();
+    } finally {
+      // The plugin clears the request when the stop reaches it; a stop that
+      // failed before that must not leave it set for the next real stop.
+      if (keepBoundRequested) {
+        clearKeepVideoStreamBound();
+      }
     }
-    final file = await controller.stopVideoRecording();
     final stoppedEndMs = _elapsedRideMs();
     final stopElapsedMs = DateTime.now()
         .difference(cycleStartedAt)
@@ -1869,6 +1880,13 @@ class CameraProvider extends ChangeNotifier {
           await Future<void>.delayed(const Duration(milliseconds: 500));
           if (_isStoppingRecording) {
             return false;
+          }
+          // A roll may have kept the video stream bound; retry on a fresh
+          // camera session and encoder, as the upstream plugin did.
+          try {
+            await freshVideoStreamForRetry();
+          } catch (e) {
+            _logError('Fresh video stream before the retry failed: $e');
           }
         }
       }

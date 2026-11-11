@@ -3369,6 +3369,38 @@ void main() {
       },
     );
 
+    test('unbindIdleVideoCapture unbinds VideoCapture when idle', () async {
+      final camera = AndroidCameraCameraX();
+      final processCameraProvider = MockProcessCameraProvider();
+      final videoCapture = MockVideoCapture();
+      camera.processCameraProvider = processCameraProvider;
+      camera.videoCapture = videoCapture;
+      camera.recording = null;
+      when(
+        processCameraProvider.isBound(videoCapture),
+      ).thenAnswer((_) async => true);
+
+      await camera.unbindIdleVideoCapture();
+
+      verify(processCameraProvider.unbind(<UseCase>[videoCapture]));
+    });
+
+    test('unbindIdleVideoCapture does nothing while recording', () async {
+      final camera = AndroidCameraCameraX();
+      final processCameraProvider = MockProcessCameraProvider();
+      final videoCapture = MockVideoCapture();
+      camera.processCameraProvider = processCameraProvider;
+      camera.videoCapture = videoCapture;
+      camera.recording = MockRecording();
+      when(
+        processCameraProvider.isBound(videoCapture),
+      ).thenAnswer((_) async => true);
+
+      await camera.unbindIdleVideoCapture();
+
+      verifyNever(processCameraProvider.unbind(<UseCase>[videoCapture]));
+    });
+
     test(
       'keepVideoCaptureBoundOnNextStop is cleared even when the stop throws',
       () async {

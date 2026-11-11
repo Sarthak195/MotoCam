@@ -20,4 +20,19 @@ void main() {
   test('does nothing when the camera plugin is not the CameraX one', () {
     expect(keepVideoStreamBoundForNextStop(_OtherCameraPlatform()), isFalse);
   });
+
+  test('clearKeepVideoStreamBound withdraws the request', () {
+    final camera = AndroidCameraCameraX();
+    keepVideoStreamBoundForNextStop(camera);
+
+    clearKeepVideoStreamBound(camera);
+
+    expect(camera.keepVideoCaptureBoundOnNextStop, isFalse);
+  });
+
+  test('freshVideoStreamForRetry is safe without a bound camera', () async {
+    // No camera created yet: the plugin hook returns without touching CameraX.
+    await freshVideoStreamForRetry(AndroidCameraCameraX());
+    await freshVideoStreamForRetry(_OtherCameraPlatform());
+  });
 }
