@@ -414,8 +414,11 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
 
   LocationSettings _buildLocationSettings({Duration? timeLimit}) {
     if (Platform.isAndroid) {
-      // forceLocationManager avoids the Fused client, whose settings check
-      // raises "turn on location" dialogs on every request.
+      // forceLocationManager avoids the Google Play services Fused client,
+      // whose settings check raises "turn on location" dialogs on every
+      // request. On API 31+ the LocationManager path still picks the
+      // platform's own fused provider (geolocator_android determineProvider),
+      // so fixes may come from network as well as GPS.
       return AndroidSettings(
         accuracy: LocationAccuracy.bestForNavigation,
         distanceFilter: 0,
