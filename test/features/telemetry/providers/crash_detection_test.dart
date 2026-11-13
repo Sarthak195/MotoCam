@@ -2,6 +2,7 @@ import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:geolocator/geolocator.dart';
 import 'package:motocam/features/telemetry/crash_detector.dart';
 import 'package:motocam/features/telemetry/providers/telemetry_provider.dart';
 
@@ -190,6 +191,30 @@ void main() {
       joltThenLateFixes(50, [0, 0, 0, 0, 0, 0], decelerationG: 0.25);
       sim.speedKmh = 0;
       sim.quiet(const Duration(seconds: 6));
+
+      expect(provider.incidentCount, 0);
+    });
+
+    test('a fix without speed is not read as a stop', () {
+      sim.speedKmh = 50;
+      sim.quiet(const Duration(seconds: 3));
+      sim.jolt();
+      // Android maps a fix without speed to speed 0 and speed accuracy 0.
+      provider.updateLocationForTesting(
+        Position(
+          latitude: 37.7749,
+          longitude: -122.4194,
+          timestamp: sim.t,
+          accuracy: 3.0,
+          altitude: 0.0,
+          altitudeAccuracy: 0.0,
+          heading: 90.0,
+          headingAccuracy: 0.0,
+          speed: 0.0,
+          speedAccuracy: 0.0,
+        ),
+      );
+      sim.quiet(const Duration(seconds: 12));
 
       expect(provider.incidentCount, 0);
     });
