@@ -29,7 +29,7 @@ Current limitations:
 
 - On Android, recording is designed to continue with the screen off or the app in the background while the recording notification shows, but this has not yet been confirmed on a device. The **Keep screen on while recording** setting (on by default) is the fallback. Swiping MotoCam away from Recents still ends the recording, because the activity and the Flutter engine are destroyed.
 - On iOS, the idle timer is not disabled while recording, so Auto-Lock interrupts the capture.
-- Each segment roll loses about 0.2 s of footage (measured on a phone on 2026-11-11; about 1 s before rolls kept the camera's video stream bound, `third_party/camera_android_camerax/MOTOCAM_PATCHES.md` patch 1).
+- Each segment roll loses about 0.2 s of footage (measured on a phone on 2026-11-11 with 5 s segments and the preview on; about 1 s before rolls kept the camera's video stream bound, `third_party/camera_android_camerax/MOTOCAM_PATCHES.md` patch 1). On the first real ride (2026-11-13: 3 min segments, Blackout on) rolls lost about 0.9 s plus short gaps early in the next clip; a 3 min roll without Blackout has not been measured yet.
 
 The UI is portrait-only and always dark (Material 3). There is no localization; the `intl` package is used only for date formatting in the rides list.
 

@@ -32,7 +32,7 @@ Current limitations of the recording pipeline:
 
 - On Android, the camera plugin binds CameraX to `MainActivity`'s lifecycle. While a recording's foreground service runs, `MainActivity` holds the lifecycle it exposes at STARTED, so recording is designed to continue with the screen off or the app in the background; this has not yet been confirmed on a device. The keep-screen-on setting (on by default) is the fallback. Swiping the app away from Recents still ends the recording. See [platform-integration.md](platform-integration.md#camera-lifecycle-hold).
 - On iOS nothing disables the idle timer while recording, so Auto-Lock interrupts the capture.
-- Each segment roll stops and restarts the camera recording, which loses about 0.2 s of footage at every segment boundary (measured on the test phone on 2026-11-11; about 1 s before rolls kept CameraX's video stream bound, third_party/camera_android_camerax/MOTOCAM_PATCHES.md patch 1).
+- Each segment roll stops and restarts the camera recording, which loses about 0.2 s of footage at every segment boundary (measured on the test phone on 2026-11-11 with 5 s segments and the preview on; about 1 s before rolls kept CameraX's video stream bound, third_party/camera_android_camerax/MOTOCAM_PATCHES.md patch 1). On the first real ride (2026-11-13: 3 min segments, Blackout on, unplugged) rolls lost about 0.9 s between files plus up to about 1.4 s of short gaps early in the next clip, and the camera reopened at every roll; a 3 min roll without Blackout has not been measured yet.
 
 [recording-pipeline.md](recording-pipeline.md) describes each of them.
 
