@@ -205,9 +205,10 @@ CameraInitPanel cameraInitPanelFor(CameraInitFailure? failure) {
 /// Preview use case bound), so leaving it costs no video. It survives
 /// `inactive` (the notification shade, the start of a power press, and
 /// Picture-in-Picture, whose window draws its own REC view instead of the
-/// overlay). It ends at `hidden` or `paused` (screen off, another app in
-/// front), so the rider comes back to the live preview and can see that the
-/// camera still records.
+/// overlay; Home or Recents while recording normally enters PiP). It ends at
+/// `hidden` or `paused` (screen off, or another app in front when PiP is
+/// refused or its window is dismissed), so the rider comes back to the live
+/// preview and can see that the camera still records.
 bool leavesBlackoutOnLifecycle(AppLifecycleState state) {
   return state == AppLifecycleState.hidden || state == AppLifecycleState.paused;
 }
