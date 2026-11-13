@@ -1,13 +1,16 @@
 // lib/features/telemetry/providers/telemetry_provider.dart
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:sensors_plus/sensors_plus.dart';
 import '../../../core/ride_file/ride_telemetry_codec.dart' as ride_codec;
 import '../../../core/services/ride_signing_service.dart';
 import '../../../core/utils/integrity_utils.dart' as integrity_utils;
 import '../../../core/utils/path_utils.dart' as path_utils;
+import '../crash_debug_log.dart';
 import '../crash_detector.dart';
 import '../models/telemetry_data.dart';
 import 'dart:async';
@@ -37,12 +40,25 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
   /// signed (default: [SignedRideRegistry.instance]). [clock] is the wall
   /// clock of incident detection (default [DateTime.now]); tests pass a
   /// synthetic one that follows their sensor timestamps.
+  ///
+  /// [crashDebugLogEnabled] (default [kDebugMode], except under `flutter
+  /// test`, so tests that do not ask for it stay hermetic) turns on the per-ride
+  /// crash-detector event log (see [CrashDebugLog]); release builds never
+  /// write it. [crashDebugDirectory] resolves the directory it is written
+  /// under (default: the app's private files directory).
   TelemetryProvider({
     this.sampleInterval = const Duration(seconds: 1),
     ride_codec.RidePayloadSigner? rideSigner,
     SignedRideRegistry? signedRideRegistry,
     DateTime Function()? clock,
-  }) : _rideSigner = rideSigner ?? RideSigningService.instance.signPayloadHash,
+    bool? crashDebugLogEnabled,
+    Future<Directory> Function()? crashDebugDirectory,
+  }) : _crashDebugLogEnabled =
+           crashDebugLogEnabled ??
+           (kDebugMode && !Platform.environment.containsKey('FLUTTER_TEST')),
+       _crashDebugDirectory =
+           crashDebugDirectory ?? getApplicationSupportDirectory,
+       _rideSigner = rideSigner ?? RideSigningService.instance.signPayloadHash,
        _signedRideRegistry = signedRideRegistry ?? SignedRideRegistry.instance,
        _clock = clock ?? DateTime.now;
 
@@ -52,6 +68,10 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
   final ride_codec.RidePayloadSigner _rideSigner;
   final SignedRideRegistry _signedRideRegistry;
   final DateTime Function() _clock;
+  final bool _crashDebugLogEnabled;
+  final Future<Directory> Function() _crashDebugDirectory;
+  CrashDebugLog? _crashDebugLog;
+  Future<void> _crashDebugLogClosed = Future<void>.value();
 
   /// Version of the ride JSON written by this provider. Every version-3 file,
   /// checkpoints included, carries a bound integrity envelope
@@ -966,7 +986,9 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
     _incidentCount = 0;
     _rideIncidents.clear();
     _mockLocationDetected = false;
+    _endCrashDebugLog();
     _crashDetector.reset();
+    _startCrashDebugLog(_rideSessionId!, _rideStartTime!);
     _lastSpeedPosition = null;
     _lastSpeedTimestamp = null;
     _lastLocationUpdateAt = null;
@@ -1327,6 +1349,7 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
     // to record it in, and a later recording could lock on it. The sensors
     // keep running, so the signals stay.
     _crashDetector.reset();
+    _endCrashDebugLog();
     _lastIncidentDetectedAt = null;
     _lastIncidentJoltElapsedMs = null;
     _pauseIfIdleInBackground();
@@ -1505,6 +1528,39 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
     return hashes;
   }
 
+  // Debug builds only: one event log per ride (CrashDebugLog). It listens to
+  // the detector until the ride ends and never blocks the sensor path.
+  void _startCrashDebugLog(String sessionId, DateTime startedAt) {
+    if (!_crashDebugLogEnabled) {
+      return;
+    }
+    final log = CrashDebugLog(
+      rideSessionId: sessionId,
+      rideStartedAt: startedAt,
+      resolveDirectory: _crashDebugDirectory,
+      triggerG: _crashDetector.triggerG,
+      clock: _clock,
+    )..begin();
+    _crashDebugLog = log;
+    _crashDetector.observer = log;
+  }
+
+  // Call after the detector's reset, so a dropped candidate is logged.
+  void _endCrashDebugLog() {
+    final log = _crashDebugLog;
+    if (log == null) {
+      return;
+    }
+    _crashDetector.observer = null;
+    _crashDebugLog = null;
+    _crashDebugLogClosed = log.finish();
+  }
+
+  /// Completes when the last ride's crash debug log is closed. Only tests
+  /// read it.
+  @visibleForTesting
+  Future<void> get crashDebugLogClosedForTesting => _crashDebugLogClosed;
+
   // Records a confirmed incident at its jolt's time (the detector already
   // applied the debounce) and notifies listeners, which lock the segments.
   void _detectCrash(ConfirmedCrash crash) {
@@ -1586,6 +1642,7 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
     _sampleTimer?.cancel();
     _checkpointTimer?.cancel();
     _stopTracking();
+    _endCrashDebugLog();
     if (_isObservingLifecycle) {
       WidgetsBinding.instance.removeObserver(this);
       _isObservingLifecycle = false;
