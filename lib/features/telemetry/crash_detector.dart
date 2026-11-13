@@ -44,6 +44,116 @@ class ConfirmedCrash {
   final CrashConfirmation confirmation;
 }
 
+/// What the detector knew when it started a candidate.
+class CandidateStartInfo {
+  /// Creates the record.
+  const CandidateStartInfo({
+    required this.joltAt,
+    required this.peakG,
+    required this.preJoltSpeedKmh,
+    required this.preJoltSpeedAge,
+    required this.stopRuleArmed,
+    required this.orientationAvailable,
+    required this.stopDeadline,
+  });
+
+  /// Time of the jolt (sensor time base).
+  final DateTime joltAt;
+
+  /// Peak raw linear-acceleration magnitude (g) so far.
+  final double peakG;
+
+  /// The last speed (km/h) before the jolt, or `null` when there was none,
+  /// whether or not it qualified for rule (a).
+  final double? preJoltSpeedKmh;
+
+  /// Age of [preJoltSpeedKmh] at the jolt.
+  final Duration? preJoltSpeedAge;
+
+  /// Whether rule (a) (abrupt stop) can confirm this candidate: the
+  /// pre-jolt speed was recent and at least
+  /// [CrashDetector.minMovingSpeedKmh].
+  final bool stopRuleArmed;
+
+  /// Whether rule (b) (tip-over) has a pre-jolt orientation to compare with.
+  final bool orientationAvailable;
+
+  /// Latest time after the jolt for a near-stop to count, or `null` when
+  /// rule (a) is not armed.
+  final Duration? stopDeadline;
+}
+
+/// What the detector saw of a candidate that ended without confirmation.
+class CandidateEndInfo {
+  /// Creates the record.
+  const CandidateEndInfo({
+    required this.joltAt,
+    required this.peakG,
+    required this.stopRuleArmed,
+    required this.speedFixesAfterJolt,
+    required this.minSpeedAfterJoltKmh,
+    required this.nearStopTooLate,
+    required this.orientationAvailable,
+    required this.maxTiltDegrees,
+    required this.longestTipHold,
+  });
+
+  /// Time of the jolt (sensor time base).
+  final DateTime joltAt;
+
+  /// Peak raw linear-acceleration magnitude (g) of the candidate.
+  final double peakG;
+
+  /// Whether rule (a) was armed at the jolt.
+  final bool stopRuleArmed;
+
+  /// Speed fixes received after the jolt while the candidate was pending.
+  final int speedFixesAfterJolt;
+
+  /// The lowest of those speeds (km/h), or `null` without any fix.
+  final double? minSpeedAfterJoltKmh;
+
+  /// Whether a speed below [CrashDetector.nearStopSpeedKmh] arrived, but
+  /// after the abrupt-stop deadline.
+  final bool nearStopTooLate;
+
+  /// Whether rule (b) had a pre-jolt orientation.
+  final bool orientationAvailable;
+
+  /// Largest angle (degrees) between the pre-jolt and the current gravity
+  /// direction while the candidate was pending, or `null` without one.
+  final double? maxTiltDegrees;
+
+  /// Longest time the tip-over angle was held without a break.
+  final Duration longestTipHold;
+}
+
+/// Receives what the [CrashDetector] sees, for diagnostics. Calls are made
+/// synchronously on the sensor path: implementations must be cheap and must
+/// not throw.
+abstract class CrashDetectorObserver {
+  /// One linear-acceleration sample: the 100 ms averaged magnitude and the
+  /// raw magnitude (both g) and the current trigger (g).
+  void onSample(DateTime at, double averagedG, double rawG, double triggerG);
+
+  /// A jolt started a candidate.
+  void onCandidateStarted(CandidateStartInfo info);
+
+  /// The pending candidate's peak rose by at least
+  /// [CrashDetector.peakReportStepG] since the last report.
+  void onCandidatePeakRaised(DateTime at, double peakG);
+
+  /// The candidate was confirmed.
+  void onCandidateConfirmed(ConfirmedCrash crash);
+
+  /// The confirmation window passed (at sensor time [at]).
+  void onCandidateExpired(DateTime at, CandidateEndInfo info);
+
+  /// The candidate was discarded by [CrashDetector.reset] (for example at
+  /// the end of a ride).
+  void onCandidateDropped(CandidateEndInfo info);
+}
+
 /// Detects crash candidates from linear acceleration and confirms them with
 /// speed and orientation.
 ///
@@ -133,6 +243,10 @@ class CrashDetector {
   /// so the impact itself has not moved the estimate yet.
   static const Duration referenceLead = Duration(milliseconds: 500);
 
+  /// A pending candidate's higher peak is reported to the observer only when
+  /// it exceeds the last reported one by this much (g).
+  static const double peakReportStepG = 0.5;
+
   static const Duration _orientationHistory = Duration(seconds: 3);
   static const int _maxWindowSamples = 64;
   static const double _gravity = 9.81;
@@ -145,6 +259,10 @@ class CrashDetector {
   CrashDetector({void Function(String message)? log}) : _log = log;
 
   final void Function(String message)? _log;
+
+  /// Diagnostics listener; `null` (the default) means none. It never
+  /// changes what the detector decides.
+  CrashDetectorObserver? observer;
 
   double _triggerG = 3.5;
   Duration _debounce = const Duration(seconds: 6);
@@ -191,7 +309,11 @@ class CrashDetector {
   /// of a ride. With [clearSignals], also forgets the acceleration window,
   /// the orientation and the last speed (when the sensors stop).
   void reset({bool clearSignals = false}) {
+    final dropped = _candidate;
     _candidate = null;
+    if (dropped != null) {
+      observer?.onCandidateDropped(_endInfo(dropped));
+    }
     _lastConfirmedAt = null;
     _resetRun();
     if (clearSignals) {
@@ -249,6 +371,7 @@ class CrashDetector {
         ) /
         _gravity;
 
+    observer?.onSample(at, filteredG, rawG, _triggerG);
     _expireCandidate(at);
     if (filteredG >= _triggerG) {
       if (_runStartedAt == null) {
@@ -269,9 +392,9 @@ class CrashDetector {
               _runSampleCount >= minJoltSamplesWithoutTimes);
       if (isSustained && !_runReported) {
         _runReported = true;
-        _onJolt(_runStartedAt!, _runPeakG);
+        _onJolt(_runStartedAt!, _runPeakG, at);
       } else if (_runReported) {
-        _candidate?.raisePeak(_runPeakG);
+        _raisePeak(_candidate, _runPeakG, at);
       }
     } else {
       _resetRun();
@@ -313,9 +436,16 @@ class CrashDetector {
     final candidate = _candidate;
     if (candidate != null && !_isExpired(candidate, at)) {
       final reference = candidate.referenceOrientation;
+      if (reference != null && observer != null) {
+        _trackTilt(candidate, reference, current);
+      }
       if (reference != null && _isTippedOver(reference, current)) {
         final since = candidate.tippedSince ??= at;
-        if (at.difference(since) >= tipOverHold) {
+        final held = at.difference(since);
+        if (held > candidate.longestTipHold) {
+          candidate.longestTipHold = held;
+        }
+        if (held >= tipOverHold) {
           return _confirm(at, CrashConfirmation.tipOver);
         }
       } else {
@@ -336,6 +466,14 @@ class CrashDetector {
     final candidate = _candidate;
     final before = candidate?.speedBeforeKmh;
     if (candidate != null &&
+        at.isAfter(candidate.joltAt) &&
+        !_isExpired(candidate, at)) {
+      candidate.speedFixesAfter++;
+      candidate.minSpeedAfterKmh = candidate.minSpeedAfterKmh == null
+          ? speedKmh
+          : math.min(candidate.minSpeedAfterKmh!, speedKmh);
+    }
+    if (candidate != null &&
         before != null &&
         at.isAfter(candidate.joltAt) &&
         !_isExpired(candidate, at) &&
@@ -344,6 +482,7 @@ class CrashDetector {
       if (sinceJolt <= abruptStopDeadline(before)) {
         return _confirm(at, CrashConfirmation.abruptStop);
       }
+      candidate.nearStopTooLate = true;
     }
     return _expireCandidate(at);
   }
@@ -356,10 +495,10 @@ class CrashDetector {
     return stopGpsLag + Duration(milliseconds: (stopSeconds * 1000).round());
   }
 
-  void _onJolt(DateTime joltAt, double peakG) {
+  void _onJolt(DateTime joltAt, double peakG, DateTime at) {
     final existing = _candidate;
     if (existing != null) {
-      existing.raisePeak(peakG);
+      _raisePeak(existing, peakG, at);
       return;
     }
     final lastConfirmedAt = _lastConfirmedAt;
@@ -378,11 +517,27 @@ class CrashDetector {
       speedBefore = speed;
     }
     final reference = _referenceOrientationBefore(joltAt);
-    _candidate = _Candidate(
+    final candidate = _Candidate(
       joltAt: joltAt,
       peakG: peakG,
       speedBeforeKmh: speedBefore,
       referenceOrientation: reference,
+    );
+    _candidate = candidate;
+    observer?.onCandidateStarted(
+      CandidateStartInfo(
+        joltAt: joltAt,
+        peakG: peakG,
+        preJoltSpeedKmh: speed != null && speedAt != null ? speed : null,
+        preJoltSpeedAge: speed != null && speedAt != null
+            ? joltAt.difference(speedAt)
+            : null,
+        stopRuleArmed: speedBefore != null,
+        orientationAvailable: reference != null,
+        stopDeadline: speedBefore == null
+            ? null
+            : abruptStopDeadline(speedBefore),
+      ),
     );
     _log?.call(
       'jolt candidate: peak ${peakG.toStringAsFixed(1)} g, speed before '
@@ -432,6 +587,7 @@ class CrashDetector {
     final candidate = _candidate;
     if (candidate != null && _isExpired(candidate, at)) {
       _candidate = null;
+      observer?.onCandidateExpired(at, _endInfo(candidate));
       _log?.call(
         'jolt not confirmed within ${confirmWindow.inSeconds} s '
         '(peak ${candidate.peakG.toStringAsFixed(1)} g)',
@@ -444,13 +600,61 @@ class CrashDetector {
     final candidate = _candidate!;
     _candidate = null;
     _lastConfirmedAt = at;
-    return ConfirmedCrash(
+    final crash = ConfirmedCrash(
       joltAt: candidate.joltAt,
       peakG: candidate.peakG,
       confirmedAt: at,
       confirmation: how,
     );
+    observer?.onCandidateConfirmed(crash);
+    return crash;
   }
+
+  void _raisePeak(_Candidate? candidate, double peakG, DateTime at) {
+    if (candidate == null) {
+      return;
+    }
+    candidate.raisePeak(peakG);
+    if (candidate.peakG >= candidate.reportedPeakG + peakReportStepG) {
+      candidate.reportedPeakG = candidate.peakG;
+      observer?.onCandidatePeakRaised(at, candidate.peakG);
+    }
+  }
+
+  // Diagnostics only: the largest angle between the pre-jolt and the
+  // current gravity direction while the candidate is pending.
+  void _trackTilt(
+    _Candidate candidate,
+    List<double> reference,
+    List<double> current,
+  ) {
+    final currentMagnitude = _magnitude(current);
+    if (currentMagnitude < _minOrientationMagnitude) {
+      return;
+    }
+    final cosine =
+        ((reference[0] * current[0] +
+                    reference[1] * current[1] +
+                    reference[2] * current[2]) /
+                (_magnitude(reference) * currentMagnitude))
+            .clamp(-1.0, 1.0);
+    final degrees = math.acos(cosine) * 180.0 / math.pi;
+    candidate.maxTiltDegrees = candidate.maxTiltDegrees == null
+        ? degrees
+        : math.max(candidate.maxTiltDegrees!, degrees);
+  }
+
+  CandidateEndInfo _endInfo(_Candidate c) => CandidateEndInfo(
+    joltAt: c.joltAt,
+    peakG: c.peakG,
+    stopRuleArmed: c.speedBeforeKmh != null,
+    speedFixesAfterJolt: c.speedFixesAfter,
+    minSpeedAfterJoltKmh: c.minSpeedAfterKmh,
+    nearStopTooLate: c.nearStopTooLate,
+    orientationAvailable: c.referenceOrientation != null,
+    maxTiltDegrees: c.maxTiltDegrees,
+    longestTipHold: c.longestTipHold,
+  );
 
   void _resetRun() {
     _runStartedAt = null;
@@ -485,13 +689,21 @@ class _Candidate {
     required this.peakG,
     required this.speedBeforeKmh,
     required this.referenceOrientation,
-  });
+  }) : reportedPeakG = peakG;
 
   final DateTime joltAt;
   double peakG;
   final double? speedBeforeKmh;
   final List<double>? referenceOrientation;
   DateTime? tippedSince;
+
+  // Diagnostics only (see CrashDetectorObserver); never read by a rule.
+  double reportedPeakG;
+  int speedFixesAfter = 0;
+  double? minSpeedAfterKmh;
+  bool nearStopTooLate = false;
+  double? maxTiltDegrees;
+  Duration longestTipHold = Duration.zero;
 
   void raisePeak(double g) {
     peakG = math.max(peakG, g);
