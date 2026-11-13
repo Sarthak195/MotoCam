@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:flutter_test/flutter_test.dart';
@@ -207,6 +208,45 @@ void main() {
 
       expect(provider.incidentCount, 0);
     });
+
+    test(
+      'a jolt pending at stop confirms neither after it nor later',
+      () async {
+        final tempRoot = await Directory.systemTemp.createTemp(
+          'motocam_crash_',
+        );
+        addTearDown(() => tempRoot.delete(recursive: true));
+        final sep = Platform.pathSeparator;
+        final recordings = Directory(
+          '${tempRoot.path}${sep}storage${sep}MotoCam${sep}Recordings',
+        );
+        await recordings.create(recursive: true);
+        final segment = File('${recordings.path}${sep}segment_1.mp4');
+        await segment.writeAsString('video', flush: true);
+
+        sim.speedKmh = 50;
+        sim.quiet(const Duration(seconds: 3));
+        sim.jolt();
+        expect(provider.incidentCount, 0, reason: 'still pending');
+        await provider.stopRideSessionAndPersist(
+          segment.path,
+          segmentPaths: [segment.path],
+        );
+
+        // The bike stops at once: this would confirm the pending jolt.
+        sim.speedKmh = 0;
+        sim.quiet(const Duration(seconds: 5));
+        expect(provider.incidentCount, 0);
+        expect(provider.lastIncidentDetectedAt, isNull);
+
+        // Nothing carries into the next ride either.
+        provider.startRideSession(startedAt: sim.t);
+        sim.quiet(const Duration(seconds: 12));
+        expect(provider.incidentCount, 0);
+        expect(provider.lastIncidentDetectedAt, isNull);
+        expect(provider.activeRideIncidentsForTesting, isEmpty);
+      },
+    );
 
     test('a jolt and a tip-over without GPS is one incident', () {
       sim.speedKmh = null;

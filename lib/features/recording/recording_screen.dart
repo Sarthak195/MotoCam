@@ -1466,12 +1466,12 @@ class _RecordingScreenState extends State<RecordingScreen>
     required TelemetryProvider telemetry,
   }) {
     final detectedAt = telemetry.lastIncidentDetectedAt;
-    if (!camera.isRecording || detectedAt == null) {
-      return;
-    }
-
-    if (_lastHandledIncidentAt != null &&
-        !detectedAt.isAfter(_lastHandledIncidentAt!)) {
+    if (!shouldAutoLockIncident(
+      isRecording: camera.isRecording,
+      detectedAt: detectedAt,
+      lastHandledAt: _lastHandledIncidentAt,
+      recordingStartedAt: camera.recordingStartedAt,
+    )) {
       return;
     }
 

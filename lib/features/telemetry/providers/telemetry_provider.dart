@@ -1322,6 +1322,13 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
     _rideIncidents.clear();
     _rideSessionId = null;
     _rideTelemetryPath = null;
+    // A jolt still waiting for confirmation belongs to the ride that ended:
+    // confirmed after it, it would set lastIncidentDetectedAt with no ride
+    // to record it in, and a later recording could lock on it. The sensors
+    // keep running, so the signals stay.
+    _crashDetector.reset();
+    _lastIncidentDetectedAt = null;
+    _lastIncidentJoltElapsedMs = null;
     _pauseIfIdleInBackground();
   }
 
