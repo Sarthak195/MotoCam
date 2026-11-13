@@ -233,6 +233,37 @@ The lock runs at the confirmation, up to 10 s after the jolt, and keeps what a l
 
 Incidents detected during a ride are saved in the ride JSON's `incidents` list, and playback draws its incident markers from that list. For files without the list, playback derives markers from the persisted 1 Hz samples with its own rule (`incidentMarkerThresholdG` 3.2 g and `incidentMarkerDebounceMs` 5000 ms in [playback_timeline.dart](../lib/features/history/widgets/playback_timeline.dart)); see [playback-and-history.md](playback-and-history.md).
 
+### Debug crash log
+
+Debug builds only (`kDebugMode`; release builds never write it, and `flutter test` leaves it off unless a test asks for it). `TelemetryProvider` attaches a `CrashDebugLog` ([crash_debug_log.dart](../lib/features/telemetry/crash_debug_log.dart)) to the detector for the length of each ride and writes one JSON Lines file, `files/crash_debug/<rideSessionId>.jsonl` in the app's private storage (`getApplicationSupportDirectory()/crash_debug/`). It exists because the phone keeps only error-level logcat during rides and an unplugged ride has no live logcat: a ride with no incidents could not otherwise show whether the vibration filter leaks or rejects everything. It only listens (`CrashDetector.observer`); no threshold or decision depends on it.
+
+Every line has `e` (the type), `t` (ride-elapsed ms) and `s` (the sensor clock, ms since the epoch of the accelerometer's event time), except `start` and `summary`:
+
+| `e` | When | Fields |
+|---|---|---|
+| `start` | Ride start | `ride`, `startUtc`, `trigG` and the detector constants (`joltWindowMs`, `minJoltMs`, `confirmS`, `minMoveKmh`, `nearStopKmh`, `tipDeg`, `tipHoldMs`) |
+| `sec` | Once per second of accelerometer samples | `avgG` (max of the 100 ms averaged magnitude, g), `rawG` (max raw magnitude, g), `n` (samples), `trig` (current trigger), `gps` (see below). This is the tuning data: compare `avgG` with `trig`. |
+| `cand` | A jolt started a candidate (`t`, `s` are the jolt's) | `peakG` so far, `preKmh` and `preAgeMs` (the last speed before the jolt and its age, also when too slow or stale to arm rule (a)), `ruleA` (whether the abrupt-stop rule is armed), `deadlineMs` (its deadline), `ruleB` (whether a pre-jolt orientation exists), `gps` (the pre-jolt fix) |
+| `peak` | The pending peak rose by at least 0.5 g | `peakG` |
+| `confirmed` | Rule (a) or (b) confirmed it | `by` (`abruptStop` or `tipOver`), `delayMs` since the jolt, `peakG` |
+| `expired` | The 10 s window passed | `delayMs`, `peakG`, `ruleA` (`off`, `noFixAfterJolt`, `nearStopTooLate` or `neverBelowNearStop`), `minKmh` (lowest speed after the jolt), `fixes` (fixes after the jolt), `ruleB` (`off`, `noOrientationAfterJolt`, `tiltBelowLimit` or `tiltNotHeld`), `maxTiltDeg`, `holdMs` (longest time the tip-over angle held) |
+| `dropped` | A pending candidate was discarded at ride stop (or when tracking stopped) | as `expired`, without `delayMs` |
+| `capped` | The file reached 5 MB; nothing but the summary follows | none |
+| `summary` | Ride end | `seconds`, `candidates`, `abruptStop`, `tipOver`, `notConfirmed`, `dropped`, `maxAvgG` |
+
+The `gps` object describes the latest fix at that moment and never holds a position: `kmh` (`Position.speed` in km/h), `acc` (`speedAccuracy`, m/s), `hasSpd` and `hasAcc` (Android's `hasSpeed` and `hasSpeedAccuracy`), `age` (seconds since the fix arrived), `fed` (the speed the detector received) and `src` (`raw`, or `smooth` when the fix reported speed 0 without a speed accuracy and the detector was fed the smoothed speed instead). Counting `smooth` lines in a real ride shows how often this phone's fixes lack a speed accuracy.
+
+Lines are buffered in memory and appended every 3 s, so the sensor path never waits on the file; the file is closed at ride stop, cancel or dispose. Any I/O error disables the log for that ride (one `debugPrint`), and the file stops growing at 5 MB. Speeds and g values are written, never GPS coordinates.
+
+To read a ride's log from a USB-connected phone with a debug build installed:
+
+```
+adb shell run-as com.example.motocam ls files/crash_debug
+adb exec-out run-as com.example.motocam cat files/crash_debug/<rideSessionId>.jsonl > crash_debug.jsonl
+```
+
+A ride with no incidents still has its `sec` lines: if `avgG` stays well under `trig` on rough road the filter rejects the vibration, and `cand` lines without a `confirmed` mean only the confirmation rules were saving it.
+
 ## Persistence
 
 A ride's file is written as sealed checkpoints during the ride (see `checkpointRideSession` above) and completed by `stopRideSessionAndPersist`. The schema, the checkpoint rules and the integrity envelope are in [data-formats.md](data-formats.md#checkpoints-and-the-final-save). The final save:
@@ -277,7 +308,7 @@ The native handler is `getBatteryStatus` on `com.example.motocam/device_status` 
 
 ## Test coverage
 
-[telemetry_provider_test.dart](../test/features/telemetry/providers/telemetry_provider_test.dart) has 34 tests, [crash_detection_test.dart](../test/features/telemetry/providers/crash_detection_test.dart) has 19 and [telemetry_data_test.dart](../test/features/telemetry/models/telemetry_data_test.dart) has 6, out of 616 tests in the project. The provider tests construct `TelemetryProvider(sampleInterval: 1 s)` directly and never call `initialize()`, so no plugin channels are involved; the signing tests inject a fake `rideSigner` and mock SharedPreferences, and every other save meets no `integrity` handler and is saved as version 2. Fixes are injected with `updateLocationForTesting`, linear acceleration with `updateAccelerometerForTesting`, the orientation stream with `updateOrientationForTesting` and raw acceleration with `updateRawAccelerometerForTesting`; all four call the production handlers. The crash tests drive them, and the provider's `clock`, on one synthetic clock through `RideSim` ([ride_sim.dart](../test/support/ride_sim.dart)), whose fixes report a speed accuracy so GPS speed is trusted. The `createMockPosition` helper sets `speedAccuracy: 0.0`, so every test fix takes the blended (unreliable GPS speed) path.
+[telemetry_provider_test.dart](../test/features/telemetry/providers/telemetry_provider_test.dart) has 34 tests, [crash_detection_test.dart](../test/features/telemetry/providers/crash_detection_test.dart) has 19 and [telemetry_data_test.dart](../test/features/telemetry/models/telemetry_data_test.dart) has 6 and [crash_debug_log_test.dart](../test/features/telemetry/providers/crash_debug_log_test.dart) has 11 (the debug crash log, see above), out of 632 tests in the project. The provider tests construct `TelemetryProvider(sampleInterval: 1 s)` directly and never call `initialize()`, so no plugin channels are involved; the signing tests inject a fake `rideSigner` and mock SharedPreferences, and every other save meets no `integrity` handler and is saved as version 2. Fixes are injected with `updateLocationForTesting`, linear acceleration with `updateAccelerometerForTesting`, the orientation stream with `updateOrientationForTesting` and raw acceleration with `updateRawAccelerometerForTesting`; all four call the production handlers. The crash tests drive them, and the provider's `clock`, on one synthetic clock through `RideSim` ([ride_sim.dart](../test/support/ride_sim.dart)), whose fixes report a speed accuracy so GPS speed is trusted. The `createMockPosition` helper sets `speedAccuracy: 0.0`, so every test fix takes the blended (unreliable GPS speed) path.
 
 | Group | Checks |
 |---|---|
