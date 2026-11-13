@@ -116,6 +116,98 @@ void main() {
       expect(provider.incidentCount, 0);
     });
 
+    // Speed on a stop at [decelerationG] starting at the jolt: [fromKmh]
+    // until the jolt, then 0.6 g (the slowest stop rule (a) is meant to
+    // catch) takes about 21.2 km/h off per second.
+    double speedAfter(
+      double fromKmh,
+      Duration sinceJolt, {
+      required double decelerationG,
+    }) {
+      final seconds = math.max(0, sinceJolt.inMilliseconds / 1000.0);
+      return math.max(0.0, fromKmh - decelerationG * 9.81 * 3.6 * seconds);
+    }
+
+    // A jolt at 3.5 s from [fromKmh], then one fix per second from 4 s on.
+    // The fix arriving at 4 + i s reports the speed measured lagsS[i]
+    // seconds earlier on a stop at [decelerationG] starting at the jolt.
+    // Returns the jolt pulse's start in ms since the ride start.
+    int joltThenLateFixes(
+      double fromKmh,
+      List<double> lagsS, {
+      double decelerationG = 0.6,
+    }) {
+      sim.speedKmh = fromKmh;
+      sim.quiet(const Duration(milliseconds: 3500));
+      final joltAt = sim.t;
+      sim.jolt();
+      for (var i = 0; i < lagsS.length; i++) {
+        final arrival = rideStart.add(Duration(seconds: 4 + i));
+        final measured = arrival.subtract(
+          Duration(milliseconds: (lagsS[i] * 1000).round()),
+        );
+        sim.speedKmh = speedAfter(
+          fromKmh,
+          measured.difference(joltAt),
+          decelerationG: decelerationG,
+        );
+        // Run to half a second past the arrival, so this fix is sent.
+        sim.quiet(
+          arrival.add(const Duration(milliseconds: 500)).difference(sim.t),
+        );
+      }
+      return joltAt.difference(rideStart).inMilliseconds;
+    }
+
+    test('a 0.6 g stop from 50 km/h seen 1 to 2 s late is an incident', () {
+      // Measured at 2.0, 3.5, 5.0 and 5.5 s: 50, 50, 18 and 7.6 km/h. The
+      // last arrives 3.5 s after the jolt, inside the 4.0 s deadline. The
+      // filtered speed would still read 17 km/h then and 7 km/h only at
+      // 8 s, past the deadline.
+      final joltMs = joltThenLateFixes(50, [2.0, 1.5, 1.0, 1.5]);
+
+      expect(provider.incidentCount, 1);
+      expect(
+        provider.activeRideIncidentsForTesting.single['elapsedMs'] as int,
+        closeTo(joltMs + 40, 60),
+      );
+    });
+
+    test('a 0.6 g stop from 80 km/h seen 1 to 2 s late is an incident', () {
+      // Measured at 3.0, 3.5, 4.0, 5.5 and 7.0 s: 80, 80, 69, 38 and
+      // 5.8 km/h. The last arrives 4.5 s after the jolt, inside the 5.4 s
+      // deadline; the filtered speed would read 24 km/h.
+      joltThenLateFixes(80, [1.0, 1.5, 2.0, 1.5, 1.0]);
+
+      expect(provider.incidentCount, 1);
+    });
+
+    test('a 0.25 g stop starting at the pothole is no incident', () {
+      // Braking from 50 km/h at the jolt itself, seen without any lag: the
+      // speed reads 10 km/h at 4.5 s after the jolt and 1.4 km/h at 5.5 s,
+      // both past the 4.0 s deadline.
+      joltThenLateFixes(50, [0, 0, 0, 0, 0, 0], decelerationG: 0.25);
+      sim.speedKmh = 0;
+      sim.quiet(const Duration(seconds: 6));
+
+      expect(provider.incidentCount, 0);
+    });
+
+    test('a pre-jolt fix older than 3 s turns the stop rule off', () {
+      sim.speedKmh = 50;
+      // Fixes at 0, 1 and 2 s, then none: the jolt comes 3.5 s after the
+      // last one.
+      sim.quiet(const Duration(milliseconds: 2500));
+      sim.speedKmh = null;
+      sim.quiet(const Duration(seconds: 3));
+      sim.jolt();
+      // An instant stop right after would confirm with a fresh fix.
+      sim.speedKmh = 0;
+      sim.quiet(const Duration(seconds: 5));
+
+      expect(provider.incidentCount, 0);
+    });
+
     test('a jolt and a tip-over without GPS is one incident', () {
       sim.speedKmh = null;
       sim.quiet(const Duration(seconds: 2));
@@ -175,10 +267,12 @@ void main() {
       sim.quiet(const Duration(seconds: 3));
       final firstJoltMs = sim.elapsedMsSince(rideStart);
       sim.jolt();
-      sim.speedKmh = 0;
+      // Still sliding at the next fix.
+      sim.speedKmh = 30;
       sim.quiet(const Duration(seconds: 1));
       // The bike hits the ground: a harder second jolt raises the peak.
       sim.jolt(g: 9.0);
+      sim.speedKmh = 0;
       sim.quiet(const Duration(seconds: 5));
 
       expect(provider.incidentCount, 1);

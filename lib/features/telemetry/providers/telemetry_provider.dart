@@ -678,9 +678,8 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
     if (_filteredSpeedKmh < 0.6 || _stationaryFixStreak >= 6) {
       _filteredSpeedKmh = 0;
     }
-    // The same filtered speed the HUD shows and the ride saves.
     final confirmed = _crashDetector.addSpeed(
-      _filteredSpeedKmh,
+      _crashDetectorSpeedKmh(position, _filteredSpeedKmh),
       _sensorTimeNow(),
     );
 
@@ -736,6 +735,31 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
       _detectCrash(confirmed);
     }
     _notifyUiIfNeeded();
+  }
+
+  // The speed the crash detector gets for one fix: the receiver's own speed,
+  // not the filtered speed the HUD shows and the ride saves. The filter
+  // falls by 60 percent per fix, so after an instant stop it needs two fixes
+  // to fall below CrashDetector.nearStopSpeedKmh from 20 to 49 km/h and
+  // three from 50 to 124 km/h, which would use up the detector's allowance
+  // for the receiver's lag. The pre-jolt speed comes from the same source:
+  // the stop deadline is the time this signal takes to fall, and the
+  // filter's slow rise (32 percent per fix) under-reads while accelerating.
+  // A fix whose speed cannot be trusted gets the filtered value instead, so
+  // its worst case is the filter's delay, never a false stop: a speed that
+  // is not finite, negative (unavailable on iOS) or implausibly high, and
+  // 0 with no speed accuracy (Android maps a fix without speed to 0).
+  static double _crashDetectorSpeedKmh(
+    Position position,
+    double filteredSpeedKmh,
+  ) {
+    final speedMps = position.speed;
+    final isTrusted =
+        speedMps.isFinite &&
+        speedMps >= 0 &&
+        speedMps * 3.6 <= maxPlausibleSpeedKmh &&
+        (speedMps > 0 || position.speedAccuracy > 0);
+    return isTrusted ? speedMps * 3.6 : filteredSpeedKmh;
   }
 
   // Now, in the accelerometer's time base: the latest event time plus the
