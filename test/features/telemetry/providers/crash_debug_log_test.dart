@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:geolocator/geolocator.dart';
 import 'package:motocam/features/telemetry/crash_debug_log.dart';
 import 'package:motocam/features/telemetry/providers/telemetry_provider.dart';
 
@@ -168,7 +169,16 @@ void main() {
       for (final sec in secs.take(5)) {
         expect(sec['n'] as int, inInclusiveRange(49, 51));
         expect(sec['trig'], 3.5);
-        expect(sec.keys.toSet(), {'e', 't', 's', 'avgG', 'rawG', 'n', 'trig'});
+        expect(sec.keys.toSet(), {
+          'e',
+          't',
+          's',
+          'avgG',
+          'rawG',
+          'n',
+          'trig',
+          'gps',
+        });
       }
       // Vibration: raw samples near 8 g, the 100 ms average far below.
       final vibrating = secs.where((s) => (s['rawG'] as double) > 7.0);
@@ -180,6 +190,58 @@ void main() {
       expect(lines.last['maxAvgG'] as double, lessThan(3.5));
       expect(lines.last['seconds'], secs.length);
     });
+
+    test(
+      'lines carry the GPS speed details and what the detector got',
+      () async {
+        startRide();
+        sim.speedKmh = 50;
+        sim.quiet(const Duration(seconds: 3));
+        // A fix that reports speed 0 with no speed accuracy: the detector is
+        // fed the smoothed speed instead.
+        sim.speedKmh = null;
+        provider.updateLocationForTesting(
+          Position(
+            latitude: 37.7749,
+            longitude: -122.4194,
+            timestamp: sim.t.add(const Duration(milliseconds: 100)),
+            accuracy: 3.0,
+            altitude: 0.0,
+            altitudeAccuracy: 0.0,
+            heading: 90.0,
+            headingAccuracy: 0.0,
+            speed: 0.0,
+            speedAccuracy: 0.0,
+            hasSpeed: true,
+          ),
+        );
+        sim.jolt();
+        sim.quiet(const Duration(seconds: 2));
+
+        final lines = await endRideAndRead();
+        final raw = <Map<String, dynamic>>[
+          for (final l in lines)
+            if (l['e'] == 'sec' && l['gps'] is Map<String, dynamic>)
+              l['gps'] as Map<String, dynamic>,
+        ].firstWhere((gps) => gps['src'] == 'raw');
+        expect(raw['kmh'], closeTo(50, 0.1));
+        expect(raw['acc'], 0.5);
+        expect(raw['hasSpd'], isFalse);
+        expect(raw['hasAcc'], isFalse);
+        expect(raw['fed'], closeTo(50, 0.1));
+        expect(raw['age'] as double, lessThan(1.1));
+
+        final cand = lines.singleWhere((l) => l['e'] == 'cand');
+        final gps = cand['gps'] as Map<String, dynamic>;
+        expect(gps['src'], 'smooth');
+        expect(gps['kmh'], 0.0);
+        expect(gps['acc'], 0.0);
+        expect(gps['hasSpd'], isTrue);
+        expect(gps['hasAcc'], isFalse);
+        expect(gps['fed'] as double, greaterThan(0.0));
+        expect(gps['age'] as double, lessThan(1.0));
+      },
+    );
 
     test('nothing is written when disabled', () async {
       startRide(enabled: false);

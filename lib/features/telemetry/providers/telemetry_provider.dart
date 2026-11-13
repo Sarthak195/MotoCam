@@ -698,9 +698,25 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
     if (_filteredSpeedKmh < 0.6 || _stationaryFixStreak >= 6) {
       _filteredSpeedKmh = 0;
     }
+    final detectorSpeedKmh = _crashDetectorSpeedKmh(
+      position,
+      _filteredSpeedKmh,
+    );
+    final detectorSpeedAt = _sensorTimeNow();
+    _crashDebugLog?.noteFix(
+      detectorSpeedAt,
+      GpsSpeedFix(
+        rawSpeedKmh: position.speed * 3.6,
+        speedAccuracyMps: position.speedAccuracy,
+        hasSpeed: position.hasSpeed,
+        hasSpeedAccuracy: position.hasSpeedAccuracy,
+        fedKmh: detectorSpeedKmh,
+        fedRaw: _isCrashSpeedTrusted(position),
+      ),
+    );
     final confirmed = _crashDetector.addSpeed(
-      _crashDetectorSpeedKmh(position, _filteredSpeedKmh),
-      _sensorTimeNow(),
+      detectorSpeedKmh,
+      detectorSpeedAt,
     );
 
     _lastSpeedPosition = position;
@@ -773,13 +789,17 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
     Position position,
     double filteredSpeedKmh,
   ) {
+    return _isCrashSpeedTrusted(position)
+        ? position.speed * 3.6
+        : filteredSpeedKmh;
+  }
+
+  static bool _isCrashSpeedTrusted(Position position) {
     final speedMps = position.speed;
-    final isTrusted =
-        speedMps.isFinite &&
+    return speedMps.isFinite &&
         speedMps >= 0 &&
         speedMps * 3.6 <= maxPlausibleSpeedKmh &&
         (speedMps > 0 || position.speedAccuracy > 0);
-    return isTrusted ? speedMps * 3.6 : filteredSpeedKmh;
   }
 
   // Now, in the accelerometer's time base: the latest event time plus the

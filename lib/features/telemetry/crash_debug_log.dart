@@ -16,6 +16,39 @@ import 'package:flutter/foundation.dart';
 
 import 'crash_detector.dart';
 
+/// The speed side of one GPS fix, as the crash detector was fed it. Never
+/// holds a position.
+class GpsSpeedFix {
+  /// Creates the record.
+  const GpsSpeedFix({
+    required this.rawSpeedKmh,
+    required this.speedAccuracyMps,
+    required this.hasSpeed,
+    required this.hasSpeedAccuracy,
+    required this.fedKmh,
+    required this.fedRaw,
+  });
+
+  /// `Position.speed` in km/h (may be non-finite).
+  final double rawSpeedKmh;
+
+  /// `Position.speedAccuracy` in m/s (0 when the fix reports none).
+  final double speedAccuracyMps;
+
+  /// Android's `Location.hasSpeed()`.
+  final bool hasSpeed;
+
+  /// Android's `Location.hasSpeedAccuracy()`.
+  final bool hasSpeedAccuracy;
+
+  /// The speed (km/h) the crash detector received for this fix.
+  final double fedKmh;
+
+  /// Whether [fedKmh] is the fix's own speed (`true`) or the app's smoothed
+  /// fallback (`false`, when the fix reports speed 0 without accuracy).
+  final bool fedRaw;
+}
+
 /// Writes `crash_debug/<rideSessionId>.jsonl` under the directory returned by
 /// the resolver, listening to a [CrashDetector] as its observer.
 ///
@@ -73,6 +106,12 @@ class CrashDebugLog implements CrashDetectorObserver {
   bool _finished = false;
   bool _capped = false;
   DateTime? _latestAt;
+
+  // The latest two GPS speed fixes (sensor time), newest last.
+  DateTime? _fixAt;
+  GpsSpeedFix? _fix;
+  DateTime? _prevFixAt;
+  GpsSpeedFix? _prevFix;
 
   // The current one-second bucket of samples.
   DateTime? _originAt;
@@ -148,6 +187,45 @@ class CrashDebugLog implements CrashDetectorObserver {
     return _chain;
   }
 
+  /// Records the speed side of a GPS fix received at sensor time [at]; the
+  /// per-second and candidate lines carry the latest one.
+  void noteFix(DateTime at, GpsSpeedFix fix) {
+    if (_finished) {
+      return;
+    }
+    _prevFixAt = _fixAt;
+    _prevFix = _fix;
+    _fixAt = at;
+    _fix = fix;
+  }
+
+  // The newest fix received at or before [at], as a compact JSON object with
+  // its age at [at] (seconds), or null when there is none.
+  Map<String, Object?>? _fixJson(DateTime at) {
+    var fixAt = _fixAt;
+    var fix = _fix;
+    if (fixAt != null && fixAt.isAfter(at)) {
+      fixAt = _prevFixAt;
+      fix = _prevFix;
+    }
+    if (fixAt == null || fix == null || fixAt.isAfter(at)) {
+      return null;
+    }
+    return <String, Object?>{
+      'kmh': fix.rawSpeedKmh.isFinite ? _round(fix.rawSpeedKmh) : null,
+      'acc': fix.speedAccuracyMps.isFinite
+          ? _round(fix.speedAccuracyMps)
+          : null,
+      'hasSpd': fix.hasSpeed,
+      'hasAcc': fix.hasSpeedAccuracy,
+      'fed': _round(fix.fedKmh),
+      'src': fix.fedRaw ? 'raw' : 'smooth',
+      'age': double.parse(
+        (at.difference(fixAt).inMilliseconds / 1000).toStringAsFixed(1),
+      ),
+    };
+  }
+
   @override
   void onSample(DateTime at, double averagedG, double rawG, double triggerG) {
     if (_finished) {
@@ -183,6 +261,7 @@ class CrashDebugLog implements CrashDetectorObserver {
       'ruleA': info.stopRuleArmed,
       'deadlineMs': info.stopDeadline?.inMilliseconds,
       'ruleB': info.orientationAvailable,
+      'gps': ?_fixJson(info.joltAt),
     });
   }
 
@@ -281,6 +360,7 @@ class CrashDebugLog implements CrashDetectorObserver {
       'rawG': _round(_bucketMaxRawG),
       'n': _bucketSamples,
       'trig': _round(_bucketTriggerG),
+      'gps': ?_fixJson(last),
     });
     _bucketSamples = 0;
     _bucketMaxAvgG = 0.0;
