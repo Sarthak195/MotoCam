@@ -56,6 +56,30 @@ String incidentLockNotice({
   return '$prefix: current clip + $previous previous';
 }
 
+/// Whether an automatic incident lock should act on the incident confirmed
+/// at [detectedAt] (`TelemetryProvider.lastIncidentDetectedAt`).
+///
+/// Only while recording, only once per incident ([lastHandledAt] is the
+/// last one acted on), and never on an incident confirmed before the
+/// current recording started at [recordingStartedAt]
+/// (`CameraProvider.recordingStartedAt`): sensors keep running between
+/// rides, and the telemetry session, which clears old incidents, starts
+/// only after the recording has.
+bool shouldAutoLockIncident({
+  required bool isRecording,
+  required DateTime? detectedAt,
+  required DateTime? lastHandledAt,
+  required DateTime? recordingStartedAt,
+}) {
+  if (!isRecording || detectedAt == null || recordingStartedAt == null) {
+    return false;
+  }
+  if (detectedAt.isBefore(recordingStartedAt)) {
+    return false;
+  }
+  return lastHandledAt == null || detectedAt.isAfter(lastHandledAt);
+}
+
 /// Number of registered segments an automatic incident lock keeps.
 ///
 /// An incident is confirmed up to 10 s after its jolt, and the recording may

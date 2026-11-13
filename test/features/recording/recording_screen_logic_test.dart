@@ -247,6 +247,70 @@ void main() {
     });
   });
 
+  group('shouldAutoLockIncident', () {
+    final recordingStartedAt = DateTime(2026, 11, 13, 9);
+
+    test('locks a new incident confirmed during the recording', () {
+      expect(
+        shouldAutoLockIncident(
+          isRecording: true,
+          detectedAt: recordingStartedAt.add(const Duration(seconds: 30)),
+          lastHandledAt: null,
+          recordingStartedAt: recordingStartedAt,
+        ),
+        isTrue,
+      );
+    });
+
+    test('ignores an incident confirmed before the recording started', () {
+      // Confirmed between rides (sensors keep running) and still reported
+      // while the next recording starts, before the telemetry session
+      // clears it.
+      expect(
+        shouldAutoLockIncident(
+          isRecording: true,
+          detectedAt: recordingStartedAt.subtract(
+            const Duration(milliseconds: 1),
+          ),
+          lastHandledAt: null,
+          recordingStartedAt: recordingStartedAt,
+        ),
+        isFalse,
+      );
+    });
+
+    test('acts once per incident and only while recording', () {
+      final detectedAt = recordingStartedAt.add(const Duration(seconds: 5));
+      expect(
+        shouldAutoLockIncident(
+          isRecording: true,
+          detectedAt: detectedAt,
+          lastHandledAt: detectedAt,
+          recordingStartedAt: recordingStartedAt,
+        ),
+        isFalse,
+      );
+      expect(
+        shouldAutoLockIncident(
+          isRecording: false,
+          detectedAt: detectedAt,
+          lastHandledAt: null,
+          recordingStartedAt: recordingStartedAt,
+        ),
+        isFalse,
+      );
+      expect(
+        shouldAutoLockIncident(
+          isRecording: true,
+          detectedAt: detectedAt,
+          lastHandledAt: null,
+          recordingStartedAt: null,
+        ),
+        isFalse,
+      );
+    });
+  });
+
   group('resolveInitialFps', () {
     test('keeps the saved FPS when it is offered', () {
       expect(resolveInitialFps(60, const [24, 30, 60]), 60);
