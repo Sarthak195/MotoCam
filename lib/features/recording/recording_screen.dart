@@ -522,10 +522,7 @@ class _RecordingScreenState extends State<RecordingScreen>
     }
 
     final camera = context.read<CameraProvider>();
-    if (_isBlackoutMode &&
-        (state == AppLifecycleState.inactive ||
-            state == AppLifecycleState.paused ||
-            state == AppLifecycleState.hidden)) {
+    if (_isBlackoutMode && leavesBlackoutOnLifecycle(state)) {
       unawaited(_exitBlackoutMode(camera: camera));
     }
 
@@ -959,18 +956,14 @@ class _RecordingScreenState extends State<RecordingScreen>
     });
   }
 
+  // Blackout is a Flutter-only black overlay. It must never pause or resume
+  // the camera preview: the plugin implements that by unbinding and binding
+  // CameraX's Preview use case, which cost about 1.2 s of video at each
+  // toggle, and with only VideoCapture bound the camera closed and reopened
+  // at every segment roll (ride on the phone, 2026-11-13). The preview
+  // widget is not built under the overlay, but the use case stays bound.
   Future<void> _enterBlackoutMode({required CameraProvider camera}) async {
-    if (_isBlackoutMode || !camera.isRecording) {
-      return;
-    }
-
-    try {
-      await camera.controller?.pausePreview();
-    } catch (e) {
-      debugPrint('Blackout: pausePreview failed: $e');
-    }
-
-    if (!mounted) {
+    if (_isBlackoutMode || !camera.isRecording || !mounted) {
       return;
     }
 
@@ -981,23 +974,12 @@ class _RecordingScreenState extends State<RecordingScreen>
   }
 
   Future<void> _exitBlackoutMode({required CameraProvider camera}) async {
-    if (!_isBlackoutMode) {
+    if (!_isBlackoutMode || !mounted) {
       return;
     }
 
     _blackoutExitHoldTimer?.cancel();
     _blackoutExitTriggered = false;
-
-    try {
-      await camera.controller?.resumePreview();
-    } catch (e) {
-      debugPrint('Blackout: resumePreview failed: $e');
-    }
-
-    if (!mounted) {
-      return;
-    }
-
     setState(() {
       _isBlackoutMode = false;
     });
@@ -1015,6 +997,14 @@ class _RecordingScreenState extends State<RecordingScreen>
   }
 
   void _endBlackoutExitHold() {
+    // Blackout already ended (the hold or another exit): the overlay's
+    // gesture is cancelled as it unmounts, which must not show a stale
+    // "Hold for 2 seconds" notice after "Blackout off".
+    if (!_isBlackoutMode || !mounted) {
+      _blackoutExitHoldTimer?.cancel();
+      _blackoutExitTriggered = false;
+      return;
+    }
     if (_blackoutExitTriggered) {
       _blackoutExitTriggered = false;
       return;
@@ -1316,11 +1306,7 @@ class _RecordingScreenState extends State<RecordingScreen>
       await _stopForegroundServiceSafely();
       // Always leave blackout, also after an error or a notification Stop.
       if (_isBlackoutMode && mounted) {
-        try {
-          await _exitBlackoutMode(camera: camera);
-        } catch (e) {
-          debugPrint('Leaving blackout after stop failed: $e');
-        }
+        await _exitBlackoutMode(camera: camera);
       }
       _isStoppingRecording = false;
       if (mounted) {
