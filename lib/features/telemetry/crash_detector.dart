@@ -83,9 +83,13 @@ class CrashDetector {
   /// Rule (a): the last speed before the jolt must be at least this (km/h).
   /// 20 rather than 15: below about 20 km/h, GPS lag makes a gentle stop
   /// look abrupt. Replaying the 2026-11-13 ride with a jolt placed at every
-  /// moving second, a 15 km/h floor confirmed 5 of 669 such jolts (all at 15
-  /// to 25 km/h, two seconds before a normal stop), a 20 km/h floor 1 of
-  /// 610. Slow crashes usually tip the bike over, which rule (b) catches.
+  /// moving second, on each fix's own speed (estimated by undoing the
+  /// provider's filter on the saved speeds, which is noisy), a 15 km/h
+  /// floor confirmed 17 to 29 of 686 such jolts depending on where in the
+  /// second the jolt falls, a 20 km/h floor 11 to 19 of 629 (mostly at 20
+  /// to 35 km/h, up to 2.5 s before a hard but normal stop). None of the
+  /// ride's 52 real jolts confirmed. Slow crashes usually tip the bike over,
+  /// which rule (b) catches.
   static const double minMovingSpeedKmh = 20.0;
 
   /// Rule (a): the speed after the jolt must fall below this (km/h).
@@ -101,10 +105,10 @@ class CrashDetector {
   /// peaked at 0.25 g); a collision stops the bike almost at once.
   static const double abruptStopMinDecelerationG = 0.6;
 
-  /// Rule (a): allowance for the speed the provider reports (1 Hz fixes, the
-  /// receiver's own smoothing and the provider's speed filter, which takes
-  /// about two fixes to fall below [nearStopSpeedKmh] after an instant stop
-  /// from 20 to 30 km/h).
+  /// Rule (a): allowance for the receiver's speed lagging the bike: its own
+  /// smoothing, the delivery delay and the wait for the next 1 Hz fix. The
+  /// provider passes each fix's own speed, not its filtered speed, so the
+  /// app's smoothing takes none of it.
   static const Duration stopGpsLag = Duration(seconds: 2);
 
   /// Rule (b): gravity must differ from the pre-jolt direction by more than
