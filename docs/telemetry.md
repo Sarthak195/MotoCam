@@ -53,9 +53,9 @@ Resolved plugin versions (pubspec.lock): geolocator 14.1.2, geolocator_android 5
 
 ### Accelerometer (sensors_plus)
 
-`TelemetryProvider._startAccelerometerTracking` listens to `userAccelerometerEventStream(samplingPeriod: SensorInterval.gameInterval)`: linear acceleration with gravity removed, in m/s², requested every 20 ms (about 50 Hz). On Android the plugin backs this stream with `Sensor.TYPE_LINEAR_ACCELERATION`, and Android treats the sampling period only as a hint. Each event's own timestamp is used for incident timing. No gyroscope, magnetometer or orientation data is read. Resolved version: sensors_plus 7.1.1.
+`TelemetryProvider._startAccelerometerTracking` listens to `userAccelerometerEventStream(samplingPeriod: SensorInterval.gameInterval)`: linear acceleration with gravity removed, in m/s², requested every 20 ms (about 50 Hz). On Android the plugin backs this stream with `Sensor.TYPE_LINEAR_ACCELERATION`, and Android treats the sampling period only as a hint. Each event's own timestamp is used for incident timing. A second subscription, `accelerometerEventStream(samplingPeriod: SensorInterval.uiInterval)` (raw acceleration with gravity, about 15 Hz), feeds only the orientation used by the tip-over check (see [Incident detection](#incident-detection)); if it fails, only the abrupt-stop rule can confirm an incident. No gyroscope or magnetometer data is read. Resolved version: sensors_plus 7.1.1.
 
-**Raw-accelerometer fallback.** If the linear-acceleration stream fails with a `PlatformException` whose code is `NO_SENSOR` (Android: no such sensor) or `UNAVAILABLE` (iOS: device motion unavailable), `_startGravityFilteredAccelerometer` switches to `accelerometerEventStream` at the same 20 ms period (an internal flag; the UI does not show which source is used). The fallback removes gravity in software:
+**Raw-accelerometer fallback.** If the linear-acceleration stream fails with a `PlatformException` whose code is `NO_SENSOR` (Android: no such sensor) or `UNAVAILABLE` (iOS: device motion unavailable), `_startGravityFilteredAccelerometer` switches to `accelerometerEventStream` at the same 20 ms period (an internal flag; the UI does not show which source is used) and cancels the separate orientation stream, because the raw samples now feed the orientation too. The fallback removes gravity in software:
 
 1. The first sample only seeds the gravity estimate.
 2. For each later sample, `alpha = τ / (τ + dt)` with τ = 800 ms and `dt` the time since the previous event, clamped to 5–250 ms.
@@ -101,7 +101,7 @@ stateDiagram-v2
 
 | Method | What it does |
 |---|---|
-| `startRideSession({startedAt})` | Sets the ride start time to `startedAt` (default now; a future value is clamped to now) and a new session ID `<UTC epoch ms>_<16 hex chars>` (two `Random.secure().nextInt(1 << 30)` values). Clears the telemetry path and checkpoint state, and the segment-hash cache unless a save is still running. Resets distance, max and average speed, the incident count, last-incident state and recorded incidents, the mock-location flag, the incident run, the speed-filter state and the distance anchor. Clears samples. Zeroes speed, acceleration, `elapsedMs` and distance in `currentData` but keeps the previous latitude, longitude, bearing and fix state. Captures sample #0 immediately, then starts a `Timer.periodic(sampleInterval)` (default 1 s) that calls `_captureSample`. |
+| `startRideSession({startedAt})` | Sets the ride start time to `startedAt` (default now; a future value is clamped to now) and a new session ID `<UTC epoch ms>_<16 hex chars>` (two `Random.secure().nextInt(1 << 30)` values). Clears the telemetry path and checkpoint state, and the segment-hash cache unless a save is still running. Resets distance, max and average speed, the incident count, last-incident state and recorded incidents, the mock-location flag, the crash detector's pending candidate and debounce, the speed-filter state and the distance anchor. Clears samples. Zeroes speed, acceleration, `elapsedMs` and distance in `currentData` but keeps the previous latitude, longitude, bearing and fix state. Captures sample #0 immediately, then starts a `Timer.periodic(sampleInterval)` (default 1 s) that calls `_captureSample`. |
 | `checkpointRideSession({segmentPaths, lockedSegmentPaths, segmentTimeline, recordingSettings})` | Does nothing without an active ride. Otherwise stores the segment state, starts a 30 s timer that rewrites the checkpoint (once per ride), starts hashing new segments on a background isolate and writes a sealed checkpoint (`sessionComplete: false`). Returns the path, or `null` when nothing was written; a write error is only logged. See [data-formats.md](data-formats.md#checkpoints-and-the-final-save). |
 | `stopRideSessionAndPersist(videoPath, {segmentPaths, lockedSegmentPaths, segmentTimeline, recordingSettings})` | If no ride is active: cancels the timers, notifies, returns `null`. Otherwise captures the ride (samples, incidents, statistics, mock flag, session ID, checkpoint path) and ends the ride state before its first `await`, so a ride started while it saves is not affected. Then writes the file (see [Persistence](#persistence)) and returns its path, or `null` if the save failed. Distance, max and average speed are **not** reset; they keep the last ride's values until the next start. |
 | `retryPendingPersist()` | Retries every failed save, oldest first. Returns the last path when all of them succeeded, or `null` when nothing was pending, a retry is already running, or any save failed again (it then stays pending). |
@@ -177,14 +177,31 @@ The recording screen shows speed as `toStringAsFixed(0)` km/h and distance as `t
 
 ## Incident detection
 
-Detection runs in `_onLinearAcceleration` on every sensor event (about every 20 ms) while tracking runs, whether or not a ride is active. With the raw-accelerometer fallback, the gravity-filtered values arrive here in the same way.
+Automatic crash detection is "jolt + confirm" (since v0.1.14). The logic is the pure `CrashDetector` in [crash_detector.dart](../lib/features/telemetry/crash_detector.dart); `TelemetryProvider` feeds it and records what it confirms. It runs whenever tracking runs, whether or not a ride is active. Before v0.1.14 any 40 ms of raw acceleration above the trigger was an incident; on a handlebar mount that turned vibration into 52 incidents in a 13-minute ride and locked every segment.
+
+`_onLinearAcceleration` handles every linear-acceleration event (about every 20 ms; with the raw-accelerometer fallback the gravity-filtered values arrive the same way):
 
 1. Samples with a non-finite axis are ignored.
-2. `raw = sqrt(x² + y² + z²) / 9.81` g.
-3. `smoothed = 0.7 × smoothed + 0.3 × raw` (EMA α = 0.30; the first sample is adopted unsmoothed). The smoothed value feeds `currentData.accelerationG`, the saved samples and the stationary test only. Detection does not use it.
-4. If `raw ≥ trigger`, the sample joins the current run: the run remembers its first event time, its sample count and its peak `raw`. When the run has at least 2 samples and spans at least 40 ms (`minIncidentDuration`) of event time, `_detectCrash(peak)` is called and the run resets. At the nominal 50 Hz rate that is three consecutive samples. If the platform reports no usable event times (the span is not positive), three samples are required instead.
-5. Any sample below the trigger resets the run. Pausing tracking also resets it.
-6. `_detectCrash` ignores the hit if less than the debounce has passed since the last accepted incident (wall clock). Otherwise it records `lastIncidentDetectedAt`, `lastIncidentGForce` (the peak), increments `incidentCount` and notifies listeners immediately. If a ride is active, it also appends an incident record (`elapsedMs`, UTC `timestamp`, `gForce`, `triggerGForce`, `reason: "auto-crash"`) that is saved with the ride.
+2. `raw = sqrt(x² + y² + z²) / 9.81` g. `smoothed = 0.7 × smoothed + 0.3 × raw` (EMA α = 0.30) feeds `currentData.accelerationG`, the saved samples and the stationary test only.
+3. The raw vector goes to `CrashDetector.addLinearAcceleration` with the event time.
+
+**Jolt.** The detector averages the acceleration *vector* over the last 100 ms (`joltWindow`) and takes the magnitude of the average. Handlebar and engine vibration is zero-mean along each axis and cancels (a 100 ms boxcar keeps about 20 % of a 15 Hz and 13 % of a 25 Hz vibration), while an impact that pushes the phone one way keeps its value. A jolt is that average at or above the trigger for at least 60 ms of event time (`minJoltDuration`; four samples when the platform reports no usable times). At the medium 3.5 g trigger that is roughly a 3.5 to 5 m/s change of velocity within about 100 ms: a 15 g knock must last about 25 ms, an 8 g one about 50 ms, a 5 g one about 100 ms. The jolt's time is the first sample whose average reached the trigger; its peak is the largest raw magnitude in the window and the run.
+
+**Candidate.** A jolt starts a candidate unless one is already pending (then it only raises the pending peak) or less than the debounce has passed since the last confirmation. At that moment the detector notes:
+
+- the speed before the jolt: the provider's filtered speed from the last fix at most 3 s before the jolt (`maxPreJoltSpeedAge`), and only if it is at least 20 km/h (`minMovingSpeedKmh`); otherwise the abrupt-stop rule is off for this candidate;
+- the orientation before the jolt: the orientation estimate from at least 0.5 s before it (`referenceLead`), so the impact has not moved it yet; without one the tip-over rule is off.
+
+**Confirmation.** The candidate becomes an incident when, within 10 s of the jolt (`confirmWindow`), either rule holds; otherwise it expires silently.
+
+- (a) **Abrupt stop.** A fix received after the jolt reports under 8 km/h (`nearStopSpeedKmh`) no later than `abruptStopDeadline(speedBefore)`: the time a 0.6 g stop from that speed would take, plus 2 s for 1 Hz fixes, receiver smoothing and the provider's speed filter (`abruptStopMinDecelerationG`, `stopGpsLag`). From 50 km/h that is about 4.0 s. Normal stops brake at about 0.1 to 0.3 g (the seven stops of the 2026-11-13 ride peaked at 0.25 g), so a pothole followed by a stop at the lights does not count. The speed used is `_filteredSpeedKmh`, the value the HUD shows and the ride saves; each fix is stamped in the accelerometer's time base (`_sensorTimeNow`). Without fixes this rule never fires, and a stale pre-jolt speed switches it off.
+- (b) **Tip-over.** The raw accelerometer (the separate 15 Hz stream, or the fallback's raw samples) feeds a low-pass orientation estimate (τ = 500 ms). When it differs from the pre-jolt orientation by more than 60 degrees (`tipOverMinAngleDegrees`) without a break for 2 s (`tipOverHold`), the candidate is confirmed: the bike on its side or the phone thrown off the mount. Leaning in a turn does not count: in a coordinated lean gravity plus the centripetal acceleration stays along the bike's own vertical axis, so the measured direction does not change (only its size grows). A bike on its side stand leans only about 10 to 15 degrees, and even 1 g of braking tilts the measured direction by only 45 degrees. Readings under 0.5 g (free fall) are not used.
+
+With no GPS fix only (b) can confirm.
+
+**Record.** `_detectCrash(ConfirmedCrash)` sets `lastIncidentDetectedAt` to the wall-clock confirmation time (the screen watches it), `lastIncidentGForce` to the jolt's peak and `lastIncidentJoltElapsedMs` to the jolt's `elapsedMs`, increments `incidentCount` and notifies listeners. If a ride is active it appends an incident record with the jolt's time (`elapsedMs` since the ride start, never negative, and the UTC `timestamp`), the peak `gForce`, `triggerGForce` and `reason: "auto-crash"`. The jolt time is the accelerometer event time, which sensors_plus derives from the wall clock. How the incident was confirmed is only logged (`Telemetry: incident confirmed by abruptStop ...`), not saved, so the ride JSON schema is unchanged.
+
+`startRideSession()` drops a pending candidate and the debounce; pausing tracking also forgets the acceleration window, the orientation and the last speed.
 
 ### Thresholds
 
@@ -196,23 +213,23 @@ Defaults in the provider are 3.5 g and 6 s. `RecordingScreen` applies the user's
 | medium (default) | 3.5 g | 6 s |
 | high | 2.8 g | 3 s |
 
-These trigger values have not been calibrated against real riding data.
+These trigger values have not been calibrated against 50 Hz riding data. The confirmation rules were checked against the 1 Hz speeds of one 13-minute handlebar ride (2026-11-13), whose 52 jolts under the old 40 ms rule would all have been rejected by the abrupt-stop rule.
 
 ### What an incident triggers
 
 ```mermaid
 flowchart LR
-    A[_detectCrash] --> B[notifyListeners]
+    A[_detectCrash at confirmation] --> B[notifyListeners]
     B --> C[RecordingScreen._onTelemetryChanged]
     C --> D{camera recording and incident newer than last handled?}
     D -- no --> E[ignore]
-    D -- yes --> G["CameraProvider.markIncident(protectPastSegments: 2, protectCurrentSegment: true, reason: 'auto-crash')"]
+    D -- yes --> G["CameraProvider.markIncident(protectPastSegments: autoIncidentProtectPastSegments(...), protectCurrentSegment: true, reason: 'auto-crash')"]
     G --> H[_checkpointRideIfChanged]
     G --> F[post-frame callback]
     F --> I["haptic feedback + notice: Incident detected. Locked: current clip + n previous"]
 ```
 
-`markIncident` locks the last two registered segments of the session and every segment not yet registered: the one being recorded and, during a roll, the one still being saved. See [recording-pipeline.md](recording-pipeline.md). The lock and the checkpoint request run synchronously in the telemetry listener, so they also happen while the app is `paused` or `hidden` (for example with the screen off). Only the haptic feedback and the in-app notice wait for the next frame. `RecordingScreen` ignores incidents detected while the camera is not recording, but the provider keeps them, and their debounce window, until `startRideSession()` resets the incident state.
+The lock runs at the confirmation, up to 10 s after the jolt, and keeps what a lock at the jolt would have kept. `autoIncidentProtectPastSegments` ([recording_screen_logic.dart](../lib/features/recording/recording_screen_logic.dart)) returns 2 plus the number of registered segments whose `endMs` in `lastSessionSegmentTimeline` is after `lastIncidentJoltElapsedMs`, so a jolt late in segment N confirmed after a roll keeps N-2, N-1 and N, and the unregistered segments (N+1, and N while it is still being saved) are covered by `protectCurrentSegment`. With 5 s segments that rolled twice the number grows accordingly (`markIncident` clamps it to 10). See [recording-pipeline.md](recording-pipeline.md). The lock and the checkpoint request run synchronously in the telemetry listener, so they also happen while the app is `paused` or `hidden` (for example with the screen off). Only the haptic feedback and the in-app notice wait for the next frame. The notice says how many previous clips were kept. `RecordingScreen` ignores incidents confirmed while the camera is not recording, but the provider keeps them, and their debounce window, until `startRideSession()` resets the incident state.
 
 Incidents detected during a ride are saved in the ride JSON's `incidents` list, and playback draws its incident markers from that list. For files without the list, playback derives markers from the persisted 1 Hz samples with its own rule (`incidentMarkerThresholdG` 3.2 g and `incidentMarkerDebounceMs` 5000 ms in [playback_timeline.dart](../lib/features/history/widgets/playback_timeline.dart)); see [playback-and-history.md](playback-and-history.md).
 
@@ -260,11 +277,13 @@ The native handler is `getBatteryStatus` on `com.example.motocam/device_status` 
 
 ## Test coverage
 
-[telemetry_provider_test.dart](../test/features/telemetry/providers/telemetry_provider_test.dart) has 39 tests and [telemetry_data_test.dart](../test/features/telemetry/models/telemetry_data_test.dart) has 6, out of 591 tests in the project. The provider tests construct `TelemetryProvider(sampleInterval: 1 s)` directly and never call `initialize()`, so no plugin channels are involved; the signing tests inject a fake `rideSigner` and mock SharedPreferences, and every other save meets no `integrity` handler and is saved as version 2. Fixes are injected with `updateLocationForTesting`, linear acceleration with `updateAccelerometerForTesting` and raw acceleration with `updateRawAccelerometerForTesting`; all three call the production handlers. The `createMockPosition` helper sets `speedAccuracy: 0.0`, so every test fix takes the blended (unreliable GPS speed) path.
+[telemetry_provider_test.dart](../test/features/telemetry/providers/telemetry_provider_test.dart) has 34 tests, [crash_detection_test.dart](../test/features/telemetry/providers/crash_detection_test.dart) has 12 and [telemetry_data_test.dart](../test/features/telemetry/models/telemetry_data_test.dart) has 6, out of 591 tests in the project. The provider tests construct `TelemetryProvider(sampleInterval: 1 s)` directly and never call `initialize()`, so no plugin channels are involved; the signing tests inject a fake `rideSigner` and mock SharedPreferences, and every other save meets no `integrity` handler and is saved as version 2. Fixes are injected with `updateLocationForTesting`, linear acceleration with `updateAccelerometerForTesting`, the orientation stream with `updateOrientationForTesting` and raw acceleration with `updateRawAccelerometerForTesting`; all four call the production handlers. The crash tests drive them on one synthetic clock through `RideSim` ([ride_sim.dart](../test/support/ride_sim.dart)), whose fixes report a speed accuracy so GPS speed is trusted. The `createMockPosition` helper sets `speedAccuracy: 0.0`, so every test fix takes the blended (unreliable GPS speed) path.
 
 | Group | Checks |
 |---|---|
-| `TelemetryProvider Tests` (22) | Initial state; `startRideSession` reset, ride zero point and future clamp; `hasFix` before and after a fix; fixes before ride start, older than the last fix, or with an invalid course; distance from real movement, stationary jitter and a poor first fix; mock-location flag; stationary speed; incident runs (sustained run, reset by a low sample, a single knock, an 8 g 150 ms impact at medium sensitivity, the gravity-filtered fallback); non-finite accelerometer samples; `clearHistory`; `pauseTracking` during a ride |
+| `TelemetryProvider Tests` (17) | Initial state; `startRideSession` reset, ride zero point and future clamp; `hasFix` before and after a fix; fixes before ride start, older than the last fix, or with an invalid course; distance from real movement, stationary jitter and a poor first fix; mock-location flag; stationary speed; non-finite accelerometer samples; `clearHistory`; `pauseTracking` during a ride |
+| `Crash detection (jolt + confirm)` (11) | Vibration at speed starts no candidate; a sustained jolt at steady speed; a jolt then an abrupt near-stop (one incident at the jolt's time and peak); a pothole then a gradual stop; a jolt and a tip-over without GPS; a tip-over that does not hold; a jolt at a standstill; leaning in a turn; two jolts in one window (one incident, raised peak); the gravity-filtered fallback; the debounce after an incident |
+| `CrashDetector.abruptStopDeadline` (1) | The 0.6 g plus 2 s deadline |
 | `TelemetryProvider.shouldAccumulateDistance` (7) | Real movement, noise floor, GPS-speed override, poor accuracy, non-newer fixes, implausible jumps, unknown accuracy |
 | `sanitizeJsonValue` (1, the codec function) | Non-finite doubles become `null` at any depth |
 | `TelemetryProvider persistence` (6) | A stopped ride is written sealed and `RideRecord` verifies it; a checkpoint is written sealed and incomplete and stop completes it; no checkpoint without a ride; a failed save is kept for retry; a ride started during a save is not affected; a later save does not discard an earlier failed one |

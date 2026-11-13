@@ -194,14 +194,14 @@ Samples with `hasFix: false` are left out of the speed statistics, the route map
 
 ### `incidents[]` entries
 
-Written by `TelemetryProvider._detectCrash` for each incident detected while a ride is active. Incidents detected while no ride is active, and manual LOCK presses, are not recorded here (manual locks appear only in `lockedSegmentPaths`). Read by `RideIncident.fromJson` in [ride_record.dart](../lib/features/history/models/ride_record.dart).
+Written by `TelemetryProvider._detectCrash` for each incident confirmed while a ride is active. Since v0.1.14 an incident is a jolt confirmed by an abrupt stop or a tip-over within 10 s (see [telemetry.md](telemetry.md#incident-detection)); the entry keeps the jolt's time and peak, and the schema is unchanged. Incidents detected while no ride is active, and manual LOCK presses, are not recorded here (manual locks appear only in `lockedSegmentPaths`). Read by `RideIncident.fromJson` in [ride_record.dart](../lib/features/history/models/ride_record.dart).
 
 | Field | Type | Meaning | Reader behaviour |
 |---|---|---|---|
-| `elapsedMs` | int | ms since ride start at detection | Number or numeric string, truncated to int. The entry is skipped when it is missing, non-finite or negative. |
-| `timestamp` | string | Detection time, UTC ISO 8601 | `DateTime.tryParse`, converted to local time; otherwise `null` |
-| `gForce` | number | Peak raw linear-acceleration magnitude of the triggering run, in g | Finite number or numeric string; otherwise `null` |
-| `triggerGForce` | number | Trigger threshold that applied at detection, in g | As `gForce` |
+| `elapsedMs` | int | ms since ride start at the jolt (before v0.1.14: at detection) | Number or numeric string, truncated to int. The entry is skipped when it is missing, non-finite or negative. |
+| `timestamp` | string | Jolt time, UTC ISO 8601 (before v0.1.14: detection time) | `DateTime.tryParse`, converted to local time; otherwise `null` |
+| `gForce` | number | Peak raw linear-acceleration magnitude of the jolt, in g, raised by later jolts merged into it | Finite number or numeric string; otherwise `null` |
+| `triggerGForce` | number | Trigger that applied, in g. Since v0.1.14 it applies to the 100 ms average of the acceleration vector, which never exceeds the raw peak `gForce` | As `gForce` |
 | `reason` | string | `"auto-crash"` | Trimmed; empty gives `null` |
 
 ### `segmentTimeline[]` entries
