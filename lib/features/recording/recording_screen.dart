@@ -1479,8 +1479,13 @@ class _RecordingScreenState extends State<RecordingScreen>
     // Lock immediately: frames (and post-frame callbacks) stop while the app
     // is hidden or paused, but recording and incident detection continue.
     final registeredSegments = camera.lastSessionSegmentPaths.length;
+    // Confirmation can come after a roll; keep the segments around the jolt.
+    final protectPastSegments = autoIncidentProtectPastSegments(
+      timeline: camera.lastSessionSegmentTimeline,
+      joltElapsedMs: telemetry.lastIncidentJoltElapsedMs,
+    );
     camera.markIncident(
-      protectPastSegments: 2,
+      protectPastSegments: protectPastSegments,
       protectCurrentSegment: true,
       reason: 'auto-crash',
     );
@@ -1495,6 +1500,7 @@ class _RecordingScreenState extends State<RecordingScreen>
       _showInAppNotice(
         incidentLockNotice(
           registeredSegments: registeredSegments,
+          protectPastSegments: protectPastSegments,
           automatic: true,
         ),
       );

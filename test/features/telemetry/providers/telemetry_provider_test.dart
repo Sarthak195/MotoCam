@@ -10,6 +10,7 @@ import 'package:motocam/features/history/models/ride_record.dart';
 import 'package:motocam/features/telemetry/providers/telemetry_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../../../support/ride_sim.dart';
 import '../../../support/test_signing_key.dart';
 
 final String _sep = Platform.pathSeparator;
@@ -278,136 +279,6 @@ void main() {
       expect(provider.currentData.speed, 0.0); // Filtered to 0
     });
 
-    test('incident detection requires a sustained run and registers crash', () {
-      provider.startRideSession();
-      provider.setIncidentDetectionConfig(
-        triggerGForce: 2.0,
-        debounce: const Duration(seconds: 5),
-      );
-      expect(provider.incidentCount, 0);
-      final t0 = DateTime.now();
-
-      // One sample above the 2.0 g trigger (30 m/s^2 = ~3.06 g) is not enough.
-      provider.updateAccelerometerForTesting(30.0, 0.0, 0.0, timestamp: t0);
-      expect(provider.incidentCount, 0);
-
-      // A second sample 20 ms later spans less than minIncidentDuration.
-      provider.updateAccelerometerForTesting(
-        31.0,
-        0.0,
-        0.0,
-        timestamp: t0.add(const Duration(milliseconds: 20)),
-      );
-      expect(provider.incidentCount, 0);
-
-      // 40 ms above the trigger counts as an incident.
-      provider.updateAccelerometerForTesting(
-        32.0,
-        0.0,
-        0.0,
-        timestamp: t0.add(const Duration(milliseconds: 40)),
-      );
-      expect(provider.incidentCount, 1);
-      expect(provider.lastIncidentDetectedAt, isNotNull);
-      expect(provider.lastIncidentGForce, closeTo(32.0 / 9.81, 0.001));
-    });
-
-    test('a sample below the trigger resets the run', () {
-      provider.startRideSession();
-      provider.setIncidentDetectionConfig(
-        triggerGForce: 2.0,
-        debounce: const Duration(seconds: 5),
-      );
-      final t0 = DateTime.now();
-
-      provider.updateAccelerometerForTesting(20.0, 0.0, 0.0, timestamp: t0);
-      provider.updateAccelerometerForTesting(
-        0.0,
-        0.0,
-        0.0,
-        timestamp: t0.add(const Duration(milliseconds: 20)),
-      );
-      provider.updateAccelerometerForTesting(
-        20.0,
-        0.0,
-        0.0,
-        timestamp: t0.add(const Duration(milliseconds: 40)),
-      );
-
-      expect(provider.incidentCount, 0);
-    });
-
-    test('a single knock right after START does not trigger an incident', () {
-      provider.startRideSession();
-      provider.setIncidentDetectionConfig(
-        triggerGForce: 3.5,
-        debounce: const Duration(seconds: 6),
-      );
-      final t0 = DateTime.now();
-
-      // One 5 g sample followed by quiet.
-      provider.updateAccelerometerForTesting(49.0, 0.0, 0.0, timestamp: t0);
-      for (var i = 1; i <= 10; i++) {
-        provider.updateAccelerometerForTesting(
-          0.3,
-          0.0,
-          0.0,
-          timestamp: t0.add(Duration(milliseconds: 20 * i)),
-        );
-      }
-
-      expect(provider.incidentCount, 0);
-    });
-
-    test('an 8 g impact lasting 150 ms triggers at medium sensitivity', () {
-      provider.startRideSession();
-      provider.setIncidentDetectionConfig(
-        triggerGForce: 3.5,
-        debounce: const Duration(seconds: 6),
-      );
-      final t0 = DateTime.now();
-
-      for (var i = 0; i < 8; i++) {
-        provider.updateAccelerometerForTesting(
-          8 * 9.81,
-          0.0,
-          0.0,
-          timestamp: t0.add(Duration(milliseconds: 20 * i)),
-        );
-      }
-
-      expect(provider.incidentCount, 1);
-    });
-
-    test('the gravity-filtered fallback keeps a 5 g, 150 ms impact', () {
-      provider.startRideSession();
-      provider.setIncidentDetectionConfig(
-        triggerGForce: 3.5,
-        debounce: const Duration(seconds: 6),
-      );
-      final t0 = DateTime.now();
-      var t = t0;
-
-      // One second at rest (gravity only) at the 20 ms game rate.
-      for (var i = 0; i < 50; i++) {
-        provider.updateRawAccelerometerForTesting(0.0, 0.0, 9.81, timestamp: t);
-        t = t.add(const Duration(milliseconds: 20));
-      }
-      expect(provider.incidentCount, 0);
-
-      // A 5 g impact along x for 150 ms.
-      for (var i = 0; i < 8; i++) {
-        provider.updateRawAccelerometerForTesting(
-          5 * 9.81,
-          0.0,
-          9.81,
-          timestamp: t,
-        );
-        t = t.add(const Duration(milliseconds: 20));
-      }
-      expect(provider.incidentCount, 1);
-    });
-
     test('a first fix with poor accuracy does not anchor ride distance', () {
       final now = DateTime.now();
       provider.startRideSession();
@@ -478,15 +349,7 @@ void main() {
         );
         provider.updateLocationForTesting(pos);
 
-        // Add accelerometer events to trigger an incident
-        provider.updateAccelerometerForTesting(30.0, 0.0, 0.0, timestamp: now);
-        provider.updateAccelerometerForTesting(
-          32.0,
-          0.0,
-          0.0,
-          timestamp: now.add(const Duration(milliseconds: 50)),
-        );
-
+        recordTipOverIncident(provider);
         expect(provider.incidentCount, 1);
 
         provider.clearHistory();
@@ -608,20 +471,8 @@ void main() {
     Future<Map<String, dynamic>> readJson(String path) async =>
         jsonDecode(await File(path).readAsString()) as Map<String, dynamic>;
 
-    void recordIncident(TelemetryProvider provider) {
-      provider.setIncidentDetectionConfig(
-        triggerGForce: 2.0,
-        debounce: const Duration(seconds: 5),
-      );
-      final t0 = DateTime.now();
-      provider.updateAccelerometerForTesting(30.0, 0.0, 0.0, timestamp: t0);
-      provider.updateAccelerometerForTesting(
-        30.0,
-        0.0,
-        0.0,
-        timestamp: t0.add(const Duration(milliseconds: 50)),
-      );
-    }
+    void recordIncident(TelemetryProvider provider) =>
+        recordTipOverIncident(provider);
 
     test('stop writes a sealed ride that RideRecord verifies', () async {
       final segment1 = await createSegment('segment_1.mp4', 'video-one');
