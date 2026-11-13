@@ -199,6 +199,19 @@ CameraInitPanel cameraInitPanelFor(CameraInitFailure? failure) {
   }
 }
 
+/// Whether Blackout ends when the app moves to [state].
+///
+/// Blackout is only a black overlay drawn by Flutter (the camera keeps its
+/// Preview use case bound), so leaving it costs no video. It survives
+/// `inactive` (the notification shade, the start of a power press, and
+/// Picture-in-Picture, whose window draws its own REC view instead of the
+/// overlay). It ends at `hidden` or `paused` (screen off, another app in
+/// front), so the rider comes back to the live preview and can see that the
+/// camera still records.
+bool leavesBlackoutOnLifecycle(AppLifecycleState state) {
+  return state == AppLifecycleState.hidden || state == AppLifecycleState.paused;
+}
+
 /// Decides when a recording should attempt stall recovery after the app
 /// returns to the foreground.
 ///
