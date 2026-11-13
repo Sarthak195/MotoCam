@@ -204,7 +204,11 @@ class AppSettingsProvider extends ChangeNotifier {
   /// Preferred camera name; empty means automatic selection.
   String get selectedCameraName => _selectedCameraName;
 
-  /// Peak g-force that auto-locks a segment at the current sensitivity.
+  /// Jolt trigger (g) at the current sensitivity: the 100 ms average of the
+  /// linear acceleration must reach it for at least 60 ms (see
+  /// `CrashDetector`), roughly a 3.5 to 5 m/s change of velocity at medium.
+  /// A jolt only auto-locks once it is confirmed by an abrupt stop or a
+  /// tip-over, so the sensitivity mostly decides which knocks are checked.
   double get incidentTriggerGForce {
     switch (_incidentSensitivity) {
       case IncidentSensitivity.low:
@@ -216,7 +220,8 @@ class AppSettingsProvider extends ChangeNotifier {
     }
   }
 
-  /// Minimum time between two automatic incident locks.
+  /// Minimum time from an automatic incident lock's confirmation to the next
+  /// jolt that can start another one.
   Duration get incidentDebounce {
     switch (_incidentSensitivity) {
       case IncidentSensitivity.low:

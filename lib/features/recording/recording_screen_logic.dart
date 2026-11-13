@@ -56,6 +56,36 @@ String incidentLockNotice({
   return '$prefix: current clip + $previous previous';
 }
 
+/// Number of registered segments an automatic incident lock keeps.
+///
+/// An incident is confirmed up to 10 s after its jolt, and the recording may
+/// have rolled into new segments meanwhile. The lock keeps what a lock at
+/// the jolt itself would have kept (the two segments before the jolt's
+/// segment), plus every registered segment that ended after the jolt: the
+/// jolt's own segment and any later one. Segments not registered yet are
+/// covered by `protectCurrentSegment`.
+///
+/// [timeline] is `CameraProvider.lastSessionSegmentTimeline` (`endMs` since
+/// the recording start) and [joltElapsedMs] is
+/// `TelemetryProvider.lastIncidentJoltElapsedMs` on the same zero point;
+/// `null` gives 2. `markIncident` clamps the result to 10.
+int autoIncidentProtectPastSegments({
+  required List<Map<String, dynamic>> timeline,
+  required int? joltElapsedMs,
+}) {
+  if (joltElapsedMs == null) {
+    return 2;
+  }
+  var endedAfterJolt = 0;
+  for (final entry in timeline) {
+    final endMs = entry['endMs'];
+    if (endMs is num && endMs > joltElapsedMs) {
+      endedAfterJolt++;
+    }
+  }
+  return 2 + endedAfterJolt;
+}
+
 /// What the preview area shows.
 enum CameraPreviewMode {
   /// The live camera preview.

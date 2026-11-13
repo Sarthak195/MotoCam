@@ -8,6 +8,7 @@ import '../../../core/ride_file/ride_telemetry_codec.dart' as ride_codec;
 import '../../../core/services/ride_signing_service.dart';
 import '../../../core/utils/integrity_utils.dart' as integrity_utils;
 import '../../../core/utils/path_utils.dart' as path_utils;
+import '../crash_detector.dart';
 import '../models/telemetry_data.dart';
 import 'dart:async';
 import 'dart:io';
@@ -69,13 +70,11 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
   /// are treated as GPS jumps and never add ride distance.
   static const double maxPlausibleSpeedKmh = 350.0;
 
-  /// Linear acceleration must stay at or above the incident trigger for at
-  /// least this long (two or more consecutive sensor samples) to count as an
-  /// incident.
-  static const Duration minIncidentDuration = Duration(milliseconds: 40);
-
   static const Duration _accelerometerSamplingPeriod =
       SensorInterval.gameInterval;
+  // The raw accelerometer only feeds the tip-over check (gravity direction),
+  // which a low-pass with a 500 ms time constant follows; 15 Hz is plenty.
+  static const Duration _orientationSamplingPeriod = SensorInterval.uiInterval;
   // Gravity low-pass time constant for the raw-accelerometer fallback; equal
   // to the classic alpha 0.8 at the 200 ms default sensor rate.
   static const Duration _gravityFilterTimeConstant = Duration(
@@ -90,6 +89,7 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
   final List<Map<String, dynamic>> _rideIncidents = [];
 
   StreamSubscription<dynamic>? _accelerometerSubscription;
+  StreamSubscription<AccelerometerEvent>? _orientationSubscription;
   StreamSubscription<Position>? _positionSubscription;
   StreamSubscription<ServiceStatus>? _serviceStatusSubscription;
   Timer? _sampleTimer;
@@ -108,17 +108,19 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
   double _fixSampleSpeedSum = 0.0;
   int _fixSampleCount = 0;
   double _incidentTriggerGForce = 3.5;
-  Duration _incidentDebounce = const Duration(seconds: 6);
+  final CrashDetector _crashDetector = CrashDetector();
   DateTime? _lastIncidentDetectedAt;
+  int? _lastIncidentJoltElapsedMs;
   double _lastIncidentGForce = 0.0;
   int _incidentCount = 0;
   DateTime? _lastUiNotifyAt;
   Duration _uiNotifyMinInterval = const Duration(milliseconds: 100);
   double _smoothedLinearAccelerationG = 0.0;
   bool _hasSmoothedAcceleration = false;
-  DateTime? _incidentRunStartedAt;
-  int _incidentRunSampleCount = 0;
-  double _incidentRunPeakG = 0.0;
+  // The latest accelerometer event time and the wall clock when it arrived:
+  // GPS speed updates are stamped in the accelerometer's time base.
+  DateTime? _lastSensorSampleAt;
+  DateTime? _lastSensorSampleWallAt;
   bool _isUsingGravityFallback = false;
   bool _isIncidentDetectionAvailable = true;
   List<double>? _gravityEstimate;
@@ -158,6 +160,12 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
   List<TelemetryData> get activeRideSamples =>
       List.unmodifiable(_activeRideSamples);
 
+  /// Incident records of the active ride, as they will be saved. Only tests
+  /// read it.
+  @visibleForTesting
+  List<Map<String, dynamic>> get activeRideIncidentsForTesting =>
+      List.unmodifiable(_rideIncidents);
+
   /// Whether a ride session is currently capturing samples.
   bool get isRideActive => _isRideActive;
 
@@ -173,11 +181,19 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
   /// Kept after a stop like [rideDistanceKm].
   double get averageSpeedKmh => _averageSpeedKmh;
 
-  /// When the most recent incident was detected, or `null` if none.
+  /// When the most recent incident was confirmed (wall clock), or `null` if
+  /// none. Changes once per incident, at its confirmation, which comes up to
+  /// [CrashDetector.confirmWindow] after the jolt.
   DateTime? get lastIncidentDetectedAt => _lastIncidentDetectedAt;
 
-  /// Peak linear acceleration (g) of the most recent incident. Only tests
-  /// read it.
+  /// `elapsedMs` of the most recent incident's jolt (ms since the ride
+  /// start, as saved in the ride JSON), or `null` when it was not recorded
+  /// during a ride. The incident lock uses it to keep the segments around
+  /// the jolt, not just around the confirmation.
+  int? get lastIncidentJoltElapsedMs => _lastIncidentJoltElapsedMs;
+
+  /// Peak raw linear acceleration (g) of the most recent incident's jolt.
+  /// Only tests read it.
   @visibleForTesting
   double get lastIncidentGForce => _lastIncidentGForce;
 
@@ -231,15 +247,16 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
     _forceNotifyUi();
   }
 
-  /// Sets the incident trigger: linear acceleration at or above
-  /// [triggerGForce] g sustained for [minIncidentDuration], with at least
-  /// [debounce] between two incidents.
+  /// Sets the incident trigger: a jolt whose filtered linear acceleration
+  /// reaches [triggerGForce] g (see [CrashDetector]) starts a candidate that
+  /// becomes an incident only if it is confirmed, with at least [debounce]
+  /// between an incident's confirmation and the next jolt.
   void setIncidentDetectionConfig({
     required double triggerGForce,
     required Duration debounce,
   }) {
     _incidentTriggerGForce = triggerGForce;
-    _incidentDebounce = debounce;
+    _crashDetector.configure(triggerG: triggerGForce, debounce: debounce);
   }
 
   /// Requests location permission if needed and starts GPS and accelerometer
@@ -305,11 +322,15 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
     _locationPollTimer = null;
     unawaited(_accelerometerSubscription?.cancel());
     _accelerometerSubscription = null;
+    unawaited(_orientationSubscription?.cancel());
+    _orientationSubscription = null;
     unawaited(_positionSubscription?.cancel());
     _positionSubscription = null;
     unawaited(_serviceStatusSubscription?.cancel());
     _serviceStatusSubscription = null;
-    _resetIncidentRun();
+    _crashDetector.reset(clearSignals: true);
+    _lastSensorSampleAt = null;
+    _lastSensorSampleWallAt = null;
   }
 
   /// Pauses tracking when the app leaves the foreground with no active ride,
@@ -650,6 +671,11 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
     if (_filteredSpeedKmh < 0.6 || _stationaryFixStreak >= 6) {
       _filteredSpeedKmh = 0;
     }
+    // The same filtered speed the HUD shows and the ride saves.
+    final confirmed = _crashDetector.addSpeed(
+      _filteredSpeedKmh,
+      _sensorTimeNow(),
+    );
 
     _lastSpeedPosition = position;
     _lastSpeedTimestamp = now;
@@ -699,7 +725,22 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
       hasFix: true,
     );
 
+    if (confirmed != null) {
+      _detectCrash(confirmed);
+    }
     _notifyUiIfNeeded();
+  }
+
+  // Now, in the accelerometer's time base: the latest event time plus the
+  // wall-clock time since it arrived.
+  DateTime _sensorTimeNow() {
+    final now = DateTime.now();
+    final sampleAt = _lastSensorSampleAt;
+    final sampleWallAt = _lastSensorSampleWallAt;
+    if (sampleAt == null || sampleWallAt == null) {
+      return now;
+    }
+    return sampleAt.add(now.difference(sampleWallAt));
   }
 
   void _startAccelerometerTracking() {
@@ -713,6 +754,44 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
           // userAccelerometer provides linear acceleration (gravity removed).
           _onLinearAcceleration(event.x, event.y, event.z, at: event.timestamp);
         }, onError: _onLinearAccelerationStreamError);
+    _startOrientationTracking();
+  }
+
+  // The tip-over check needs the direction of gravity, which the
+  // linear-acceleration stream removes, so the raw accelerometer runs too.
+  // Without it only the abrupt-stop rule can confirm a jolt.
+  void _startOrientationTracking() {
+    unawaited(_orientationSubscription?.cancel());
+    _orientationSubscription =
+        accelerometerEventStream(
+          samplingPeriod: _orientationSamplingPeriod,
+        ).listen(
+          (AccelerometerEvent event) {
+            _onOrientationSample(
+              event.x,
+              event.y,
+              event.z,
+              at: event.timestamp,
+            );
+          },
+          onError: (Object error) {
+            debugPrint('Telemetry: orientation stream unavailable: $error');
+            unawaited(_orientationSubscription?.cancel());
+            _orientationSubscription = null;
+          },
+        );
+  }
+
+  void _onOrientationSample(double x, double y, double z, {DateTime? at}) {
+    final confirmed = _crashDetector.addGravitySample(
+      x,
+      y,
+      z,
+      at ?? DateTime.now(),
+    );
+    if (confirmed != null) {
+      _detectCrash(confirmed);
+    }
   }
 
   void _onLinearAccelerationStreamError(Object error) {
@@ -730,6 +809,9 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
   /// gravity from the raw accelerometer with a low-pass estimate.
   void _startGravityFilteredAccelerometer() {
     unawaited(_accelerometerSubscription?.cancel());
+    // The raw stream below feeds the orientation as well.
+    unawaited(_orientationSubscription?.cancel());
+    _orientationSubscription = null;
     _isUsingGravityFallback = true;
     _gravityEstimate = null;
     _lastRawAccelerationAt = null;
@@ -758,6 +840,7 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
     final sampleTime = at ?? DateTime.now();
     final previousAt = _lastRawAccelerationAt;
     _lastRawAccelerationAt = sampleTime;
+    _onOrientationSample(x, y, z, at: sampleTime);
     final gravity = _gravityEstimate;
     if (gravity == null) {
       _gravityEstimate = <double>[x, y, z];
@@ -789,14 +872,15 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
   /// Handles one linear-acceleration sample (m/s², gravity removed).
   ///
   /// The smoothed value feeds the UI, the saved samples and the stationary
-  /// heuristic. Incidents are detected on the raw magnitude: it must stay at
-  /// or above the trigger across consecutive samples spanning at least
-  /// [minIncidentDuration].
+  /// heuristic. The raw vector goes to the [CrashDetector], which looks for
+  /// a filtered jolt and then waits for its confirmation.
   void _onLinearAcceleration(double x, double y, double z, {DateTime? at}) {
     if (!x.isFinite || !y.isFinite || !z.isFinite) {
       return;
     }
     final sampleTime = at ?? DateTime.now();
+    _lastSensorSampleAt = sampleTime;
+    _lastSensorSampleWallAt = DateTime.now();
     final double rawLinearAccelerationG =
         math.sqrt(x * x + y * y + z * z) / 9.81;
     const smoothingAlpha = 0.30;
@@ -811,31 +895,12 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
       timestamp: DateTime.now(),
     );
 
-    if (rawLinearAccelerationG >= _incidentTriggerGForce) {
-      final runStartedAt = _incidentRunStartedAt ??= sampleTime;
-      _incidentRunSampleCount++;
-      _incidentRunPeakG = math.max(_incidentRunPeakG, rawLinearAccelerationG);
-      final span = sampleTime.difference(runStartedAt);
-      // If the platform reports no usable event times, fall back to three
-      // consecutive samples.
-      final isSustained =
-          span >= minIncidentDuration ||
-          (span <= Duration.zero && _incidentRunSampleCount >= 3);
-      if (_incidentRunSampleCount >= 2 && isSustained) {
-        _detectCrash(_incidentRunPeakG);
-        _resetIncidentRun();
-      }
-    } else {
-      _resetIncidentRun();
+    final confirmed = _crashDetector.addLinearAcceleration(x, y, z, sampleTime);
+    if (confirmed != null) {
+      _detectCrash(confirmed);
     }
 
     _notifyUiIfNeeded();
-  }
-
-  void _resetIncidentRun() {
-    _incidentRunStartedAt = null;
-    _incidentRunSampleCount = 0;
-    _incidentRunPeakG = 0.0;
   }
 
   /// Starts a new ride: resets ride statistics and incidents and begins
@@ -865,11 +930,12 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
     _fixSampleSpeedSum = 0.0;
     _fixSampleCount = 0;
     _lastIncidentDetectedAt = null;
+    _lastIncidentJoltElapsedMs = null;
     _lastIncidentGForce = 0.0;
     _incidentCount = 0;
     _rideIncidents.clear();
     _mockLocationDetected = false;
-    _resetIncidentRun();
+    _crashDetector.reset();
     _lastSpeedPosition = null;
     _lastSpeedTimestamp = null;
     _lastLocationUpdateAt = null;
@@ -1401,22 +1467,35 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
     return hashes;
   }
 
-  void _detectCrash(double gForce) {
+  // Records a confirmed incident at its jolt's time (the detector already
+  // applied the debounce) and notifies listeners, which lock the segments.
+  void _detectCrash(ConfirmedCrash crash) {
     final now = DateTime.now();
-    if (_lastIncidentDetectedAt != null &&
-        now.difference(_lastIncidentDetectedAt!) < _incidentDebounce) {
-      return;
-    }
+    // The detector's times are accelerometer event times, which sensors_plus
+    // derives from the wall clock (DateTime.now() for an event without one),
+    // so the jolt time is used as it is.
+    final joltWallAt = crash.joltAt;
+    debugPrint(
+      'Telemetry: incident confirmed by ${crash.confirmation.name} '
+      '${crash.confirmedAt.difference(crash.joltAt).inMilliseconds} ms '
+      'after the jolt (peak ${crash.peakG.toStringAsFixed(1)} g)',
+    );
 
     _lastIncidentDetectedAt = now;
-    _lastIncidentGForce = gForce;
+    _lastIncidentGForce = crash.peakG;
+    _lastIncidentJoltElapsedMs = null;
     _incidentCount++;
     final rideStart = _rideStartTime;
     if (_isRideActive && rideStart != null) {
+      final elapsedMs = math.max(
+        0,
+        joltWallAt.difference(rideStart).inMilliseconds,
+      );
+      _lastIncidentJoltElapsedMs = elapsedMs;
       _rideIncidents.add({
-        'elapsedMs': now.difference(rideStart).inMilliseconds,
-        'timestamp': now.toUtc().toIso8601String(),
-        'gForce': gForce,
+        'elapsedMs': elapsedMs,
+        'timestamp': joltWallAt.toUtc().toIso8601String(),
+        'gForce': crash.peakG,
         'triggerGForce': _incidentTriggerGForce,
         'reason': 'auto-crash',
       });
@@ -1492,6 +1571,20 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
     DateTime? timestamp,
   }) {
     _onLinearAcceleration(x, y, z, at: timestamp);
+  }
+
+  /// Feeds one raw accelerometer sample (m/s², gravity included) to the
+  /// orientation used by the tip-over check, as the separate raw stream
+  /// does next to the linear-acceleration sensor. [timestamp] defaults to
+  /// now.
+  @visibleForTesting
+  void updateOrientationForTesting(
+    double x,
+    double y,
+    double z, {
+    DateTime? timestamp,
+  }) {
+    _onOrientationSample(x, y, z, at: timestamp);
   }
 
   /// Feeds one raw accelerometer sample (m/s², gravity included) through

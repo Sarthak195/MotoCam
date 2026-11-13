@@ -5,6 +5,7 @@ import 'dart:math' as math;
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:motocam/features/camera/providers/camera_init_status.dart';
+import 'package:motocam/features/camera/providers/recording_retention.dart';
 import 'package:motocam/features/recording/recording_screen_logic.dart';
 import 'package:motocam/features/recording/widgets/recording_settings_sheet.dart';
 import 'package:motocam/features/recording/widgets/start_preflight_sheet.dart';
@@ -164,6 +165,86 @@ void main() {
       contrastRatio(recordingButtonLabelColor, recordingStopButtonColor),
       greaterThanOrEqualTo(4.5),
     );
+  });
+
+  group('autoIncidentProtectPastSegments', () {
+    Map<String, dynamic> segment(int startMs, int endMs) => {
+      'path': 'segment_$startMs.mp4',
+      'startMs': startMs,
+      'endMs': endMs,
+    };
+
+    // The sequences an automatic lock keeps, with the same arithmetic as
+    // CameraProvider.markIncident: the last n registered segments plus every
+    // sequence not registered yet.
+    Set<int> lockedSequences({
+      required List<Map<String, dynamic>> timeline,
+      required int activeSequence,
+      required int joltElapsedMs,
+    }) {
+      final registered = [for (var i = 1; i <= timeline.length; i++) i];
+      final past = autoIncidentProtectPastSegments(
+        timeline: timeline,
+        joltElapsedMs: joltElapsedMs,
+      ).clamp(0, 10);
+      final start = (registered.length - past).clamp(0, registered.length);
+      return {
+        ...registered.sublist(start),
+        ...unsettledSegmentSequences(
+          lastSettledSequence: registered.length,
+          activeSequence: activeSequence,
+        ),
+      };
+    }
+
+    test('a jolt just before a roll keeps the segments around it', () {
+      // 180 s segments. The jolt at 539.5 s is in segment 3; the confirmation
+      // comes after segment 3 was saved, while segment 4 records.
+      final locked = lockedSequences(
+        timeline: [
+          segment(0, 180000),
+          segment(180000, 360000),
+          segment(360000, 540000),
+        ],
+        activeSequence: 4,
+        joltElapsedMs: 539500,
+      );
+      expect(locked, containsAll(<int>[2, 3, 4]));
+    });
+
+    test('a confirmation while the jolt segment is still saving', () {
+      final locked = lockedSequences(
+        timeline: [segment(0, 180000), segment(180000, 360000)],
+        activeSequence: 4,
+        joltElapsedMs: 359800,
+      );
+      expect(locked, containsAll(<int>[1, 2, 3, 4]));
+    });
+
+    test('short segments that rolled twice before confirmation', () {
+      // 5 s segments: jolt at 9.9 s (segment 2), confirmed at 20.5 s.
+      final locked = lockedSequences(
+        timeline: [
+          segment(0, 5000),
+          segment(5000, 10000),
+          segment(10000, 15000),
+          segment(15000, 20000),
+        ],
+        activeSequence: 5,
+        joltElapsedMs: 9900,
+      );
+      expect(locked, containsAll(<int>[1, 2, 3, 4, 5]));
+    });
+
+    test('without a jolt time it keeps two', () {
+      expect(
+        autoIncidentProtectPastSegments(
+          timeline: [segment(0, 5000)],
+          joltElapsedMs: null,
+        ),
+        2,
+      );
+    });
   });
 
   group('resolveInitialFps', () {
