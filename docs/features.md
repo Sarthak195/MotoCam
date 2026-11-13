@@ -139,12 +139,12 @@ Locking (`CameraProvider.markIncident`):
 
 ## Blackout mode
 
-Blackout hides the preview while recording continues.
+Blackout hides the preview while recording continues. It is only a black overlay drawn by Flutter: the camera keeps its Preview use case bound, so turning Blackout on or off, and segment rolls while it is on, cost no extra video.
 
-- **Enter.** The moon icon in the header is enabled only while recording. `_enterBlackoutMode` calls `CameraController.pausePreview()` and covers the whole screen with a black overlay.
+- **Enter.** The moon icon in the header is enabled only while recording. `_enterBlackoutMode` covers the whole screen with a black overlay and stops building the `CameraPreview` widget under it. It never calls `pausePreview()` or `resumePreview()`: the CameraX plugin implements those by unbinding and binding the Preview use case, which left a hole of about 1.2 s at each toggle and made every roll close and reopen the camera (ride on the phone, 2026-11-13).
 - **Overlay.** Near the bottom, in dim text: a small red dot with `REC HH:MM:SS` (the running elapsed time) and `Hold 2 s anywhere to exit`. In-app notices (for example lock and incident notices) are drawn above the overlay and stay visible. The header toggle is covered.
-- **Hold to exit.** Touching the overlay starts a 2 s timer; releasing earlier cancels it and shows `Hold for 2 seconds to exit blackout`. When the timer fires, the phone vibrates, `_exitBlackoutMode` calls `resumePreview()`, removes the overlay and shows `Blackout off`. Moving the finger beyond the tap slop also cancels the hold. Screen readers get a long-press action that exits.
-- **Auto-exit.** Blackout ends on any `inactive`, `hidden` or `paused` app lifecycle state (notification shade, a system dialog, PiP, screen off, app switch) and at the end of every stop, including a notification Stop or a failed stop.
+- **Hold to exit.** Touching the overlay starts a 2 s timer; releasing earlier cancels it and shows `Hold for 2 seconds to exit blackout`. When the timer fires, the phone vibrates, `_exitBlackoutMode` removes the overlay and shows `Blackout off`. Moving the finger beyond the tap slop also cancels the hold. Screen readers get a long-press action that exits.
+- **Auto-exit.** Blackout ends on the `hidden` or `paused` app lifecycle state (screen off, app switch, another app in front), so the rider comes back to the live preview, and at the end of every stop, including a notification Stop or a failed stop. It stays on through `inactive` (notification shade, a system dialog, the start of a power press). In Picture-in-Picture the window shows its own REC view, never the black overlay; Blackout is still on when the app returns to full screen.
 
 ## Picture-in-Picture and screen-off recording
 
