@@ -134,6 +134,12 @@ class CrashDetector {
   // direction is not used.
   static const double _minOrientationMagnitude = 0.5 * _gravity;
 
+  /// Creates a detector; [log] receives one line per candidate started and
+  /// per candidate that expired unconfirmed.
+  CrashDetector({void Function(String message)? log}) : _log = log;
+
+  final void Function(String message)? _log;
+
   double _triggerG = 3.5;
   Duration _debounce = const Duration(seconds: 6);
 
@@ -146,6 +152,10 @@ class CrashDetector {
   int _runSampleCount = 0;
   double _runPeakG = 0.0;
   bool _runReported = false;
+  // The last speed when the run started: a fix arriving during the 60 ms
+  // before the jolt is reported must not replace the pre-jolt speed.
+  double? _runSpeedKmh;
+  DateTime? _runSpeedAt;
 
   _Candidate? _candidate;
   DateTime? _lastConfirmedAt;
@@ -237,6 +247,8 @@ class CrashDetector {
     if (filteredG >= _triggerG) {
       if (_runStartedAt == null) {
         _runStartedAt = at;
+        _runSpeedKmh = _lastSpeedKmh;
+        _runSpeedAt = _lastSpeedAt;
         _runPeakG = _window.fold<double>(
           0.0,
           (peak, sample) => math.max(peak, sample.rawG),
@@ -350,18 +362,26 @@ class CrashDetector {
       return;
     }
     double? speedBefore;
-    final speedAt = _lastSpeedAt;
+    final speedAt = _runSpeedAt;
+    final speed = _runSpeedKmh;
     if (speedAt != null &&
+        speed != null &&
         !speedAt.isAfter(joltAt) &&
         joltAt.difference(speedAt) <= maxPreJoltSpeedAge &&
-        (_lastSpeedKmh ?? 0.0) >= minMovingSpeedKmh) {
-      speedBefore = _lastSpeedKmh;
+        speed >= minMovingSpeedKmh) {
+      speedBefore = speed;
     }
+    final reference = _referenceOrientationBefore(joltAt);
     _candidate = _Candidate(
       joltAt: joltAt,
       peakG: peakG,
       speedBeforeKmh: speedBefore,
-      referenceOrientation: _referenceOrientationBefore(joltAt),
+      referenceOrientation: reference,
+    );
+    _log?.call(
+      'jolt candidate: peak ${peakG.toStringAsFixed(1)} g, speed before '
+      '${speedBefore == null ? 'none (stop rule off)' : '${speedBefore.toStringAsFixed(0)} km/h'}, '
+      'orientation ${reference == null ? 'none (tip-over rule off)' : 'kept'}',
     );
   }
 
@@ -406,6 +426,10 @@ class CrashDetector {
     final candidate = _candidate;
     if (candidate != null && _isExpired(candidate, at)) {
       _candidate = null;
+      _log?.call(
+        'jolt not confirmed within ${confirmWindow.inSeconds} s '
+        '(peak ${candidate.peakG.toStringAsFixed(1)} g)',
+      );
     }
     return null;
   }
@@ -427,6 +451,8 @@ class CrashDetector {
     _runSampleCount = 0;
     _runPeakG = 0.0;
     _runReported = false;
+    _runSpeedKmh = null;
+    _runSpeedAt = null;
   }
 }
 
