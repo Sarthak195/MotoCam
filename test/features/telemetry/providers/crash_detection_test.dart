@@ -15,15 +15,19 @@ void main() {
     late RideSim sim;
 
     setUp(() {
-      provider = TelemetryProvider(sampleInterval: const Duration(seconds: 1));
       rideStart = DateTime.now();
+      // The provider's wall clock follows the synthetic sensor clock.
+      provider = TelemetryProvider(
+        sampleInterval: const Duration(seconds: 1),
+        clock: () => sim.t,
+      );
+      sim = RideSim(provider, start: rideStart);
       provider.startRideSession(startedAt: rideStart);
       // Medium sensitivity.
       provider.setIncidentDetectionConfig(
         triggerGForce: 3.5,
         debounce: const Duration(seconds: 6),
       );
-      sim = RideSim(provider, start: rideStart);
     });
 
     tearDown(() {
@@ -75,6 +79,23 @@ void main() {
       final timestamp = DateTime.parse(incident['timestamp'] as String);
       expect(
         timestamp.difference(rideStart).inMilliseconds,
+        closeTo(joltStartMs + 40, 60),
+      );
+    });
+
+    test('a fix arriving while the jolt builds keeps the pre-jolt speed', () {
+      sim.speedKmh = 50;
+      // The jolt's run starts at 2.98 s and is reported at 3.04 s; the fix
+      // at 3.00 s lands in between.
+      sim.quiet(const Duration(milliseconds: 2940));
+      final joltStartMs = sim.elapsedMsSince(rideStart);
+      sim.jolt();
+      sim.speedKmh = 0;
+      sim.quiet(const Duration(seconds: 5));
+
+      expect(provider.incidentCount, 1);
+      expect(
+        provider.activeRideIncidentsForTesting.single['elapsedMs'] as int,
         closeTo(joltStartMs + 40, 60),
       );
     });

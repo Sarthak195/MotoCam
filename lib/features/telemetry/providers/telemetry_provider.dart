@@ -34,19 +34,24 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
   /// [rideSigner] signs the final save (default: this phone's Keystore key
   /// through [RideSigningService.instance]; `null` from it means the ride
   /// is saved unsigned), and [signedRideRegistry] records each ride saved
-  /// signed (default: [SignedRideRegistry.instance]).
+  /// signed (default: [SignedRideRegistry.instance]). [clock] is the wall
+  /// clock of incident detection (default [DateTime.now]); tests pass a
+  /// synthetic one that follows their sensor timestamps.
   TelemetryProvider({
     this.sampleInterval = const Duration(seconds: 1),
     ride_codec.RidePayloadSigner? rideSigner,
     SignedRideRegistry? signedRideRegistry,
+    DateTime Function()? clock,
   }) : _rideSigner = rideSigner ?? RideSigningService.instance.signPayloadHash,
-       _signedRideRegistry = signedRideRegistry ?? SignedRideRegistry.instance;
+       _signedRideRegistry = signedRideRegistry ?? SignedRideRegistry.instance,
+       _clock = clock ?? DateTime.now;
 
   /// Interval between persisted ride samples.
   final Duration sampleInterval;
 
   final ride_codec.RidePayloadSigner _rideSigner;
   final SignedRideRegistry _signedRideRegistry;
+  final DateTime Function() _clock;
 
   /// Version of the ride JSON written by this provider. Every version-3 file,
   /// checkpoints included, carries a bound integrity envelope
@@ -108,7 +113,9 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
   double _fixSampleSpeedSum = 0.0;
   int _fixSampleCount = 0;
   double _incidentTriggerGForce = 3.5;
-  final CrashDetector _crashDetector = CrashDetector();
+  final CrashDetector _crashDetector = CrashDetector(
+    log: (message) => debugPrint('Telemetry: $message'),
+  );
   DateTime? _lastIncidentDetectedAt;
   int? _lastIncidentJoltElapsedMs;
   double _lastIncidentGForce = 0.0;
@@ -734,7 +741,7 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
   // Now, in the accelerometer's time base: the latest event time plus the
   // wall-clock time since it arrived.
   DateTime _sensorTimeNow() {
-    final now = DateTime.now();
+    final now = _clock();
     final sampleAt = _lastSensorSampleAt;
     final sampleWallAt = _lastSensorSampleWallAt;
     if (sampleAt == null || sampleWallAt == null) {
@@ -880,7 +887,7 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
     }
     final sampleTime = at ?? DateTime.now();
     _lastSensorSampleAt = sampleTime;
-    _lastSensorSampleWallAt = DateTime.now();
+    _lastSensorSampleWallAt = _clock();
     final double rawLinearAccelerationG =
         math.sqrt(x * x + y * y + z * z) / 9.81;
     const smoothingAlpha = 0.30;
@@ -1470,11 +1477,11 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
   // Records a confirmed incident at its jolt's time (the detector already
   // applied the debounce) and notifies listeners, which lock the segments.
   void _detectCrash(ConfirmedCrash crash) {
-    final now = DateTime.now();
-    // The detector's times are accelerometer event times, which sensors_plus
-    // derives from the wall clock (DateTime.now() for an event without one),
-    // so the jolt time is used as it is.
-    final joltWallAt = crash.joltAt;
+    final now = _clock();
+    // The detector's times are accelerometer event times. Only their
+    // difference is used, so a sensor clock that is offset from the wall
+    // clock cannot move the jolt.
+    final joltWallAt = now.subtract(crash.confirmedAt.difference(crash.joltAt));
     debugPrint(
       'Telemetry: incident confirmed by ${crash.confirmation.name} '
       '${crash.confirmedAt.difference(crash.joltAt).inMilliseconds} ms '
