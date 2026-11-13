@@ -100,9 +100,11 @@ class CrashDetector {
   static const Duration maxPreJoltSpeedAge = Duration(seconds: 3);
 
   /// Rule (a): the near-stop must come no later than a stop at this mean
-  /// deceleration would take, plus [stopGpsLag]. Normal stops brake at about
-  /// 0.1 to 0.3 g (the 2026-11-13 ride's seven stops from 15 km/h or more
-  /// peaked at 0.25 g); a collision stops the bike almost at once.
+  /// deceleration would take, plus [stopGpsLag]. Normal stops mostly brake
+  /// at about 0.1 to 0.3 g (the 2026-11-13 ride's seven stops from 15 km/h
+  /// or more peaked at 0.25 g on the saved, filtered speed, but undoing the
+  /// filter suggests one-second drops near 0.5 g in a few hard stops); a
+  /// collision stops the bike almost at once.
   static const double abruptStopMinDecelerationG = 0.6;
 
   /// Rule (a): allowance for the receiver's speed lagging the bike: its own
