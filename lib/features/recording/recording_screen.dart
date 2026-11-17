@@ -786,6 +786,12 @@ class _RecordingScreenState extends State<RecordingScreen>
     if (!mounted) {
       return;
     }
+    // Debug builds only: the roll stall diagnostic switches, read once per
+    // recording before the camera starts (all off in release builds).
+    final diagSwitches = await telemetry.readDiagSwitches();
+    if (!mounted) {
+      return;
+    }
 
     // Gallery export of locked clips is opt-in (off by default).
     camera.autoExportLockedClipsToGallery = settings.exportLockedClipsToGallery;
@@ -806,7 +812,10 @@ class _RecordingScreenState extends State<RecordingScreen>
 
       // One zero point for the video segment timeline and the telemetry
       // samples.
-      telemetry.startRideSession(startedAt: camera.recordingStartedAt);
+      telemetry.startRideSession(
+        startedAt: camera.recordingStartedAt,
+        diagSwitches: diagSwitches,
+      );
       try {
         backgroundProtected = await _backgroundRecordingService
             .startForegroundRecording(elapsed: Duration.zero);
@@ -921,6 +930,12 @@ class _RecordingScreenState extends State<RecordingScreen>
       return;
     }
     final telemetry = context.read<TelemetryProvider>();
+    // Debug-only diagnostics: skip_checkpoint leaves the ride JSON to the
+    // final save (lock-triggered checkpoints are skipped too).
+    if (telemetry.diagSwitches.skipCheckpoint) {
+      telemetry.noteDiagCheckpointSkipped(segmentPaths.length);
+      return;
+    }
     unawaited(
       telemetry.checkpointRideSession(
         segmentPaths: segmentPaths,

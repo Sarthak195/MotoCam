@@ -13,6 +13,7 @@ import '../../../core/utils/path_utils.dart' as path_utils;
 import '../crash_debug_log.dart';
 import '../crash_detector.dart';
 import '../models/telemetry_data.dart';
+import '../roll_stall_diag.dart';
 import 'dart:async';
 import 'dart:io';
 import 'dart:isolate';
@@ -46,6 +47,12 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
   /// crash-detector event log (see [CrashDebugLog]); release builds never
   /// write it. [crashDebugDirectory] resolves the directory it is written
   /// under (default: the app's private files directory).
+  ///
+  /// [rollDiagEnabled] (same default as [crashDebugLogEnabled]) turns on the
+  /// debug-only roll stall diagnostics (see [RecordingDiagSession]): switch
+  /// files and one event log per ride under [diagDirectory]`/diag/` (default:
+  /// the app's private files directory). [diagControlStall] replaces the
+  /// native control stall call (tests).
   TelemetryProvider({
     this.sampleInterval = const Duration(seconds: 1),
     ride_codec.RidePayloadSigner? rideSigner,
@@ -53,11 +60,19 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
     DateTime Function()? clock,
     bool? crashDebugLogEnabled,
     Future<Directory> Function()? crashDebugDirectory,
+    bool? rollDiagEnabled,
+    Future<Directory> Function()? diagDirectory,
+    DiagControlStall? diagControlStall,
   }) : _crashDebugLogEnabled =
            crashDebugLogEnabled ??
            (kDebugMode && !Platform.environment.containsKey('FLUTTER_TEST')),
        _crashDebugDirectory =
            crashDebugDirectory ?? getApplicationSupportDirectory,
+       _rollDiagEnabled =
+           rollDiagEnabled ??
+           (kDebugMode && !Platform.environment.containsKey('FLUTTER_TEST')),
+       _diagDirectory = diagDirectory ?? getApplicationSupportDirectory,
+       _diagControlStall = diagControlStall,
        _rideSigner = rideSigner ?? RideSigningService.instance.signPayloadHash,
        _signedRideRegistry = signedRideRegistry ?? SignedRideRegistry.instance,
        _clock = clock ?? DateTime.now;
@@ -72,6 +87,12 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
   final Future<Directory> Function() _crashDebugDirectory;
   CrashDebugLog? _crashDebugLog;
   Future<void> _crashDebugLogClosed = Future<void>.value();
+  final bool _rollDiagEnabled;
+  final Future<Directory> Function() _diagDirectory;
+  final DiagControlStall? _diagControlStall;
+  DiagSwitches _diagSwitches = DiagSwitches.off;
+  RecordingDiagSession? _diagSession;
+  Future<void> _diagSessionClosed = Future<void>.value();
 
   /// Version of the ride JSON written by this provider. Every version-3 file,
   /// checkpoints included, carries a bound integrity envelope
@@ -984,7 +1005,13 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
   /// (default: now). Pass `CameraProvider.recordingStartedAt` so telemetry
   /// and the video segment timeline share one zero point. A value in the
   /// future is clamped to now.
-  void startRideSession({DateTime? startedAt}) {
+  ///
+  /// [diagSwitches] (debug builds, from [readDiagSwitches] before the camera
+  /// starts) holds for the whole ride; see [diagSwitches].
+  void startRideSession({
+    DateTime? startedAt,
+    DiagSwitches diagSwitches = DiagSwitches.off,
+  }) {
     final now = DateTime.now();
     _isRideActive = true;
     _rideStartTime = startedAt == null || startedAt.isAfter(now)
@@ -1010,8 +1037,10 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
     _rideIncidents.clear();
     _mockLocationDetected = false;
     _endCrashDebugLog();
+    _endDiagSession();
     _crashDetector.reset();
     _startCrashDebugLog(_rideSessionId!, _rideStartTime!);
+    _startDiagSession(_rideSessionId!, diagSwitches);
     _lastSpeedPosition = null;
     _lastSpeedTimestamp = null;
     _lastLocationUpdateAt = null;
@@ -1113,7 +1142,10 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
     _checkpointTimer ??= Timer.periodic(_checkpointInterval, (_) {
       unawaited(_writeCheckpoint());
     });
-    _prehashSegments(segmentPaths);
+    // Debug-only diagnostics: skip_prehash leaves hashing to the final save.
+    if (!_diagSwitches.skipPrehash) {
+      _prehashSegments(segmentPaths);
+    }
     return _writeCheckpoint();
   }
 
@@ -1124,12 +1156,18 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
       return null;
     }
     final sequence = ++_checkpointSequence;
+    final diag = _diagSession;
+    final watch = diag == null ? null : (Stopwatch()..start());
+    var waitMs = 0;
+    var wrote = false;
+    diag?.checkpointStarted(seq: sequence, segments: input.segmentPaths.length);
 
     try {
       final prehash = _pendingPrehash;
       if (prehash != null) {
         await prehash;
       }
+      waitMs = watch?.elapsedMilliseconds ?? 0;
       final resolved = await ride_codec.resolveRideFileContent(input);
       final segmentHashes = await _cachedSegmentHashes(resolved.segmentPaths);
       // A checkpoint lists only segments it can seal; newer ones follow in
@@ -1166,11 +1204,21 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
         return telemetryPath;
       }
       _lastQueuedCheckpointSequence = sequence;
+      wrote = true;
       await _enqueueWrite(telemetryPath, sealed);
       return telemetryPath;
     } catch (error) {
       debugPrint('Telemetry: checkpoint failed: $error');
       return null;
+    } finally {
+      if (diag != null && watch != null) {
+        diag.checkpointEnded(
+          seq: sequence,
+          ms: watch.elapsedMilliseconds,
+          waitMs: waitMs,
+          wrote: wrote,
+        );
+      }
     }
   }
 
@@ -1373,6 +1421,7 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
     // keep running, so the signals stay.
     _crashDetector.reset();
     _endCrashDebugLog();
+    _endDiagSession();
     _lastIncidentDetectedAt = null;
     _lastIncidentJoltElapsedMs = null;
     _pauseIfIdleInBackground();
@@ -1456,12 +1505,13 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
   void _prehashSegments(List<String> segmentPaths) {
     final previous = _pendingPrehash;
     final paths = List<String>.from(segmentPaths);
+    final diag = _diagSession;
     _pendingPrehash = () async {
       if (previous != null) {
         await previous;
       }
       try {
-        await _hashSegments(paths);
+        await _hashSegments(paths, diag: diag);
       } catch (error) {
         debugPrint('Telemetry: background segment hashing failed: $error');
       }
@@ -1471,7 +1521,13 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
   /// Returns the SHA-256 of each existing segment, reusing hashes computed
   /// earlier for files whose size and modification time are unchanged.
   /// Segments that cannot be read are left out (and fail a later deep check).
-  Future<Map<String, String>> _hashSegments(List<String> segmentPaths) async {
+  ///
+  /// [diag] (debug-only diagnostics) is told how many files are hashed and
+  /// how long it took.
+  Future<Map<String, String>> _hashSegments(
+    List<String> segmentPaths, {
+    RecordingDiagSession? diag,
+  }) async {
     final stats = <String, FileStat>{};
     final pending = <String>[];
     for (final path in segmentPaths) {
@@ -1488,7 +1544,18 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
     }
 
     if (pending.isNotEmpty) {
+      final watch = diag == null ? null : (Stopwatch()..start());
+      diag?.prehashStarted(
+        files: pending.length,
+        bytes: pending.fold<int>(0, (sum, path) => sum + stats[path]!.size),
+      );
       final computed = await _hashFilesInBackground(pending);
+      if (diag != null && watch != null) {
+        diag.prehashEnded(
+          ms: watch.elapsedMilliseconds,
+          hashed: computed.length,
+        );
+      }
       for (final entry in computed.entries) {
         final stat = stats[entry.key];
         if (stat != null) {
@@ -1585,6 +1652,56 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
   @visibleForTesting
   Future<void> get crashDebugLogClosedForTesting => _crashDebugLogClosed;
 
+  /// Debug builds only: the roll stall diagnostic switches of the current
+  /// ride, read once by [readDiagSwitches] at START and passed to
+  /// [startRideSession]; all off otherwise.
+  DiagSwitches get diagSwitches => _diagSwitches;
+
+  /// Reads the diagnostic switch files under `files/diag/` (all off when the
+  /// diagnostics are disabled, as in release builds). Never throws.
+  Future<DiagSwitches> readDiagSwitches() async {
+    if (!_rollDiagEnabled) {
+      return DiagSwitches.off;
+    }
+    return DiagSwitches.read(_diagDirectory);
+  }
+
+  /// Records in the ride's diagnostic log that `skip_checkpoint` skipped a
+  /// checkpoint over [segmentCount] segments.
+  void noteDiagCheckpointSkipped(int segmentCount) {
+    _diagSession?.checkpointSkipped(segments: segmentCount);
+  }
+
+  /// Completes when the last ride's diagnostic event log is closed. Only
+  /// tests read it.
+  @visibleForTesting
+  Future<void> get diagLogClosedForTesting => _diagSessionClosed;
+
+  // Debug builds only: the roll stall diagnostics of one ride.
+  void _startDiagSession(String sessionId, DiagSwitches switches) {
+    if (!_rollDiagEnabled) {
+      _diagSwitches = DiagSwitches.off;
+      return;
+    }
+    _diagSwitches = switches;
+    _diagSession = RecordingDiagSession(
+      rideSessionId: sessionId,
+      switches: switches,
+      resolveDirectory: _diagDirectory,
+      controlStall: _diagControlStall,
+    )..begin();
+  }
+
+  void _endDiagSession() {
+    _diagSwitches = DiagSwitches.off;
+    final session = _diagSession;
+    if (session == null) {
+      return;
+    }
+    _diagSession = null;
+    _diagSessionClosed = session.finish();
+  }
+
   // Records a confirmed incident at its jolt's time (the detector already
   // applied the debounce) and notifies listeners, which lock the segments.
   void _detectCrash(ConfirmedCrash crash) {
@@ -1667,6 +1784,7 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
     _checkpointTimer?.cancel();
     _stopTracking();
     _endCrashDebugLog();
+    _endDiagSession();
     if (_isObservingLifecycle) {
       WidgetsBinding.instance.removeObserver(this);
       _isObservingLifecycle = false;
