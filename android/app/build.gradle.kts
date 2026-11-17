@@ -96,6 +96,12 @@ android {
         jvmTarget = "17"
     }
 
+    // BuildConfig.DEBUG gates the debug-only roll stall diagnostics
+    // (DiagHeartbeats.kt).
+    buildFeatures {
+        buildConfig = true
+    }
+
     defaultConfig {
         applicationId = "com.example.motocam"
         minSdk = flutter.minSdkVersion

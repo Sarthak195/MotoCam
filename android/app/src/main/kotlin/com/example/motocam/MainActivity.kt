@@ -44,6 +44,8 @@ class MainActivity: FlutterActivity() {
     private var pipMethodChannel: MethodChannel? = null
     private var legacyRecordingsAccess: LegacyRecordingsAccess? = null
     private var galleryCopies: GalleryCopies? = null
+    // Debug builds only: roll stall diagnostics (heartbeats, control stall).
+    private var diagHeartbeats: DiagHeartbeats? = null
 
     // Every startActivityForResult of this activity is answered through
     // this dispatcher, by request code (see ActivityRequestCodes).
@@ -269,6 +271,11 @@ class MainActivity: FlutterActivity() {
             }
         }
         galleryCopies?.register(flutterEngine.dartExecutor.binaryMessenger)
+
+        if (BuildConfig.DEBUG) {
+            val diag = diagHeartbeats ?: DiagHeartbeats(filesDir).also { diagHeartbeats = it }
+            diag.register(flutterEngine.dartExecutor.binaryMessenger)
+        }
 
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, DEVICE_STATUS_CHANNEL)
             .setMethodCallHandler { call, result ->
@@ -780,6 +787,10 @@ class MainActivity: FlutterActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (BuildConfig.DEBUG) {
+            val diag = diagHeartbeats ?: DiagHeartbeats(filesDir).also { diagHeartbeats = it }
+            diag.start()
+        }
         // Registered for the whole activity lifetime (not onStart/onStop) so a
         // Stop tapped in the notification while the screen is off or the app
         // is in the background still reaches Dart.
@@ -806,6 +817,8 @@ class MainActivity: FlutterActivity() {
     }
 
     override fun onDestroy() {
+        diagHeartbeats?.stop()
+        diagHeartbeats = null
         try {
             unregisterReceiver(backgroundStopReceiver)
         } catch (_: IllegalArgumentException) {
