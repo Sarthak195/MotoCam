@@ -8,6 +8,7 @@ import static org.junit.Assert.assertTrue;
 import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -36,5 +37,33 @@ public class VideoRecordEventListenerTest {
     instance.onEvent(event);
 
     verify(mockApi).onEvent(eq(instance), eq(event), any());
+  }
+
+  @Test
+  public void onEvent_doesNotForwardStatusEvents() {
+    final VideoRecordEventListenerProxyApi mockApi = mock(VideoRecordEventListenerProxyApi.class);
+    when(mockApi.getPigeonRegistrar()).thenReturn(new TestProxyApiRegistrar());
+
+    final VideoRecordEventListenerProxyApi.VideoRecordEventListenerImpl instance =
+        new VideoRecordEventListenerProxyApi.VideoRecordEventListenerImpl(mockApi);
+    instance.onEvent(mock(VideoRecordEvent.Status.class));
+
+    verify(mockApi, never()).onEvent(any(), any(), any());
+  }
+
+  @Test
+  public void onEvent_forwardsStartAndFinalizeEvents() {
+    final VideoRecordEventListenerProxyApi mockApi = mock(VideoRecordEventListenerProxyApi.class);
+    when(mockApi.getPigeonRegistrar()).thenReturn(new TestProxyApiRegistrar());
+
+    final VideoRecordEventListenerProxyApi.VideoRecordEventListenerImpl instance =
+        new VideoRecordEventListenerProxyApi.VideoRecordEventListenerImpl(mockApi);
+    final VideoRecordEvent.Start start = mock(VideoRecordEvent.Start.class);
+    final VideoRecordEvent.Finalize finalize = mock(VideoRecordEvent.Finalize.class);
+    instance.onEvent(start);
+    instance.onEvent(finalize);
+
+    verify(mockApi).onEvent(eq(instance), eq(start), any());
+    verify(mockApi).onEvent(eq(instance), eq(finalize), any());
   }
 }
