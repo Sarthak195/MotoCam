@@ -31,12 +31,12 @@ class VideoRecordEventListenerProxyApi extends PigeonApiVideoRecordEventListener
 
     @Override
     public void onEvent(@NonNull VideoRecordEvent event) {
-      // MotoCam patch: CameraX sends a Status event many times a second while recording (about
-      // 36 a second at 2160p60). Each forwarded one became a pigeon instance on both sides and
-      // waited in the Dart plugin's event queue until the next stop, so a 3 minute segment piled
-      // up thousands, and releasing them after each segment roll flooded the main thread (where
-      // the MediaCodec callbacks also run) for seconds, which cost video. The Dart side only waits
-      // for Start and Finalize, so Status events are not forwarded.
+      // MotoCam patch: CameraX sends a Status event many times a second while recording (one per
+      // encoded video frame, about 45 a second at 2160p60). Each forwarded one became a pigeon
+      // instance on both sides and waited in the Dart plugin's event queue until the next stop, so
+      // a 3 minute segment piled up thousands, and releasing them after each segment roll flooded
+      // the main thread (where the MediaCodec callbacks also run) for seconds, which cost video.
+      // The Dart side only waits for Start and Finalize, so Status events are not forwarded.
       if (event instanceof VideoRecordEvent.Status) {
         return;
       }
