@@ -55,25 +55,31 @@ class GpsSpeedFix {
 /// Times: `t` is the ride-elapsed time (ms) and `s` the sensor clock (ms
 /// since the epoch of the accelerometer's event time). Line types (`e`):
 /// `start`, `sec` (one per second of sensor samples), `cand`, `peak`,
-/// `confirmed`, `expired`, `dropped`, `capped` and `summary`.
+/// `confirmed`, `expired`, `dropped`, `capped` and `summary`. A `sec` line
+/// also carries `grav`, the detector's low-passed gravity unit vector when
+/// the second is written, so other tip-over rules can be tried offline.
 class CrashDebugLog implements CrashDetectorObserver {
   /// Creates the log; call [begin] to start it and [finish] at ride end.
   ///
   /// [clock] is the wall clock the ride-elapsed time is measured on (it must
   /// match the one [rideStartedAt] was taken from). [resolveDirectory]
   /// returns the app's private files directory. The file stops growing after
-  /// [maxBytes] (the closing summary is always written).
+  /// [maxBytes] (the closing summary is always written). [gravityUnit]
+  /// reads the detector's current gravity unit vector for the `sec` lines
+  /// (see [CrashDetector.gravityUnitVector]); it is only read.
   CrashDebugLog({
     required this.rideSessionId,
     required this.rideStartedAt,
     required Future<Directory> Function() resolveDirectory,
     required double triggerG,
     DateTime Function()? clock,
+    List<double>? Function()? gravityUnit,
     this.flushInterval = const Duration(seconds: 3),
     this.maxBytes = defaultMaxBytes,
   }) : _resolveDirectory = resolveDirectory,
        _triggerG = triggerG,
-       _clock = clock ?? DateTime.now;
+       _clock = clock ?? DateTime.now,
+       _gravityUnit = gravityUnit;
 
   /// Subdirectory of the files directory that holds the logs.
   static const String directoryName = 'crash_debug';
@@ -96,6 +102,7 @@ class CrashDebugLog implements CrashDetectorObserver {
   final Future<Directory> Function() _resolveDirectory;
   final DateTime Function() _clock;
   final double _triggerG;
+  final List<double>? Function()? _gravityUnit;
 
   final StringBuffer _pending = StringBuffer();
   Future<void> _chain = Future<void>.value();
@@ -361,11 +368,24 @@ class CrashDebugLog implements CrashDetectorObserver {
       'n': _bucketSamples,
       'trig': _round(_bucketTriggerG),
       'gps': ?_fixJson(last),
+      'grav': ?_gravityJson(),
     });
     _bucketSamples = 0;
     _bucketMaxAvgG = 0.0;
     _bucketMaxRawG = 0.0;
     _bucketLastAt = null;
+  }
+
+  // The gravity unit vector with 3 decimals, or null when unknown.
+  List<double>? _gravityJson() {
+    final unit = _gravityUnit?.call();
+    if (unit == null || unit.length != 3) {
+      return null;
+    }
+    return <double>[
+      for (final value in unit)
+        value.isFinite ? double.parse(value.toStringAsFixed(3)) : 0.0,
+    ];
   }
 
   void _noteTime(DateTime at) {

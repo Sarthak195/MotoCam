@@ -178,6 +178,7 @@ void main() {
           'n',
           'trig',
           'gps',
+          'grav',
         });
       }
       // Vibration: raw samples near 8 g, the 100 ms average far below.
@@ -189,6 +190,41 @@ void main() {
       expect(lines.last['candidates'], 0);
       expect(lines.last['maxAvgG'] as double, lessThan(3.5));
       expect(lines.last['seconds'], secs.length);
+    });
+
+    test('each second carries the gravity unit vector', () async {
+      startRide();
+      // Upright on the mount, then lying on its side (as after a tip-over),
+      // with no jolt: the field is observation only.
+      sim.quiet(const Duration(seconds: 3));
+      sim.gravity = const [3.0, 0.0, 4.0];
+      sim.quiet(const Duration(seconds: 6));
+      expect(provider.incidentCount, 0);
+
+      final lines = await endRideAndRead();
+      final secs = lines.where((l) => l['e'] == 'sec').toList();
+      expect(secs.length, greaterThanOrEqualTo(8));
+      List<double> grav(Map<String, dynamic> sec) => [
+        for (final v in sec['grav'] as List<dynamic>) (v as num).toDouble(),
+      ];
+      final first = grav(secs[1]);
+      expect(first[0], closeTo(0.0, 0.001));
+      expect(first[1], closeTo(1.0, 0.001));
+      expect(first[2], closeTo(0.0, 0.001));
+      final last = grav(secs.last);
+      expect(last[0], closeTo(0.6, 0.01));
+      expect(last[1], closeTo(0.0, 0.01));
+      expect(last[2], closeTo(0.8, 0.01));
+      for (final sec in secs) {
+        final g = grav(sec);
+        final norm = g[0] * g[0] + g[1] * g[1] + g[2] * g[2];
+        expect(norm, closeTo(1.0, 0.01));
+        // Three decimals at most.
+        for (final v in g) {
+          expect((v * 1000).roundToDouble(), closeTo(v * 1000, 1e-6));
+        }
+      }
+      expect(lines.last['candidates'], 0);
     });
 
     test(

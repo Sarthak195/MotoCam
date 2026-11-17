@@ -1563,6 +1563,7 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
       resolveDirectory: _crashDebugDirectory,
       triggerG: _crashDetector.triggerG,
       clock: _clock,
+      gravityUnit: () => _crashDetector.gravityUnitVector,
     )..begin();
     _crashDebugLog = log;
     _crashDetector.observer = log;

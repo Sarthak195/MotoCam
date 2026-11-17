@@ -298,6 +298,29 @@ class CrashDetector {
   /// Whether a jolt is waiting for confirmation.
   bool get hasPendingCandidate => _candidate != null;
 
+  /// The current low-passed gravity direction (the tip-over rule's
+  /// orientation estimate) as a new unit vector, or `null` when there is no
+  /// estimate yet. Read-only diagnostics: no decision depends on it.
+  List<double>? get gravityUnitVector {
+    final estimate = _orientation;
+    if (estimate == null) {
+      return null;
+    }
+    final magnitude = math.sqrt(
+      estimate[0] * estimate[0] +
+          estimate[1] * estimate[1] +
+          estimate[2] * estimate[2],
+    );
+    if (!magnitude.isFinite || magnitude <= 0) {
+      return null;
+    }
+    return <double>[
+      estimate[0] / magnitude,
+      estimate[1] / magnitude,
+      estimate[2] / magnitude,
+    ];
+  }
+
   /// Sets the trigger and the minimum time between two incidents (measured
   /// from the confirmation of the previous one).
   void configure({required double triggerG, required Duration debounce}) {
