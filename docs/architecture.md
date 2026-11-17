@@ -293,7 +293,7 @@ While recording, the HISTORY button reads MINIMISE, and both it and system back 
 | Path | Contents |
 |---|---|
 | `lib/` | All Dart source, split into `core/` and `features/` (see [Module map](#module-map)) |
-| `test/` | Unit and widget tests under `test/core/` and `test/features/`, grouped by `lib/` area, plus `widget_test.dart` (app smoke test), the ride-file fixtures in `test/fixtures/ride_files/` and shared test helpers in `test/support/` (a P-256 key standing in for the phone's signing key): 648 tests in 48 files |
+| `test/` | Unit and widget tests under `test/core/` and `test/features/`, grouped by `lib/` area, plus `widget_test.dart` (app smoke test), the ride-file fixtures in `test/fixtures/ride_files/` and shared test helpers in `test/support/` (a P-256 key standing in for the phone's signing key): 653 tests in 49 files |
 | `android/` | Gradle project (`app/build.gradle.kts`), manifest, Kotlin `MainActivity` and `BackgroundRecordingService`, resources (themes, the monochrome notification icon, backup and data-extraction rules), ProGuard rules and `key.properties.template` |
 | `ios/` | Xcode Runner project: template `AppDelegate`/`SceneDelegate`, `Info.plist` with usage strings, and a `Podfile` that enables the `permission_handler` camera, microphone and when-in-use location code. No native channel code |
 | `scripts/` | `release-security-precheck.ps1` (used by CI) and `generate-keystore.ps1` |

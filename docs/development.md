@@ -148,7 +148,7 @@ flutter test --plain-name "incident"                                 # by name s
 flutter test --coverage                                              # writes coverage/lcov.info
 ```
 
-There are 648 tests in 48 files, and all pass. The table groups them by area.
+There are 653 tests in 49 files, and all pass. The table groups them by area.
 
 | Area | Files | Tests | What it covers |
 |---|---|---|---|
