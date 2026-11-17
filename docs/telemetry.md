@@ -242,7 +242,7 @@ Every line has `e` (the type), `t` (ride-elapsed ms) and `s` (the sensor clock, 
 | `e` | When | Fields |
 |---|---|---|
 | `start` | Ride start | `ride`, `startUtc`, `trigG` and the detector constants (`joltWindowMs`, `minJoltMs`, `confirmS`, `minMoveKmh`, `nearStopKmh`, `tipDeg`, `tipHoldMs`) |
-| `sec` | Once per second of accelerometer samples | `avgG` (max of the 100 ms averaged magnitude, g), `rawG` (max raw magnitude, g), `n` (samples), `trig` (current trigger), `gps` (see below). This is the tuning data: compare `avgG` with `trig`. |
+| `sec` | Once per second of accelerometer samples | `avgG` (max of the 100 ms averaged magnitude, g), `rawG` (max raw magnitude, g), `n` (samples), `trig` (current trigger), `gps` (see below), `grav` (the detector's low-passed gravity unit vector `[x, y, z]` when the line is written, 3 decimals, so other tip-over rules can be tried offline; observation only). This is the tuning data: compare `avgG` with `trig`. |
 | `cand` | A jolt started a candidate (`t`, `s` are the jolt's) | `peakG` so far, `preKmh` and `preAgeMs` (the last speed before the jolt and its age, also when too slow or stale to arm rule (a)), `ruleA` (whether the abrupt-stop rule is armed), `deadlineMs` (its deadline), `ruleB` (whether a pre-jolt orientation exists), `gps` (the pre-jolt fix) |
 | `peak` | The pending peak rose by at least 0.5 g | `peakG` |
 | `confirmed` | Rule (a) or (b) confirmed it | `by` (`abruptStop` or `tipOver`), `delayMs` since the jolt, `peakG` |
@@ -263,6 +263,49 @@ adb exec-out run-as com.example.motocam cat files/crash_debug/<rideSessionId>.js
 ```
 
 A ride with no incidents still has its `sec` lines: if `avgG` stays well under `trig` on rough road the filter rejects the vibration, and `cand` lines without a `confirmed` mean only the confirmation rules were saving it.
+
+### Roll stall diagnostics (debug builds only)
+
+Diagnostic, temporary and debug-only: release builds (`kDebugMode` false in Dart, `BuildConfig.DEBUG` false in Kotlin) create none of it, and `flutter test` leaves it off unless a test asks for it. It exists to find why the video stalls for 1 to 3 s twice in the first seconds after each segment roll and once more 11 to 22 s in, by switching parts of the roll work off and timing the main thread. Code: [roll_stall_diag.dart](../lib/features/telemetry/roll_stall_diag.dart) (Dart) and [DiagHeartbeats.kt](../android/app/src/main/kotlin/com/example/motocam/DiagHeartbeats.kt) (native).
+
+**Switches.** Empty files in `files/diag/` (the same `getApplicationSupportDirectory()` as `files/crash_debug/`). START reads them once, after the preflight and before the camera starts, and the ride keeps those states until it ends; adding or removing a file mid-ride changes nothing.
+
+| File | Effect on this recording |
+|---|---|
+| `skip_prehash` | `checkpointRideSession` does not start the background segment hashing. Checkpoints then list no unhashed segment, so a roll's checkpoint usually writes nothing. STOP still hashes every segment. |
+| `skip_checkpoint` | `_checkpointRideIfChanged` never calls `checkpointRideSession` (no prehash, no checkpoint, no 30 s checkpoint timer); lock-triggered checkpoints are skipped too. The final save at STOP is unchanged. |
+| `control_stall` | Positive control: once, 60 s after START, Dart asks the debug-only `com.example.motocam/diag` channel (`controlStall`) to block the Android main thread for 1500 ms (`Thread.sleep`), and both logs record its start and end. |
+
+```
+adb shell run-as com.example.motocam sh -c 'mkdir -p files/diag && touch files/diag/skip_prehash'
+adb shell run-as com.example.motocam rm -f files/diag/skip_prehash
+```
+
+The switch states are also printed to logcat at START (`flutter : Diag: recording <rideSessionId> switches: ...`).
+
+**Dart event log** `files/diag/<rideSessionId>.jsonl`, one per ride, written like the crash debug log (buffered, appended every 3 s and at stop, 5 MB cap, any I/O error disables it). Every line has `e` and `ms` (epoch ms):
+
+| `e` | Fields |
+|---|---|
+| `start` | `ride`, `skipPrehash`, `skipCheckpoint`, `controlStall`, `periodMs` (100), `lateMs` (50) |
+| `prehashStart` | `files` and `bytes` of the not-yet-hashed segments the background hash starts on |
+| `prehashEnd` | `durMs`, `hashed` |
+| `checkpointStart` | `seq`, `segments` (a roll's checkpoint or the 30 s timer's) |
+| `checkpointEnd` | `seq`, `durMs`, `waitMs` (of it waiting for the prehash), `wrote` |
+| `checkpointSkipped` | `segments` (`skip_checkpoint`) |
+| `late` | `lateMs`: a 100 ms heartbeat on the main isolate (one-shot timers, measured on a `Stopwatch`) ticked more than 50 ms late |
+| `controlStall` | `requestMs`, `calledMs` (Dart), `startMs` and `endMs` (native), or `error` |
+| `capped` / `stop` | The file reached 5 MB / the ride ended (`elapsedMs`) |
+
+**Native log** `files/diag/native.jsonl`, for the app process, from `MainActivity.onCreate` to `onDestroy`: two 100 ms heartbeats, one on the main looper and one on a background `HandlerThread`, timed on `SystemClock.uptimeMillis`. Each tick more than 50 ms late writes `{"e":"late","ms":<epoch>,"src":"main"|"bg","lateMs":<n>}`; ticks 500 ms or more late are also logged at warning level (`MotoCamDiag`). Other lines: `start` (with `pid`), `controlStall` (`startMs`, `endMs`, `requestMs`), `capped` and `stop`. All file I/O runs on the background thread (the main heartbeat posts its line there) and is appended every 2 s. The file is shared by every run: at app start one over 5 MB is moved to `native.prev.jsonl`, so delete it between runs for a clean file.
+
+```
+adb exec-out run-as com.example.motocam cat files/diag/native.jsonl > native.jsonl
+adb exec-out run-as com.example.motocam cat files/diag/<rideSessionId>.jsonl > diag.jsonl
+adb shell run-as com.example.motocam rm -f files/diag/native.jsonl
+```
+
+A `late` line's stall began `lateMs` before its `ms`. Main-thread stalls that show in both `src: main` and the Dart `late` lines block the merged platform and UI thread (where CameraX's MediaCodec callbacks run); stalls only in the Dart log are Dart work; `bg` stalls point at the whole process (for example GC or CPU starvation).
 
 ## Persistence
 
@@ -308,7 +351,7 @@ The native handler is `getBatteryStatus` on `com.example.motocam/device_status` 
 
 ## Test coverage
 
-[telemetry_provider_test.dart](../test/features/telemetry/providers/telemetry_provider_test.dart) has 34 tests, [crash_detection_test.dart](../test/features/telemetry/providers/crash_detection_test.dart) has 19 and [telemetry_data_test.dart](../test/features/telemetry/models/telemetry_data_test.dart) has 6 and [crash_debug_log_test.dart](../test/features/telemetry/providers/crash_debug_log_test.dart) has 11 (the debug crash log, see above), out of 637 tests in the project. The provider tests construct `TelemetryProvider(sampleInterval: 1 s)` directly and never call `initialize()`, so no plugin channels are involved; the signing tests inject a fake `rideSigner` and mock SharedPreferences, and every other save meets no `integrity` handler and is saved as version 2. Fixes are injected with `updateLocationForTesting`, linear acceleration with `updateAccelerometerForTesting`, the orientation stream with `updateOrientationForTesting` and raw acceleration with `updateRawAccelerometerForTesting`; all four call the production handlers. The crash tests drive them, and the provider's `clock`, on one synthetic clock through `RideSim` ([ride_sim.dart](../test/support/ride_sim.dart)), whose fixes report a speed accuracy so GPS speed is trusted. The `createMockPosition` helper sets `speedAccuracy: 0.0`, so every test fix takes the blended (unreliable GPS speed) path.
+[telemetry_provider_test.dart](../test/features/telemetry/providers/telemetry_provider_test.dart) has 34 tests, [crash_detection_test.dart](../test/features/telemetry/providers/crash_detection_test.dart) has 19 and [telemetry_data_test.dart](../test/features/telemetry/models/telemetry_data_test.dart) has 6 and [crash_debug_log_test.dart](../test/features/telemetry/providers/crash_debug_log_test.dart) has 12 (the debug crash log, see above) and [roll_stall_diag_test.dart](../test/features/telemetry/providers/roll_stall_diag_test.dart) has 15 (the roll stall diagnostics: switch reading, read once per ride, the event log's format, flush, cap and I/O errors, the heartbeat lateness and the control stall), out of 648 tests in the project. The provider tests construct `TelemetryProvider(sampleInterval: 1 s)` directly and never call `initialize()`, so no plugin channels are involved; the signing tests inject a fake `rideSigner` and mock SharedPreferences, and every other save meets no `integrity` handler and is saved as version 2. Fixes are injected with `updateLocationForTesting`, linear acceleration with `updateAccelerometerForTesting`, the orientation stream with `updateOrientationForTesting` and raw acceleration with `updateRawAccelerometerForTesting`; all four call the production handlers. The crash tests drive them, and the provider's `clock`, on one synthetic clock through `RideSim` ([ride_sim.dart](../test/support/ride_sim.dart)), whose fixes report a speed accuracy so GPS speed is trusted. The `createMockPosition` helper sets `speedAccuracy: 0.0`, so every test fix takes the blended (unreliable GPS speed) path.
 
 | Group | Checks |
 |---|---|
