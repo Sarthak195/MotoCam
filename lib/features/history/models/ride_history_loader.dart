@@ -118,7 +118,10 @@ Future<RideHistoryLoad> loadRideHistoryIndexed(
         continue;
       }
       rideEntries[key] = RideIndexEntry(path: path, stamp: stamp, ride: ride);
-      ride = ride.withSignerContext(signerContext);
+      ride = (await _withSegmentBytes(
+        ride.withSignerContext(signerContext),
+        segmentStamp,
+      ));
       rides.add(ride);
       videoChecks[key] = await videoCheckFromIndex(
         ride: ride,
@@ -136,7 +139,11 @@ Future<RideHistoryLoad> loadRideHistoryIndexed(
   );
   for (final path in orphanVideoPaths) {
     try {
-      rides.add(await RideRecord.fromVideoFile(File(path), loadSamples: false));
+      final orphan = await RideRecord.fromVideoFile(
+        File(path),
+        loadSamples: false,
+      );
+      rides.add(await _withSegmentBytes(orphan, segmentStamp));
     } catch (_) {
       // The file may have been deleted while the history was loading.
     }
@@ -156,6 +163,24 @@ Future<RideHistoryLoad> loadRideHistoryIndexed(
 /// see [loadRideHistoryIndexed].
 Future<List<RideRecord>> loadRideHistory(List<String> recordingPaths) async =>
     (await loadRideHistoryIndexed(recordingPaths)).rides;
+
+/// [ride] with its total segment bytes set: the sizes of the segments that
+/// exist, from the (shared) stat results, so each file is statted once per
+/// load. Missing segments count as 0. Display only.
+Future<RideRecord> _withSegmentBytes(
+  RideRecord ride,
+  Future<RideFileStamp?> Function(String path) stat,
+) async {
+  final missing = ride.missingSegmentPaths.toSet();
+  var total = 0;
+  for (final path in ride.segmentPaths) {
+    if (missing.contains(path)) {
+      continue;
+    }
+    total += (await stat(path))?.size ?? 0;
+  }
+  return ride.withTotalSegmentBytes(total);
+}
 
 /// Whether every segment of a cached [ride] exists exactly when the entry
 /// says it does. Resolution, the missing list and the integrity report all

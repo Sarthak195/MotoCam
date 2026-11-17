@@ -7,6 +7,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:motocam/core/ride_file/ride_telemetry_codec.dart';
 import 'package:motocam/core/utils/integrity_utils.dart';
 import 'package:motocam/features/history/models/ride_history_loader.dart';
+import 'package:motocam/features/history/models/ride_index.dart';
 import 'package:motocam/features/history/models/ride_record.dart';
 
 void main() {
@@ -114,5 +115,54 @@ void main() {
       rides: <RideRecord>[ride],
     );
     expect(orphans, <String>['${directory.path}${sep}REC2.MOV']);
+  });
+
+  test('sets the total segment bytes from the injected stat', () async {
+    final first = await writeFile('REC1.mp4', 'one');
+    final second = await writeFile('REC2.mp4', 'two');
+    final third = await writeFile('REC3.mp4', 'three');
+    final telemetry = await writeRide('a', <File>[
+      first,
+      second,
+      third,
+    ], '2026-05-03T10:00:00.000Z');
+    await second.delete();
+    final orphan = await writeFile('REC4.mp4', 'four');
+
+    final sizes = <String, int>{
+      first.path: 1000,
+      second.path: 5000,
+      third.path: 2500,
+      orphan.path: 700,
+    };
+    final statted = <String>[];
+    Future<RideFileStamp?> fakeStat(String path) async {
+      statted.add(path);
+      final size = sizes[path];
+      if (size != null && !File(path).existsSync()) {
+        return null;
+      }
+      return RideFileStamp(size: size ?? 1, modifiedUs: 1, changedUs: 1);
+    }
+
+    final load = await loadRideHistoryIndexed(<String>[
+      first.path,
+      third.path,
+      orphan.path,
+      telemetry.path,
+    ], stat: fakeStat);
+
+    final ride = load.rides.firstWhere((r) => r.telemetryPath != null);
+    expect(ride.missingSegmentPaths, <String>[second.path]);
+    // The missing segment counts as 0.
+    expect(ride.totalSegmentBytes, 3500);
+    final orphanRide = load.rides.firstWhere((r) => r.telemetryPath == null);
+    expect(orphanRide.totalSegmentBytes, 700);
+    // One stat per segment file, shared with the video check.
+    expect(
+      statted.where((path) => path == first.path),
+      hasLength(1),
+      reason: 'each segment is statted once per load',
+    );
   });
 }

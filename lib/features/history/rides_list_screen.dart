@@ -29,6 +29,7 @@ import 'services/gallery_links.dart';
 import 'services/legacy_ride_import.dart';
 import 'services/ride_deletion.dart';
 import 'widgets/playback_timeline.dart';
+import 'widgets/ride_size_line.dart';
 import 'widgets/recordings_migration_banner.dart';
 
 /// Ride History: lists recorded rides (locked clips first) with their
@@ -1180,6 +1181,7 @@ class _RidesListScreenState extends State<RidesListScreen> {
                   ? 'Segments: $segmentCount'
                   : 'Segments: $availableSegmentCount of $segmentCount available',
             ),
+            RideSizeLine(ride: ride),
             Text('Samples: ${ride.sampleCount}'),
             Text(_integrityLine(ride)),
             if (videoLine != null)

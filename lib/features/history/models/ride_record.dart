@@ -78,6 +78,7 @@ class RideRecord {
     required this.integrity,
     required this.quarantinedSegmentPaths,
     this.missingSegmentPaths = const <String>[],
+    this.totalSegmentBytes,
     this.incidents,
     this.mockLocationDetected = false,
     this.expectedSegmentHashes = const <String, String>{},
@@ -168,6 +169,11 @@ class RideRecord {
   /// Entries of [segmentPaths] whose files no longer exist. A missing file
   /// makes the ride incomplete; on its own it is not an integrity failure.
   final List<String> missingSegmentPaths;
+
+  /// Total size in bytes of the segment files that exist, set by the History
+  /// loader from the file sizes it reads (never stored in the ride index, so
+  /// it is current at each load); `null` when not measured. Display only.
+  final int? totalSegmentBytes;
 
   /// Incidents detected live during the ride, from the optional top-level
   /// `incidents` list, or `null` for files written before that key existed
@@ -319,10 +325,16 @@ class RideRecord {
     return _withIntegrity(report);
   }
 
+  /// This ride with [totalSegmentBytes] set (display only; nothing else
+  /// changes).
+  RideRecord withTotalSegmentBytes(int? bytes) =>
+      _withIntegrity(integrity, totalSegmentBytes: bytes);
+
   RideRecord _withIntegrity(
     RideIntegrityReport report, {
     List<String>? quarantinedSegmentPaths,
     List<String>? missingSegmentPaths,
+    int? totalSegmentBytes,
   }) {
     return RideRecord(
       videoPath: videoPath,
@@ -344,6 +356,7 @@ class RideRecord {
       quarantinedSegmentPaths:
           quarantinedSegmentPaths ?? this.quarantinedSegmentPaths,
       missingSegmentPaths: missingSegmentPaths ?? this.missingSegmentPaths,
+      totalSegmentBytes: totalSegmentBytes ?? this.totalSegmentBytes,
       incidents: incidents,
       mockLocationDetected: mockLocationDetected,
       expectedSegmentHashes: expectedSegmentHashes,
