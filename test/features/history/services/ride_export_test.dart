@@ -1370,7 +1370,7 @@ void main() {
       expect(readme, isNot(contains('A' * 64)));
       expect(readme, contains('  Recorded hash: invalid'));
       expect(readme, contains('  Recorded SHA-256: invalid'));
-      expect(readme, contains('have an invalid one'));
+      expect(readme, contains('0 differ; 1 have none.'));
       final rideLine = lines.firstWhere((l) => l.startsWith('Ride: '));
       expect(rideLine.length, 'Ride: '.length + 120);
       expect(readme, contains('Exported: 2026-11-19T13:05:00.123Z (UTC)'));
@@ -1385,11 +1385,11 @@ void main() {
       expect(manifest['exportedAt'], '2026-11-19T13:05:00.123Z');
       final file = (manifest['files'] as List).single as Map<String, Object?>;
       expect(file['recordedSha256'], isNull);
-      expect(file['recorded'], 'invalid');
+      expect(file['recorded'], 'none');
       final omitted =
           (manifest['notExported'] as List).single as Map<String, Object?>;
       expect(omitted.containsKey('recordedSha256'), isFalse);
-      expect(omitted['recorded'], 'invalid');
+      expect(omitted.containsKey('recorded'), isFalse);
     });
   });
 

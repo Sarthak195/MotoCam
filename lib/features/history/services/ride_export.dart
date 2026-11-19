@@ -73,12 +73,9 @@ enum RideExportRecorded {
   /// Different.
   differs,
 
-  /// No hash was recorded for this clip.
+  /// No hash was recorded for this clip, or the recorded value is not a
+  /// SHA-256 (see [RideExportFileEntry.recordedInvalid]).
   none,
-
-  /// The recorded value is not a SHA-256 (64 lowercase hex characters), so
-  /// it is not compared and never printed.
-  invalid,
 }
 
 /// Whether [value] is a SHA-256 as MotoCam records it: exactly 64
@@ -596,9 +593,6 @@ class RideExportFileEntry {
 
   /// How the exported bytes compare with [recordedSha256].
   RideExportRecorded get recorded {
-    if (recordedInvalid) {
-      return RideExportRecorded.invalid;
-    }
     final recorded = recordedSha256;
     if (recorded == null) {
       return RideExportRecorded.none;

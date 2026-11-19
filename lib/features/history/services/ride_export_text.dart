@@ -100,7 +100,6 @@ String _recordedValue(RideExportRecorded recorded) => switch (recorded) {
   RideExportRecorded.match => 'match',
   RideExportRecorded.differs => 'differs',
   RideExportRecorded.none => 'none',
-  RideExportRecorded.invalid => 'invalid',
 };
 
 String _reasonValue(RideExportOmissionReason reason) => switch (reason) {
@@ -186,7 +185,6 @@ Map<String, Object?> buildExportManifest(
           'name': omission.name,
           if (omission.recordedSha256 != null)
             'recordedSha256': omission.recordedSha256,
-          if (omission.recordedInvalid) 'recorded': 'invalid',
           'reason': _reasonValue(omission.reason),
         },
     ],
@@ -320,19 +318,15 @@ String buildExportReadme(
       .where((c) => c.recorded == RideExportRecorded.differs)
       .length;
   final none = clips.where((c) => c.recorded == RideExportRecorded.none).length;
-  final invalid = clips
-      .where((c) => c.recorded == RideExportRecorded.invalid)
-      .length;
   para(
     '$matched of ${clips.length} exported clips match their recorded hash; '
-    '$differ differ; $none have none'
-    '${invalid > 0 ? '; $invalid have an invalid one' : ''}.',
+    '$differ differ; $none have none.',
   );
 
   final publicKey = ride.integrity.signature?.signerPublicKey;
   if (plan.includeRideData && state == 'signed' && publicKey != null) {
     heading('Signer key');
-    line('keyId: ${source.signatureKeyId ?? ''}');
+    line('keyId: ${_field(source.signatureKeyId ?? '')}');
     line('Public key (base64 SubjectPublicKeyInfo DER):');
     line(publicKey);
     line('Fingerprint (SHA-256 of the key DER):');
@@ -381,9 +375,8 @@ String buildExportReadme(
           '${_field(clip.recordedSha256 ?? '')}',
         );
       case RideExportRecorded.none:
-        line('  Recorded hash: none');
-      case RideExportRecorded.invalid:
-        line('  Recorded hash: invalid');
+        // A recorded value that is not a SHA-256 counts as none.
+        line('  Recorded hash: ${clip.recordedInvalid ? 'invalid' : 'none'}');
     }
   }
   if (rideData != null) {
