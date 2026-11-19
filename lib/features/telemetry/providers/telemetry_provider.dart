@@ -141,6 +141,7 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
   double _lastIncidentGForce = 0.0;
   int _incidentCount = 0;
   DateTime? _lastUiNotifyAt;
+  Timer? _trailingUiNotify;
   Duration _uiNotifyMinInterval = const Duration(milliseconds: 100);
   double _smoothedLinearAccelerationG = 0.0;
   bool _hasSmoothedAcceleration = false;
@@ -945,7 +946,7 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
 
   /// Handles one linear-acceleration sample (m/s², gravity removed).
   ///
-  /// The smoothed value feeds the UI, the saved samples and the stationary
+  /// The smoothed value feeds the saved samples and the stationary
   /// heuristic. The raw vector goes to the [CrashDetector], which looks for
   /// a filtered jolt and then waits for its confirmation.
   void _onLinearAcceleration(double x, double y, double z, {DateTime? at}) {
@@ -973,8 +974,10 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
     if (confirmed != null) {
       _detectCrash(confirmed);
     }
-
-    _notifyUiIfNeeded();
+    // No notify here: no live widget shows the acceleration, and a notify
+    // per sample (about 100 a second, throttled to 10) cost a Flutter frame
+    // on the main thread each time. GPS fixes and the 1 s sample timer
+    // notify listeners.
   }
 
   /// Starts a new ride: resets ride statistics and incidents and begins
@@ -1641,18 +1644,26 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
     _forceNotifyUi();
   }
 
+  // Throttled notify with a trailing edge: an update inside the interval is
+  // delivered when the interval ends instead of being dropped.
   void _notifyUiIfNeeded() {
-    final now = DateTime.now();
-    if (_lastUiNotifyAt != null &&
-        now.difference(_lastUiNotifyAt!) < _uiNotifyMinInterval) {
-      return;
+    final last = _lastUiNotifyAt;
+    if (last != null) {
+      var wait = _uiNotifyMinInterval - DateTime.now().difference(last);
+      if (wait > Duration.zero) {
+        if (wait > _uiNotifyMinInterval) {
+          wait = _uiNotifyMinInterval; // the clock went back
+        }
+        _trailingUiNotify ??= Timer(wait, _forceNotifyUi);
+        return;
+      }
     }
-
-    _lastUiNotifyAt = now;
-    notifyListeners();
+    _forceNotifyUi();
   }
 
   void _forceNotifyUi() {
+    _trailingUiNotify?.cancel();
+    _trailingUiNotify = null;
     _lastUiNotifyAt = DateTime.now();
     notifyListeners();
   }
@@ -1664,6 +1675,7 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
   void dispose() {
     _sampleTimer?.cancel();
     _checkpointTimer?.cancel();
+    _trailingUiNotify?.cancel();
     _stopTracking();
     _endCrashDebugLog();
     if (_isObservingLifecycle) {

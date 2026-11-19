@@ -329,6 +329,47 @@ void main() {
       expect(provider.currentData.accelerationG.isFinite, isTrue);
     });
 
+    test('accelerometer samples do not notify listeners', () {
+      // About 100 samples a second used to cost a throttled notify and a
+      // Flutter frame each; no live widget shows the acceleration.
+      var notifications = 0;
+      provider.addListener(() => notifications++);
+      final start = DateTime.now();
+      for (var i = 0; i < 50; i++) {
+        provider.updateAccelerometerForTesting(
+          0.1,
+          0.0,
+          0.0,
+          timestamp: start.add(Duration(milliseconds: 10 * i)),
+        );
+      }
+
+      expect(notifications, 0);
+      expect(provider.currentData.accelerationG, greaterThan(0));
+    });
+
+    test('a GPS fix inside the UI throttle interval is delivered when the '
+        'interval ends', () async {
+      provider.setSpeedUiRefreshInterval(const Duration(milliseconds: 300));
+      var notifications = 0;
+      provider.addListener(() => notifications++);
+
+      provider.updateLocationForTesting(
+        createMockPosition(
+          latitude: 12.97,
+          longitude: 77.59,
+          speed: 10.0,
+          accuracy: 5.0,
+          heading: 90.0,
+          timestamp: DateTime.now(),
+        ),
+      );
+      expect(notifications, 0);
+
+      await Future<void>.delayed(const Duration(milliseconds: 450));
+      expect(notifications, 1);
+    });
+
     test(
       'clearHistory resets ride statistics but keeps the incident count',
       () {
