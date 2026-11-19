@@ -3,18 +3,23 @@ import 'dart:isolate';
 import 'dart:math' as math;
 import 'dart:async' show unawaited;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:video_player/video_player.dart';
 
 import '../../core/utils/format_utils.dart';
+import '../camera/providers/camera_provider.dart';
 import '../map/map_source_config.dart';
 import 'models/ride_index.dart';
 import 'models/ride_record.dart';
 import 'models/segment_verifier.dart';
+import 'services/ride_export.dart';
 import 'widgets/playback_position.dart';
 import 'widgets/playback_timeline.dart';
 import 'widgets/playback_video_area.dart';
+import 'widgets/ride_export_flow.dart';
 import 'widgets/ride_playback_body.dart';
 
 /// Plays back a recorded ride: its video segments as one continuous timeline,
@@ -117,6 +122,62 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
 
   bool get _isSegmentLoadInFlight =>
       _isSwitchingSegment || _isSeekingAcrossSegments;
+
+  /// The running ride export's progress (CameraProvider, Android only),
+  /// for the app bar's ride actions.
+  ValueListenable<RideExportProgress?>? _exportProgress;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (Platform.isAndroid) {
+      _exportProgress ??= context.read<CameraProvider>().rideExportProgress;
+    }
+  }
+
+  /// The app bar's ride actions (Android): "Export to folder" and "Share",
+  /// disabled while the ride loads or could not be read, or a spinner that
+  /// stops the export while this ride is being exported.
+  Widget _buildRideActions(ValueListenable<RideExportProgress?> progress) {
+    final key = _ride.telemetryPath ?? _ride.videoPath;
+    return ValueListenableBuilder<RideExportProgress?>(
+      valueListenable: progress,
+      builder: (context, export, _) {
+        if (export != null && export.rideKey == key) {
+          return IconButton(
+            tooltip: 'Stop export',
+            onPressed: () =>
+                unawaited(context.read<CameraProvider>().cancelRideExport()),
+            icon: SizedBox(
+              width: 18,
+              height: 18,
+              child: CircularProgressIndicator(
+                strokeWidth: 2,
+                value: export.fraction,
+              ),
+            ),
+          );
+        }
+        return PopupMenuButton<RideExportDestination>(
+          tooltip: 'Ride actions',
+          icon: const Icon(Icons.more_vert),
+          enabled: !_isLoading && !_rideReadFailed,
+          onSelected: (destination) =>
+              unawaited(runRideExportFlow(context, _ride, destination)),
+          itemBuilder: (_) => const [
+            PopupMenuItem<RideExportDestination>(
+              value: RideExportDestination.folder,
+              child: Text('Export to folder'),
+            ),
+            PopupMenuItem<RideExportDestination>(
+              value: RideExportDestination.share,
+              child: Text('Share'),
+            ),
+          ],
+        );
+      },
+    );
+  }
 
   @override
   void initState() {
@@ -1253,6 +1314,8 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
                           )
                         : const Icon(Icons.fact_check_outlined),
                   ),
+                if (_exportProgress case final progress?)
+                  _buildRideActions(progress),
               ],
             ),
       body: playbackError != null

@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:isolate';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
@@ -28,7 +29,9 @@ import 'services/gallery_copy_removal.dart';
 import 'services/gallery_links.dart';
 import 'services/legacy_ride_import.dart';
 import 'services/ride_deletion.dart';
+import 'services/ride_export.dart';
 import 'widgets/playback_timeline.dart';
+import 'widgets/ride_export_flow.dart';
 import 'widgets/ride_size_line.dart';
 import 'widgets/recordings_migration_banner.dart';
 
@@ -86,6 +89,10 @@ class _RidesListScreenState extends State<RidesListScreen> {
   /// until the first is done).
   final Map<String, double?> _galleryProgress = <String, double?>{};
 
+  /// The running ride export's progress (CameraProvider), listened to so
+  /// the exported ride's row shows its ring.
+  ValueListenable<RideExportProgress?>? _exportProgress;
+
   Widget _buildStatusBadge({required String label, required Color color}) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
@@ -116,6 +123,8 @@ class _RidesListScreenState extends State<RidesListScreen> {
       _wasMigrating = migration.isRunning;
       migration.addListener(_onMigrationChanged);
       _legacyImport = context.read<CameraProvider>().legacyRideImport;
+      _exportProgress = context.read<CameraProvider>().rideExportProgress
+        ..addListener(_onExportProgressChanged);
       _ridesFuture = _loadRides();
     }
   }
@@ -125,7 +134,51 @@ class _RidesListScreenState extends State<RidesListScreen> {
     _indexStore?.removeListener(_onIndexChanged);
     _migration?.removeListener(_onMigrationChanged);
     _galleryLinks?.removeListener(_onGalleryLinksChanged);
+    _exportProgress?.removeListener(_onExportProgressChanged);
     super.dispose();
+  }
+
+  /// Shows a ride export's progress (or its end) on the ride's row.
+  void _onExportProgressChanged() {
+    if (mounted) {
+      setState(() {});
+    }
+  }
+
+  /// The running export's progress when it is of [ride], else `null`.
+  RideExportProgress? _exportProgressOf(RideRecord ride) {
+    final progress = _exportProgress?.value;
+    return progress != null && progress.rideKey == _lockKeyFor(ride)
+        ? progress
+        : null;
+  }
+
+  /// While a ride is being exported its files must stay as they are, so
+  /// unlocking (which rewrites the ride file) and deleting wait: shows a
+  /// notice and returns `true` while an export runs.
+  bool _refuseWhileExporting() {
+    if (_exportProgress?.value == null) {
+      return false;
+    }
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text(
+          'A ride is being exported. Try again when the export finishes.',
+        ),
+        duration: Duration(seconds: 3),
+      ),
+    );
+    return true;
+  }
+
+  /// The ride menu's "Export to folder" and "Share": never while the ride
+  /// is being deleted or unlocked.
+  void _exportRide(RideRecord ride, RideExportDestination destination) {
+    final key = _lockKeyFor(ride);
+    if (_deletesInFlight.contains(key) || _lockUpdatesInFlight.contains(key)) {
+      return;
+    }
+    unawaited(runRideExportFlow(context, ride, destination));
   }
 
   /// Shows a changed gallery-link store (a copy made or removed).
@@ -315,7 +368,8 @@ class _RidesListScreenState extends State<RidesListScreen> {
     final lockKey = _lockKeyFor(ride);
     if (_lockUpdatesInFlight.contains(lockKey) ||
         _galleryProgress.containsKey(lockKey) ||
-        _refuseWhileFilesChange()) {
+        _refuseWhileFilesChange() ||
+        _refuseWhileExporting()) {
       return;
     }
 
@@ -347,7 +401,10 @@ class _RidesListScreenState extends State<RidesListScreen> {
         ],
       ),
     );
-    if (confirmed != true || !mounted || _refuseWhileFilesChange()) {
+    if (confirmed != true ||
+        !mounted ||
+        _refuseWhileFilesChange() ||
+        _refuseWhileExporting()) {
       return;
     }
 
@@ -651,7 +708,8 @@ class _RidesListScreenState extends State<RidesListScreen> {
     final key = _lockKeyFor(ride);
     if (_deletesInFlight.contains(key) ||
         _galleryProgress.containsKey(key) ||
-        _refuseWhileFilesChange()) {
+        _refuseWhileFilesChange() ||
+        _refuseWhileExporting()) {
       return;
     }
     final messenger = ScaffoldMessenger.of(context);
@@ -694,7 +752,10 @@ class _RidesListScreenState extends State<RidesListScreen> {
         ],
       ),
     );
-    if (confirmed != true || !mounted || _refuseWhileFilesChange()) {
+    if (confirmed != true ||
+        !mounted ||
+        _refuseWhileFilesChange() ||
+        _refuseWhileExporting()) {
       return;
     }
     // Before the ride's files go: deleting them drops the links.
@@ -707,7 +768,8 @@ class _RidesListScreenState extends State<RidesListScreen> {
       );
       if (!mounted ||
           _galleryProgress.containsKey(key) ||
-          _refuseWhileFilesChange()) {
+          _refuseWhileFilesChange() ||
+          _refuseWhileExporting()) {
         return;
       }
     }
@@ -1134,8 +1196,17 @@ class _RidesListScreenState extends State<RidesListScreen> {
     // A gallery save or removal of the ride blocks unlocking and deleting
     // it until it ends.
     final galleryBusy = _galleryProgress.containsKey(_lockKeyFor(ride));
+    // So does an export of the ride.
+    final export = _exportProgressOf(ride);
+    final exportBusy = export != null;
+    final waitTooltip = exportBusy
+        ? 'Wait for the export to finish'
+        : 'Wait for the gallery copies to finish';
     final canToggleLockState =
-        _canChangeLockState(ride) && !isUpdatingLock && !galleryBusy;
+        _canChangeLockState(ride) &&
+        !isUpdatingLock &&
+        !galleryBusy &&
+        !exportBusy;
     final badges = _buildBadges(ride);
     final videoCoverage = _videoCoverageText(ride);
     final isDeleting = _deletesInFlight.contains(_lockKeyFor(ride));
@@ -1238,8 +1309,8 @@ class _RidesListScreenState extends State<RidesListScreen> {
                 IconButton(
                   tooltip: canToggleLockState
                       ? 'Unlock clip'
-                      : galleryBusy
-                      ? 'Wait for the gallery copies to finish'
+                      : galleryBusy || exportBusy
+                      ? waitTooltip
                       : 'Integrity warning: lock state changes disabled',
                   padding: EdgeInsets.zero,
                   constraints: const BoxConstraints(
@@ -1263,8 +1334,8 @@ class _RidesListScreenState extends State<RidesListScreen> {
                 )
               else
                 IconButton(
-                  tooltip: galleryBusy
-                      ? 'Wait for the gallery copies to finish'
+                  tooltip: galleryBusy || exportBusy
+                      ? waitTooltip
                       : ride.isLocked && _canChangeLockState(ride)
                       ? 'Unlock the ride to delete it'
                       : 'Delete ride',
@@ -1274,10 +1345,30 @@ class _RidesListScreenState extends State<RidesListScreen> {
                     minHeight: 28,
                   ),
                   iconSize: 20,
-                  onPressed: galleryBusy ? null : () => _confirmAndDelete(ride),
+                  onPressed: galleryBusy || exportBusy
+                      ? null
+                      : () => _confirmAndDelete(ride),
                   icon: const Icon(Icons.delete_outline),
                 ),
-              if (showGalleryMenu && galleryBusy)
+              if (showGalleryMenu && exportBusy)
+                // The export's ring wins over a gallery save's: it carries
+                // the stop.
+                IconButton(
+                  tooltip: 'Stop export',
+                  padding: EdgeInsets.zero,
+                  onPressed: () => unawaited(
+                    context.read<CameraProvider>().cancelRideExport(),
+                  ),
+                  icon: SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      value: export.fraction,
+                    ),
+                  ),
+                )
+              else if (showGalleryMenu && galleryBusy)
                 Padding(
                   padding: const EdgeInsets.all(4),
                   child: SizedBox(
@@ -1291,7 +1382,7 @@ class _RidesListScreenState extends State<RidesListScreen> {
                 )
               else if (showGalleryMenu)
                 PopupMenuButton<String>(
-                  tooltip: 'Gallery',
+                  tooltip: 'Ride actions',
                   padding: EdgeInsets.zero,
                   iconSize: 20,
                   icon: const Icon(Icons.more_vert),
@@ -1300,6 +1391,10 @@ class _RidesListScreenState extends State<RidesListScreen> {
                       unawaited(_confirmAndSaveToGallery(ride));
                     } else if (value == 'remove') {
                       unawaited(_confirmAndRemoveGalleryCopies(ride));
+                    } else if (value == 'export') {
+                      _exportRide(ride, RideExportDestination.folder);
+                    } else if (value == 'share') {
+                      _exportRide(ride, RideExportDestination.share);
                     }
                   },
                   itemBuilder: (_) => [
@@ -1312,6 +1407,14 @@ class _RidesListScreenState extends State<RidesListScreen> {
                         value: 'remove',
                         child: Text('Remove gallery copies'),
                       ),
+                    const PopupMenuItem<String>(
+                      value: 'export',
+                      child: Text('Export to folder'),
+                    ),
+                    const PopupMenuItem<String>(
+                      value: 'share',
+                      child: Text('Share'),
+                    ),
                   ],
                 ),
               if (!showGalleryMenu) const Icon(Icons.play_circle_outline),
