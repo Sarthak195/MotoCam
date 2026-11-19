@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/painting.dart';
 import 'package:flutter/services.dart';
@@ -71,6 +73,31 @@ void main() {
         };
         expect(widths, hasLength(1), reason: family);
       }
+    });
+  });
+
+  test('pubspec declares both families with the board weights', () async {
+    final manifest =
+        jsonDecode(await rootBundle.loadString('FontManifest.json'))
+            as List<dynamic>;
+    final declared = <String, Map<String, int?>>{};
+    for (final family in manifest.cast<Map<String, dynamic>>()) {
+      final fonts = (family['fonts'] as List<dynamic>)
+          .cast<Map<String, dynamic>>();
+      declared[family['family'] as String] = {
+        for (final font in fonts)
+          (font['asset'] as String).split('/').last: font['weight'] as int?,
+      };
+    }
+    expect(declared[MotoFonts.body], {
+      'Barlow-Regular.ttf': 400,
+      'Barlow-Medium.ttf': 500,
+      'Barlow-SemiBold.ttf': 600,
+    });
+    expect(declared[MotoFonts.condensed], {
+      'BarlowCondensed-Medium.ttf': 500,
+      'BarlowCondensed-SemiBold.ttf': 600,
+      'BarlowCondensed-Bold.ttf': 700,
     });
   });
 

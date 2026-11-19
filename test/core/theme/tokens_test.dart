@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -7,6 +8,8 @@ import 'package:motocam/features/recording/recording_screen_logic.dart'
     as logic;
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
   group('token contrast (WCAG AA, 4.5:1 for text)', () {
     const surfaces = {
       'bg': MotoColors.bg,
@@ -105,6 +108,17 @@ void main() {
       expect(theme.textTheme.bodyLarge?.fontFamily, MotoFonts.body);
       expect(theme.textTheme.headlineMedium?.fontFamily, MotoFonts.condensed);
     });
+
+    test(
+      'building it registers the font licence (the app startup path)',
+      () async {
+        buildAppTheme();
+        final packages = await LicenseRegistry.licenses
+            .expand((entry) => entry.packages)
+            .toList();
+        expect(packages, containsAll(<String>['Barlow', 'Barlow Condensed']));
+      },
+    );
 
     test('sets every component theme the plan names', () {
       final theme = buildAppTheme();
