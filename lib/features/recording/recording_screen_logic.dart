@@ -11,26 +11,14 @@ import 'package:flutter/widgets.dart';
 import '../../core/utils/format_utils.dart';
 import '../camera/providers/camera_init_status.dart';
 
-/// Fill colour of the START RECORDING button (Material blue 700). White text
-/// on it reaches 4.6:1 contrast.
-const Color recordingStartButtonColor = Color(0xFF1976D2);
-
-/// Fill colour of the STOP RECORDING button (Material red 700). White text
-/// on it reaches 4.98:1 contrast.
-const Color recordingStopButtonColor = Color(0xFFD32F2F);
-
-/// Label colour used on [recordingStartButtonColor] and
-/// [recordingStopButtonColor].
-const Color recordingButtonLabelColor = Color(0xFFFFFFFF);
-
-/// WCAG 2.x contrast ratio between two opaque colours (1.0 to 21.0). Only
-/// tests use it, to check the button label colours.
-@visibleForTesting
-double contrastRatio(Color a, Color b) {
-  final la = a.computeLuminance();
-  final lb = b.computeLuminance();
-  return (math.max(la, lb) + 0.05) / (math.min(la, lb) + 0.05);
-}
+// The button colours and contrastRatio now live with the design tokens;
+// re-exported so the screens that use them need no new import.
+export '../../core/theme/tokens.dart'
+    show
+        contrastRatio,
+        recordingButtonLabelColor,
+        recordingStartButtonColor,
+        recordingStopButtonColor;
 
 /// Formats a recording duration as `HH:MM:SS`.
 String formatRecordingElapsed(Duration duration) => formatElapsed(duration);

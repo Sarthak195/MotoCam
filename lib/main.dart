@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter/foundation.dart';
 import 'package:provider/provider.dart';
 import 'core/providers/app_settings_provider.dart';
+import 'core/theme/app_theme.dart';
 import 'features/camera/providers/camera_provider.dart';
 import 'features/map/map_licence.dart';
 import 'features/telemetry/providers/telemetry_provider.dart';
@@ -81,11 +82,7 @@ class MotoCamApp extends StatelessWidget {
       child: MaterialApp(
         title: 'MotoCam',
         debugShowCheckedModeBanner: false,
-        theme: ThemeData(
-          colorSchemeSeed: Colors.blue,
-          brightness: Brightness.dark,
-          useMaterial3: true,
-        ),
+        theme: buildAppTheme(),
         home: const RecordingScreen(),
       ),
     );

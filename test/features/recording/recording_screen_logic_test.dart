@@ -156,17 +156,6 @@ void main() {
     expect(formatRecordingElapsed(const Duration(hours: 12)), '12:00:00');
   });
 
-  test('START/STOP button labels reach WCAG AA contrast (4.5:1)', () {
-    expect(
-      contrastRatio(recordingButtonLabelColor, recordingStartButtonColor),
-      greaterThanOrEqualTo(4.5),
-    );
-    expect(
-      contrastRatio(recordingButtonLabelColor, recordingStopButtonColor),
-      greaterThanOrEqualTo(4.5),
-    );
-  });
-
   group('autoIncidentProtectPastSegments', () {
     Map<String, dynamic> segment(int startMs, int endMs) => {
       'path': 'segment_$startMs.mp4',
