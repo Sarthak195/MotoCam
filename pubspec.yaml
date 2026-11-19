@@ -66,3 +66,29 @@ dependency_overrides:
 
 flutter:
   uses-material-design: true
+
+  # The licence of the bundled Barlow fonts, listed on the licence page by
+  # lib/core/theme/font_licence.dart.
+  assets:
+    - assets/fonts/OFL.txt
+
+  # Barlow and Barlow Condensed (SIL Open Font License 1.1), bundled so the
+  # app needs no network for its type. Source: google/fonts, ofl/barlow and
+  # ofl/barlowcondensed.
+  fonts:
+    - family: Barlow
+      fonts:
+        - asset: assets/fonts/Barlow-Regular.ttf
+          weight: 400
+        - asset: assets/fonts/Barlow-Medium.ttf
+          weight: 500
+        - asset: assets/fonts/Barlow-SemiBold.ttf
+          weight: 600
+    - family: Barlow Condensed
+      fonts:
+        - asset: assets/fonts/BarlowCondensed-Medium.ttf
+          weight: 500
+        - asset: assets/fonts/BarlowCondensed-SemiBold.ttf
+          weight: 600
+        - asset: assets/fonts/BarlowCondensed-Bold.ttf
+          weight: 700
