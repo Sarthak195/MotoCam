@@ -59,9 +59,10 @@ import java.util.concurrent.atomic.AtomicBoolean
  *   private file `sourcePath` into the folder as `name` and returns
  *   `{bytes, sourceSha256, copySha256, skipped, synced}`. A file of that
  *   name already there with the same content is skipped (`skipped` true,
- *   nothing written); one of another size is a partial copy and is
- *   replaced; one of the same size but other content is never touched
- *   (`EXISTS_DIFFERENT`). A size the provider does not report counts as
+ *   nothing written); a shorter one is a partial copy from a killed run
+ *   and is replaced; a longer one, or one of the same size but other
+ *   content, is never touched (`EXISTS_DIFFERENT`): it may be the only
+ *   intact copy of a clip that changed on the phone. A size the provider does not report counts as
  *   the byte count read from the existing file. A new copy is synced when
  *   it is a regular file (`synced` true); a pipe, a socket, another file
  *   type or a failed `fstat` gives `synced` false. The copy is then read
@@ -319,7 +320,8 @@ class RideExport(
         val existing = listChildren(folderUri).firstOrNull { !it.isDirectory && it.name == name }
         if (existing != null) {
             val sourceLength = source.length()
-            if (existing.size == null || existing.size == sourceLength) {
+            val knownSize = existing.size
+            if (knownSize == null || knownSize >= sourceLength) {
                 val copy = hashDocument(existing.uri)
                 if (copy.bytes == sourceLength) {
                     val sourceDigest = hashSource(source)
@@ -334,8 +336,14 @@ class RideExport(
                     }
                     throw ExportError("EXISTS_DIFFERENT", "a different $name is already in the folder")
                 }
+                // A killed run only ever leaves a shorter copy. A longer one
+                // may be the only intact copy of a clip that has changed on
+                // the phone since: never replace it.
+                if (copy.bytes > sourceLength) {
+                    throw ExportError("EXISTS_DIFFERENT", "a longer $name is already in the folder")
+                }
             }
-            // Another size: a partial copy left by a killed run.
+            // Shorter than the source: a partial copy left by a killed run.
             if (!deleteDocument(existing.uri)) {
                 throw ExportError("WRITE_FAILED", "cannot replace the partial $name")
             }
