@@ -25,6 +25,7 @@ import java.io.InputStream
 import java.io.OutputStream
 import java.security.MessageDigest
 import java.util.concurrent.ExecutorService
+import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -234,7 +235,10 @@ class RideExport(
         try {
             @Suppress("DEPRECATION")
             activity.startActivityForResult(intent, REQUEST_PICK_TREE)
-        } catch (e: ActivityNotFoundException) {
+        } catch (e: Exception) {
+            // ActivityNotFoundException, or a SecurityException and the
+            // like from the system: the picker never opened.
+            Log.w(TAG, "ride export folder picker failed", e)
             pendingPick = null
             result.error("NO_PICKER", "no app can pick a folder", null)
         }
@@ -611,19 +615,26 @@ class RideExport(
         fallbackCode: String,
         work: () -> Any?,
     ) {
-        executor.execute {
-            try {
-                val value = work()
-                mainHandler.post { result.success(value) }
-            } catch (e: ExportError) {
-                if (e.code != "CANCELLED") {
-                    Log.w(TAG, "ride export ${e.code}: ${e.message}")
+        // Every path answers [result] exactly once: an Error (for example
+        // OutOfMemoryError) too, and a call refused after [dispose].
+        try {
+            executor.execute {
+                try {
+                    val value = work()
+                    mainHandler.post { result.success(value) }
+                } catch (e: ExportError) {
+                    if (e.code != "CANCELLED") {
+                        Log.w(TAG, "ride export ${e.code}: ${e.message}")
+                    }
+                    mainHandler.post { result.error(e.code, e.message, null) }
+                } catch (e: Throwable) {
+                    Log.e(TAG, "ride export $fallbackCode", e)
+                    mainHandler.post { result.error(fallbackCode, e.message, null) }
                 }
-                mainHandler.post { result.error(e.code, e.message, null) }
-            } catch (e: Exception) {
-                Log.e(TAG, "ride export $fallbackCode", e)
-                mainHandler.post { result.error(fallbackCode, e.message, null) }
             }
+        } catch (e: RejectedExecutionException) {
+            Log.w(TAG, "ride export $fallbackCode: the export thread is shut down")
+            result.error(fallbackCode, "the export thread is shut down", null)
         }
     }
 }
