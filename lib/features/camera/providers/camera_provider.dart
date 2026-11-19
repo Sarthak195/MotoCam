@@ -226,6 +226,10 @@ class CameraProvider extends ChangeNotifier {
   // The exporter of the running ride export, for cancelRideExport.
   RideExporter? _rideExporter;
 
+  // A Stop tapped while the running export has no exporter yet; the run
+  // cancels its exporter as soon as it is made.
+  bool _rideExportCancelPending = false;
+
   final ValueNotifier<RideExportProgress?> _rideExportProgress =
       ValueNotifier<RideExportProgress?>(null);
 
@@ -2706,10 +2710,16 @@ class CameraProvider extends ChangeNotifier {
   }
 
   /// Stops the running ride export at once (the copy in flight is
-  /// cancelled); the run ends with [RideExportOutcome.cancelled]. Does
-  /// nothing when no export runs.
+  /// cancelled); the run ends with [RideExportOutcome.cancelled]. A Stop
+  /// before the run made its exporter is kept and applied as soon as it
+  /// does. Does nothing when no export runs.
   Future<void> cancelRideExport() async {
-    await _rideExporter?.cancel();
+    final exporter = _rideExporter;
+    if (exporter != null) {
+      await exporter.cancel();
+    } else if (_isRideExportRunning) {
+      _rideExportCancelPending = true;
+    }
   }
 
   /// Runs [plan] into a folder of the picked tree [treeUri] or, when
@@ -2734,6 +2744,7 @@ class CameraProvider extends ChangeNotifier {
     }
     // Set with no await after the gate check, so a second run is refused.
     _isRideExportRunning = true;
+    _rideExportCancelPending = false;
     const native = RideExportChannel();
     final total =
         plan.clips.length + (plan.rideData == null ? 0 : 1) + (folder ? 2 : 0);
@@ -2768,6 +2779,9 @@ class CameraProvider extends ChangeNotifier {
             _isStoppingRecording,
       );
       _rideExporter = exporter;
+      if (_rideExportCancelPending) {
+        await exporter.cancel();
+      }
       void onProgress(int done, int _) => publish(done);
       return folder
           ? await exporter.exportToFolder(
@@ -2782,6 +2796,7 @@ class CameraProvider extends ChangeNotifier {
         _rideExportProgress.value = null;
       }
       _rideExporter = null;
+      _rideExportCancelPending = false;
       _isRideExportRunning = false;
     }
   }
