@@ -107,48 +107,65 @@ String _reasonValue(RideExportOmissionReason reason) => switch (reason) {
   RideExportOmissionReason.missing => 'missing',
 };
 
-/// The manifest's `section` object of [plan]'s section choice (clip
-/// numbers 1-based, `fromMs` and `toMs` from the ride start, `null`
-/// without a timeline), or `null` for the other choices.
-Map<String, Object?>? _sectionValue(RideExportPlan plan) {
-  final section = plan.section;
-  if (section == null) {
-    return null;
-  }
-  final ride = plan.source.ride;
-  final span = rideExportSectionSpan(ride, section);
-  return <String, Object?>{
-    'firstClip': section.firstClip,
-    'lastClip': section.lastClip,
-    'clipCount': ride.segmentPaths.length,
-    'fromMs': span?.fromMs,
-    'toMs': span?.toMs,
-  };
-}
+/// The README's `Clips:` value of [plan] (not a section).
+String _clipsText(RideExportPlan plan) =>
+    plan.clipChoice == RideExportClips.evidence
+    ? 'locked and incident clips'
+    : 'all clips';
 
-/// The README's `Clips:` value of [plan], for a section for example
-/// `clips 3 to 5 of 6 (ride time 14:05 to 14:21)`.
-String _clipsText(RideExportPlan plan) {
-  final section = plan.section;
-  switch (plan.clipChoice) {
-    case RideExportClips.evidence:
-      return 'locked and incident clips';
-    case RideExportClips.all:
-      return 'all clips';
-    case RideExportClips.section:
-      if (section == null) {
-        return 'a section';
-      }
-      final ride = plan.source.ride;
-      final span = rideExportSectionSpan(ride, section);
-      final clips =
-          'clips ${section.firstClip} to ${section.lastClip} of '
-          '${ride.segmentPaths.length}';
-      return span == null
-          ? clips
-          : '$clips (ride time ${rideExportClockText(ride, span.fromMs)} to '
-                '${rideExportClockText(ride, span.toMs)})';
-  }
+/// manifest.json of a section export ([buildExportManifest]): no ride
+/// data, no integrity block; each file with whether it was trimmed and its
+/// clip-local range; `section.actualFromMs` is where the first file starts
+/// in ride time (after the keyframe snap), `null` without files.
+Map<String, Object?> _sectionManifest(
+  RideExportPlan plan,
+  RideExportSection section, {
+  required List<RideExportFileEntry> clips,
+  required RideExportDestination destination,
+  required DateTime exportedAt,
+}) => <String, Object?>{
+  'format': rideExportManifestFormat,
+  'formatVersion': rideExportManifestFormatVersion,
+  'rideSessionId': plan.source.ride.rideSessionId,
+  'exportedAt': _exportedAtText(exportedAt),
+  'destination': destination == RideExportDestination.folder
+      ? 'folder'
+      : 'share',
+  'clips': 'section',
+  'section': <String, Object?>{
+    'fromMs': section.fromMs,
+    'toMs': section.toMs,
+    'actualFromMs': _actualFromMs(plan, clips),
+  },
+  'rideDataIncluded': false,
+  'sha256Of': destination == RideExportDestination.folder ? 'copy' : 'source',
+  'integrity': null,
+  'files': <Map<String, Object?>>[
+    for (final clip in clips)
+      <String, Object?>{
+        'name': clip.name,
+        'bytes': clip.bytes,
+        'sha256': clip.sha256,
+        'trimmed': clip.trimmed,
+        'clipFromMs': clip.clipFromMs,
+        'clipToMs': clip.clipToMs,
+      },
+  ],
+  'rideData': null,
+  'notExported': <Map<String, Object?>>[
+    for (final omission in plan.notExported)
+      <String, Object?>{
+        'name': omission.name,
+        'reason': _reasonValue(omission.reason),
+      },
+  ],
+};
+
+/// Where the first of [clips] starts in ride time, or `null` without one.
+int? _actualFromMs(RideExportPlan plan, List<RideExportFileEntry> clips) {
+  final part = plan.clips.isEmpty ? null : plan.clips.first.part;
+  final from = clips.isEmpty ? null : clips.first.clipFromMs;
+  return part == null || from == null ? null : part.rideStartMs + from;
 }
 
 /// manifest.json (format 1) of an export of [plan] whose [clips] and
@@ -164,6 +181,16 @@ Map<String, Object?> buildExportManifest(
   required RideExportDestination destination,
   required DateTime exportedAt,
 }) {
+  final section = plan.section;
+  if (section != null) {
+    return _sectionManifest(
+      plan,
+      section,
+      clips: clips,
+      destination: destination,
+      exportedAt: exportedAt,
+    );
+  }
   final source = plan.source;
   final ride = source.ride;
   Map<String, Object?>? integrity;
@@ -200,12 +227,8 @@ Map<String, Object?> buildExportManifest(
     'destination': destination == RideExportDestination.folder
         ? 'folder'
         : 'share',
-    'clips': switch (plan.clipChoice) {
-      RideExportClips.evidence => 'evidence',
-      RideExportClips.all => 'all',
-      RideExportClips.section => 'section',
-    },
-    'section': _sectionValue(plan),
+    'clips': plan.clipChoice == RideExportClips.evidence ? 'evidence' : 'all',
+    'section': null,
     'rideDataIncluded': plan.includeRideData,
     'sha256Of': destination == RideExportDestination.folder ? 'copy' : 'source',
     'integrity': integrity,
@@ -242,7 +265,8 @@ Map<String, Object?> buildExportManifest(
 
 /// MOTOCAM-EXPORT.txt of an export of [plan] (see [buildExportManifest]),
 /// wrapped near 72 columns; keys, hashes, commands and the URL are never
-/// wrapped.
+/// wrapped. A section's README names its files and ranges only: no
+/// integrity, key or verification text.
 String buildExportReadme(
   RideExportPlan plan, {
   required List<RideExportFileEntry> clips,
@@ -250,6 +274,16 @@ String buildExportReadme(
   required RideExportDestination destination,
   required DateTime exportedAt,
 }) {
+  final section = plan.section;
+  if (section != null) {
+    return _sectionReadme(
+      plan,
+      section,
+      clips: clips,
+      destination: destination,
+      exportedAt: exportedAt,
+    );
+  }
   final source = plan.source;
   final ride = source.ride;
   final folder = destination == RideExportDestination.folder;
@@ -541,6 +575,94 @@ String buildExportReadme(
   para('manifest.json and this file are not signed.');
   return '${out.toString().trimRight()}\n';
 }
+
+/// MOTOCAM-EXPORT.txt of a section export ([buildExportReadme]).
+String _sectionReadme(
+  RideExportPlan plan,
+  RideExportSection section, {
+  required List<RideExportFileEntry> clips,
+  required RideExportDestination destination,
+  required DateTime exportedAt,
+}) {
+  final ride = plan.source.ride;
+  final folder = destination == RideExportDestination.folder;
+  final out = StringBuffer();
+  void line([String text = '']) => out.writeln(text);
+  void para(String text) {
+    out.writeln(_wrap(text));
+    out.writeln();
+  }
+
+  void heading(String text) {
+    line(text);
+    line('-' * text.length);
+  }
+
+  line('MotoCam ride export');
+  line('===================');
+  line();
+  line('Ride: ${_field(ride.rideSessionId ?? ride.fileName)}');
+  line('Exported: ${_exportedAtText(exportedAt)} (UTC)');
+  line('Local time: ${_localTime(exportedAt)}');
+  line(
+    'Section: ${_minutesSeconds(section.fromMs)} to '
+    '${_minutesSeconds(section.toMs)} of the ride (clock time '
+    '${rideExportClockText(ride, section.fromMs)} to '
+    '${rideExportClockText(ride, section.toMs)})',
+  );
+  line('Ride data: not included (video only)');
+  line(
+    folder
+        ? 'Destination: a folder picked on the phone'
+        : 'Destination: the Android share sheet',
+  );
+  line();
+
+  heading('Files');
+  para(
+    folder
+        ? 'Each SHA-256 is of the copy in this folder, read back after '
+              'copying.'
+        : 'Each SHA-256 is of the file on the phone: MotoCam cannot read '
+              'the copy the receiving app made.',
+  );
+  for (final clip in clips) {
+    line('${_field(clip.name)} (${clip.trimmed ? 'trimmed' : 'whole clip'})');
+    line(
+      '  In the clip: ${_clipTime(clip.clipFromMs ?? 0)} to '
+      '${_clipTime(clip.clipToMs ?? 0)}',
+    );
+    line('  ${clip.bytes} bytes');
+    line('  SHA-256: ${clip.sha256}');
+  }
+  for (final omission in plan.notExported) {
+    line('${_field(omission.name)}: missing on the phone');
+  }
+  line();
+  para(
+    'Files keep their original clip names. Trimmed files are cut copies '
+    'made without re-encoding: they are not the original recordings and do '
+    'not match the original clips\' checksums. This export carries no ride '
+    'data and no signature.',
+  );
+
+  heading('Privacy');
+  para(
+    'Videos show other road users: share them only for your own records, '
+    'the police or your insurer.',
+  );
+  if (folder) {
+    para(
+      'The folder you pick is shared storage: other apps with media or '
+      'storage access, and gallery backups, may see these files.',
+    );
+  }
+  return '${out.toString().trimRight()}\n';
+}
+
+/// [ms] in a clip as `mm:ss.mmm`.
+String _clipTime(int ms) =>
+    '${_minutesSeconds(ms)}.${(ms % 1000).toString().padLeft(3, '0')}';
 
 /// Greedy word wrap at [_wrapColumn]; a word longer than a line stands
 /// alone.

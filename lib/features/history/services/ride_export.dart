@@ -2,8 +2,10 @@
 //
 // Ride export (Android): copies a ride's clips, its ride JSON (byte for
 // byte), manifest.json and MOTOCAM-EXPORT.txt into one folder of a picked
-// Storage Access Framework tree, or hands them to the share sheet. The
-// ride file is read once, in a background isolate, before planning
+// Storage Access Framework tree, or hands them to the share sheet. A
+// section of a ride is an exact time range: clips cut at its ends are
+// trimmed without re-encoding and keep their original names; a section
+// never carries the ride data. The ride file is read once, in a background isolate, before planning
 // ([loadRideExportSource]); [planRideExport] picks the clips;
 // [RideExporter] runs the copy over a [RideExportNative] and returns a
 // [RideExportResult] that [rideExportSummary] turns into the rider's
@@ -54,35 +56,137 @@ enum RideExportClips {
   /// Every clip of the ride.
   all,
 
-  /// A range of whole clips ([RideExportSection]).
+  /// An exact time range of the ride ([RideExportSection]), video only.
   section,
 }
 
-/// A section of a ride: the clips [firstClip] to [lastClip] (inclusive,
-/// 1-based clip numbers over the ride's `segmentPaths`, missing files
-/// included).
+/// A section of a ride: [fromMs] to [toMs], in ms from the ride start
+/// (the clock of the ride's `segmentTimeline`).
 @immutable
 class RideExportSection {
   /// Creates a section.
-  const RideExportSection(this.firstClip, this.lastClip);
+  const RideExportSection(this.fromMs, this.toMs);
 
-  /// The first clip number.
-  final int firstClip;
+  /// The start, in ms from the ride start.
+  final int fromMs;
 
-  /// The last clip number.
-  final int lastClip;
+  /// The end, in ms from the ride start.
+  final int toMs;
 
   @override
   bool operator ==(Object other) =>
       other is RideExportSection &&
-      other.firstClip == firstClip &&
-      other.lastClip == lastClip;
+      other.fromMs == fromMs &&
+      other.toMs == toMs;
 
   @override
-  int get hashCode => Object.hash(firstClip, lastClip);
+  int get hashCode => Object.hash(fromMs, toMs);
 
   @override
-  String toString() => 'RideExportSection($firstClip, $lastClip)';
+  String toString() => 'RideExportSection($fromMs, $toMs)';
+}
+
+/// One clip of a section: the part [clipFromMs] to [clipToMs] (clip-local
+/// ms) of the clip [path], whose timeline entry starts [rideStartMs] after
+/// the ride start and lasts [clipLengthMs].
+@immutable
+class RideExportSectionPart {
+  /// Creates a part.
+  const RideExportSectionPart({
+    required this.path,
+    required this.rideStartMs,
+    required this.clipLengthMs,
+    required this.clipFromMs,
+    required this.clipToMs,
+  });
+
+  /// The clip (an entry of `segmentPaths`).
+  final String path;
+
+  /// The clip's start, in ms from the ride start.
+  final int rideStartMs;
+
+  /// The clip's length in the timeline.
+  final int clipLengthMs;
+
+  /// The part's start in the clip.
+  final int clipFromMs;
+
+  /// The part's end in the clip.
+  final int clipToMs;
+
+  /// Whether the part is less than the whole clip (cut at either end, so
+  /// it is trimmed).
+  bool get trimmed => clipFromMs > 0 || clipToMs < clipLengthMs;
+}
+
+/// The timeline entries of [ride]'s trusted clips (`segmentPaths`), by
+/// normalised path.
+Map<String, RideSegmentTimelineEntry> _trustedTimeline(RideRecord ride) {
+  final trusted = <String>{
+    for (final path in ride.segmentPaths) path_utils.normalizePath(path),
+  };
+  return <String, RideSegmentTimelineEntry>{
+    for (final entry in ride.segmentTimeline)
+      if (trusted.contains(path_utils.normalizePath(entry.path)))
+        path_utils.normalizePath(entry.path): entry,
+  };
+}
+
+/// The length of [ride] for a section: the latest end of a trusted clip's
+/// timeline entry, or `null` without a timeline (such a ride offers no
+/// sections).
+int? rideExportLengthMs(RideRecord ride) {
+  final entries = _trustedTimeline(ride).values;
+  if (entries.isEmpty) {
+    return null;
+  }
+  return entries.map((e) => e.endMs).reduce((a, b) => a > b ? a : b);
+}
+
+/// The clips of [ride] that [section] overlaps, in recording order, each
+/// with its clip-local part: `max(fromMs, start) - start` to
+/// `min(toMs, end) - start`. A section that starts or ends in a roll gap
+/// starts at the next clip or ends at the previous one. Only trusted clips
+/// with a timeline entry count; missing files are included.
+List<RideExportSectionPart> rideExportSectionParts(
+  RideRecord ride,
+  RideExportSection section,
+) {
+  final timeline = _trustedTimeline(ride);
+  final parts = <RideExportSectionPart>[];
+  for (final path in ride.segmentPaths) {
+    final entry = timeline[path_utils.normalizePath(path)];
+    if (entry == null ||
+        entry.endMs <= section.fromMs ||
+        entry.startMs >= section.toMs) {
+      continue;
+    }
+    final from = section.fromMs > entry.startMs
+        ? section.fromMs
+        : entry.startMs;
+    final to = section.toMs < entry.endMs ? section.toMs : entry.endMs;
+    parts.add(
+      RideExportSectionPart(
+        path: path,
+        rideStartMs: entry.startMs,
+        clipLengthMs: entry.endMs - entry.startMs,
+        clipFromMs: from - entry.startMs,
+        clipToMs: to - entry.startMs,
+      ),
+    );
+  }
+  return parts;
+}
+
+/// The estimated size of [part] of a clip of [bytes]: its share of the
+/// clip's length (the whole size for a whole clip).
+int rideExportPartBytes(RideExportSectionPart part, int bytes) {
+  if (!part.trimmed || part.clipLengthMs <= 0) {
+    return bytes;
+  }
+  return (bytes * (part.clipToMs - part.clipFromMs) / part.clipLengthMs)
+      .round();
 }
 
 /// Where an export goes.
@@ -278,10 +382,11 @@ Future<RideExportSource> _readRideExportSource(
 /// The folder name of an export: `MotoCam ride <id> (<scope>)`, where
 /// `<id>` is the ride's `rideSessionId` (a legacy ride's video base name)
 /// with every character outside `[A-Za-z0-9_-]` replaced by `_`, and
-/// `<scope>` one of `locked clips`, `all clips` and, for a [section] (which
-/// a section choice requires), `clips <first> to <last>`, each followed by
-/// `, video only` when the ride data is left out. A re-run of the same
-/// choice gives the same name.
+/// `<scope>` one of `locked clips` and `all clips`, each followed by
+/// `, video only` when the ride data is left out, or, for a [section]
+/// (which a section choice requires), `section 05m12s to 06m40s` in ride
+/// time (`1h05m12s` past an hour; a section is always video only). A
+/// re-run of the same choice gives the same name.
 String rideExportFolderName(
   RideRecord ride, {
   required RideExportClips clips,
@@ -299,14 +404,25 @@ String rideExportFolderName(
   }
   // The same rule as rideTelemetryFileNameFor.
   final id = raw.replaceAll(RegExp(r'[^a-zA-Z0-9_-]'), '_');
-  final scope = switch (clips) {
-    RideExportClips.evidence => 'locked clips',
-    RideExportClips.all => 'all clips',
-    RideExportClips.section =>
-      'clips ${_sectionOf(clips, section).firstClip} to ${section!.lastClip}',
-  };
   final suffix = includeRideData ? '' : ', video only';
-  return 'MotoCam ride $id ($scope$suffix)';
+  final scope = switch (clips) {
+    RideExportClips.evidence => 'locked clips$suffix',
+    RideExportClips.all => 'all clips$suffix',
+    RideExportClips.section =>
+      'section ${_folderTime(_sectionOf(clips, section).fromMs)} to '
+          '${_folderTime(section!.toMs)}',
+  };
+  return 'MotoCam ride $id ($scope)';
+}
+
+/// [ms] of ride time in whole seconds as `05m12s`, or `1h05m12s` past an
+/// hour.
+String _folderTime(int ms) {
+  final seconds = ms ~/ 1000;
+  String two(int value) => value.toString().padLeft(2, '0');
+  final hours = seconds ~/ 3600;
+  final rest = '${two((seconds % 3600) ~/ 60)}m${two(seconds % 60)}s';
+  return hours > 0 ? '${hours}h$rest' : rest;
 }
 
 /// The locked and incident clips of a ride.
@@ -423,64 +539,11 @@ RideEvidenceSelection selectEvidenceClips(RideRecord ride) {
   );
 }
 
-/// The clip number (1-based, over `segmentPaths`) of the clip that holds
-/// each incident of [ride] that lies in a clip, in incident order. Empty
-/// without a timeline.
-List<int> rideIncidentClipNumbers(RideRecord ride) {
-  final numbers = <String, int>{
-    for (var i = 0; i < ride.segmentPaths.length; i++)
-      path_utils.normalizePath(ride.segmentPaths[i]): i + 1,
-  };
-  return <int>[
-    for (final incident in _mapIncidents(ride)) ?numbers[incident.clip],
-  ];
-}
-
-/// The clip number (1-based) of [path] in [ride]'s `segmentPaths`, or
-/// `null` when it is not one of them.
-int? rideClipNumberOf(RideRecord ride, String path) {
-  final key = path_utils.normalizePath(path);
-  for (var i = 0; i < ride.segmentPaths.length; i++) {
-    if (path_utils.normalizePath(ride.segmentPaths[i]) == key) {
-      return i + 1;
-    }
-  }
-  return null;
-}
-
-/// The ride time [section] of [ride] covers, in ms from the ride start:
-/// from the start of its first clip to the end of its last clip in the
-/// ride's `segmentTimeline`; `null` when either clip has no timeline entry.
-({int fromMs, int toMs})? rideExportSectionSpan(
-  RideRecord ride,
-  RideExportSection section,
-) {
-  RideSegmentTimelineEntry? entryOf(int clip) {
-    if (clip < 1 || clip > ride.segmentPaths.length) {
-      return null;
-    }
-    final key = path_utils.normalizePath(ride.segmentPaths[clip - 1]);
-    for (final entry in ride.segmentTimeline) {
-      if (path_utils.normalizePath(entry.path) == key) {
-        return entry;
-      }
-    }
-    return null;
-  }
-
-  final first = entryOf(section.firstClip);
-  final last = entryOf(section.lastClip);
-  if (first == null || last == null) {
-    return null;
-  }
-  return (fromMs: first.startMs, toMs: last.endMs);
-}
-
-/// The local clock time [ms] after [ride]'s start, as `HH:mm`.
+/// The local clock time [ms] after [ride]'s start, as `HH:mm:ss`.
 String rideExportClockText(RideRecord ride, int ms) {
-  final time = ride.createdAt.add(Duration(milliseconds: ms));
+  final time = ride.createdAt.add(Duration(milliseconds: ms)).toLocal();
   String two(int value) => value.toString().padLeft(2, '0');
-  return '${two(time.hour)}:${two(time.minute)}';
+  return '${two(time.hour)}:${two(time.minute)}:${two(time.second)}';
 }
 
 /// The [section] a section choice requires.
@@ -505,6 +568,7 @@ class RideExportItem {
     this.recordedSha256,
     this.recordedInvalid = false,
     this.locked = false,
+    this.part,
   });
 
   /// The private file.
@@ -513,8 +577,15 @@ class RideExportItem {
   /// The name in the export (the file name of [sourcePath]).
   final String name;
 
-  /// Size when planned.
+  /// Size when planned (for a trimmed part, its estimate:
+  /// [rideExportPartBytes]).
   final int bytes;
+
+  /// The part of the clip a section exports, or `null` outside a section.
+  final RideExportSectionPart? part;
+
+  /// Whether the clip is cut for a section (trimmed, not copied whole).
+  bool get trimmed => part?.trimmed ?? false;
 
   /// The hash recorded when the ride was saved (clips only), or `null`
   /// (also when the recorded value is not a SHA-256).
@@ -575,10 +646,11 @@ class RideExportPlan {
   /// The rider's clip choice.
   final RideExportClips clipChoice;
 
-  /// The clips of a [RideExportClips.section] choice, else `null`.
+  /// The range of a [RideExportClips.section] choice, else `null`.
   final RideExportSection? section;
 
-  /// Whether the ride file is exported ([rideData] is set).
+  /// Whether the ride file is exported ([rideData] is set; never for a
+  /// section).
   final bool includeRideData;
 
   /// The export folder name ([rideExportFolderName]).
@@ -590,7 +662,8 @@ class RideExportPlan {
   /// The ride file, or `null` when not included.
   final RideExportItem? rideData;
 
-  /// Clips of the ride that are not exported, in recording order.
+  /// Clips of the ride that are not exported, in recording order (for a
+  /// section: only its missing clips).
   final List<RideExportOmission> notExported;
 
   /// `elapsedMs` of incidents in no kept clip.
@@ -618,10 +691,9 @@ class RideExportPlan {
 /// hash that is not a SHA-256 ([isRecordedSha256]) is kept as absent and
 /// flagged `recordedInvalid`.
 ///
-/// A [RideExportClips.section] choice requires [section], a clip range
-/// within the ride (else [ArgumentError]); clips outside it are not
-/// selected, and an incident whose clip is outside it is listed as in no
-/// kept clip. [section] is ignored for the other choices.
+/// A [RideExportClips.section] choice requires [section], a range of at
+/// least 1 ms of a ride that has a timeline (else [ArgumentError]); see
+/// [_planSection]. [section] is ignored for the other choices.
 Future<RideExportPlan> planRideExport(
   RideExportSource source, {
   required RideExportClips clips,
@@ -629,36 +701,15 @@ Future<RideExportPlan> planRideExport(
   RideExportSection? section,
   RideFileStatSource stat = statRideFile,
 }) async {
+  if (clips == RideExportClips.section) {
+    return _planSection(source, _sectionOf(clips, section), stat);
+  }
   final ride = source.ride;
   final withData = includeRideData && source.hasRideData;
   final selection = selectEvidenceClips(ride);
-  final range = clips == RideExportClips.section
-      ? _sectionOf(clips, section)
-      : null;
-  if (range != null &&
-      (range.firstClip < 1 ||
-          range.firstClip > range.lastClip ||
-          range.lastClip > ride.segmentPaths.length)) {
-    throw ArgumentError.value(range, 'section', 'not a clip range');
-  }
   final evidence = selection.paths.toSet();
-  bool isChosen(int number, String path) => switch (clips) {
-    RideExportClips.all => true,
-    RideExportClips.evidence => evidence.contains(path),
-    RideExportClips.section =>
-      number >= range!.firstClip && number <= range.lastClip,
-  };
-  var unmappedIncidentsMs = selection.unmappedIncidentsMs;
-  if (range != null) {
-    final kept = <String>{
-      for (var i = range.firstClip - 1; i < range.lastClip; i++)
-        path_utils.normalizePath(ride.segmentPaths[i]),
-    };
-    unmappedIncidentsMs = List<int>.unmodifiable(<int>[
-      for (final incident in _mapIncidents(ride))
-        if (!kept.contains(incident.clip)) incident.ms,
-    ]);
-  }
+  bool isChosen(String path) =>
+      clips == RideExportClips.all || evidence.contains(path);
   final locked = <String>{
     for (final path in ride.lockedSegmentPaths) path_utils.normalizePath(path),
   };
@@ -671,7 +722,7 @@ Future<RideExportPlan> planRideExport(
     final raw = ride.expectedSegmentHashes[path];
     final recorded = raw != null && isRecordedSha256(raw) ? raw : null;
     final recordedInvalid = raw != null && recorded == null;
-    if (!isChosen(index + 1, path)) {
+    if (!isChosen(path)) {
       omissions.add(
         RideExportOmission(
           name: name,
@@ -710,13 +761,11 @@ Future<RideExportPlan> planRideExport(
   return RideExportPlan(
     source: source,
     clipChoice: clips,
-    section: range,
     includeRideData: withData,
     folderName: rideExportFolderName(
       ride,
       clips: clips,
       includeRideData: withData,
-      section: range,
     ),
     clips: List<RideExportItem>.unmodifiable(items),
     rideData: withData && telemetryPath != null
@@ -727,7 +776,63 @@ Future<RideExportPlan> planRideExport(
           )
         : null,
     notExported: List<RideExportOmission>.unmodifiable(omissions),
-    unmappedIncidentsMs: unmappedIncidentsMs,
+    unmappedIncidentsMs: selection.unmappedIncidentsMs,
+  );
+}
+
+/// Plans a section: one item per clip [section] overlaps
+/// ([rideExportSectionParts]), whole or trimmed, with its clip-local part;
+/// a clip whose file is gone is listed as missing. Never the ride data, no
+/// recorded hashes and no incident list.
+Future<RideExportPlan> _planSection(
+  RideExportSource source,
+  RideExportSection section,
+  RideFileStatSource stat,
+) async {
+  final ride = source.ride;
+  if (rideExportLengthMs(ride) == null ||
+      section.fromMs < 0 ||
+      section.toMs <= section.fromMs) {
+    throw ArgumentError.value(section, 'section', 'not a section of the ride');
+  }
+  final items = <RideExportItem>[];
+  final omissions = <RideExportOmission>[];
+  for (final part in rideExportSectionParts(ride, section)) {
+    final name = path_utils.fileNameFromPath(part.path);
+    final stamp = await stat(part.path);
+    if (stamp == null) {
+      omissions.add(
+        RideExportOmission(
+          name: name,
+          reason: RideExportOmissionReason.missing,
+        ),
+      );
+      continue;
+    }
+    items.add(
+      RideExportItem(
+        sourcePath: part.path,
+        name: name,
+        bytes: rideExportPartBytes(part, stamp.size),
+        part: part,
+      ),
+    );
+  }
+  return RideExportPlan(
+    source: source,
+    clipChoice: RideExportClips.section,
+    section: section,
+    includeRideData: false,
+    folderName: rideExportFolderName(
+      ride,
+      clips: RideExportClips.section,
+      includeRideData: false,
+      section: section,
+    ),
+    clips: List<RideExportItem>.unmodifiable(items),
+    rideData: null,
+    notExported: List<RideExportOmission>.unmodifiable(omissions),
+    unmappedIncidentsMs: const <int>[],
   );
 }
 
@@ -742,6 +847,9 @@ class RideExportFileEntry {
     this.recordedSha256,
     this.recordedInvalid = false,
     this.locked = false,
+    this.trimmed = false,
+    this.clipFromMs,
+    this.clipToMs,
   });
 
   /// The file name.
@@ -763,6 +871,16 @@ class RideExportFileEntry {
 
   /// Whether the clip is locked.
   final bool locked;
+
+  /// Whether the file is a trimmed copy of a section's clip.
+  final bool trimmed;
+
+  /// For a section: where the file starts in its clip (ms; for a trimmed
+  /// copy, the keyframe the trim snapped back to), else `null`.
+  final int? clipFromMs;
+
+  /// For a section: where the file ends in its clip (ms), else `null`.
+  final int? clipToMs;
 
   /// How the exported bytes compare with [recordedSha256].
   RideExportRecorded get recorded {
@@ -1019,6 +1137,11 @@ class RideExporter {
 
       for (final item in plan.clips) {
         try {
+          if (item.trimmed) {
+            await _exportTrimmed(item, folderUri, run);
+            run.step();
+            continue;
+          }
           final copied = await _native(
             () => native.exportFile(
               folderUri: folderUri,
@@ -1027,16 +1150,7 @@ class RideExporter {
               mimeType: rideExportMimeTypeFor(item.name),
             ),
           );
-          run.clips.add(
-            RideExportFileEntry(
-              name: item.name,
-              bytes: copied.bytes,
-              sha256: copied.copySha256,
-              recordedSha256: item.recordedSha256,
-              recordedInvalid: item.recordedInvalid,
-              locked: item.locked,
-            ),
-          );
+          run.clips.add(_entryOf(item, copied.bytes, copied.copySha256));
           run.counted(
             copied.bytes,
             wasSkipped: copied.skipped,
@@ -1138,21 +1252,24 @@ class RideExporter {
     Directory? staging;
     var shared = false;
     String? current;
+    final clipPaths = <String>[];
     try {
       await _deleteOldStaging();
       for (final item in plan.clips) {
         current = item.name;
-        final hashed = await _native(() => native.hashFile(item.sourcePath));
-        run.clips.add(
-          RideExportFileEntry(
-            name: item.name,
-            bytes: hashed.bytes,
-            sha256: hashed.sha256,
-            recordedSha256: item.recordedSha256,
-            recordedInvalid: item.recordedInvalid,
-            locked: item.locked,
-          ),
-        );
+        var path = item.sourcePath;
+        RideTrimmedClip? trimmed;
+        final part = item.part;
+        if (item.trimmed && part != null) {
+          // A trimmed copy stays in the staging folder for the receiving
+          // app, under the clip's own name.
+          staging ??= await _newStaging(plan, now());
+          path = '${staging.path}$_sep${item.name}';
+          trimmed = await _trim(item.sourcePath, path, part);
+        }
+        final hashed = await _native(() => native.hashFile(path));
+        run.clips.add(_entryOf(item, hashed.bytes, hashed.sha256, trimmed));
+        clipPaths.add(path);
         run.counted(hashed.bytes);
         run.step();
       }
@@ -1179,9 +1296,14 @@ class RideExporter {
       }
 
       current = null;
-      staging = await _stage(plan, run, RideExportDestination.share);
+      staging = await _stage(
+        plan,
+        run,
+        RideExportDestination.share,
+        directory: staging,
+      );
       final paths = <String>[
-        for (final item in plan.clips) item.sourcePath,
+        ...clipPaths,
         if (data != null) data.sourcePath,
         '${staging.path}$_sep$rideExportManifestName',
         '${staging.path}$_sep$rideExportReadmeName',
@@ -1220,19 +1342,113 @@ class RideExporter {
     }
   }
 
-  /// Writes the manifest and README of [run] into a new staging folder and
-  /// returns it.
+  /// The entry of [item] exported (or hashed) as [bytes] with [sha256];
+  /// for a section it carries the clip-local range: the whole clip, or
+  /// from the keyframe [trimmed] started at to the part's end.
+  RideExportFileEntry _entryOf(
+    RideExportItem item,
+    int bytes,
+    String sha256, [
+    RideTrimmedClip? trimmed,
+  ]) {
+    final part = item.part;
+    return RideExportFileEntry(
+      name: item.name,
+      bytes: bytes,
+      sha256: sha256,
+      recordedSha256: item.recordedSha256,
+      recordedInvalid: item.recordedInvalid,
+      locked: item.locked,
+      trimmed: trimmed != null,
+      clipFromMs: part == null
+          ? null
+          : trimmed == null
+          ? part.clipFromMs
+          : trimmed.firstUs ~/ 1000,
+      clipToMs: part?.clipToMs,
+    );
+  }
+
+  /// Trims [part] of the clip [sourcePath] into [targetPath] (an old file
+  /// there is deleted first), cancellable like every native call.
+  Future<RideTrimmedClip> _trim(
+    String sourcePath,
+    String targetPath,
+    RideExportSectionPart part,
+  ) async {
+    final target = File(targetPath);
+    if (await target.exists()) {
+      await target.delete();
+    }
+    return _native(
+      () => native.trimClip(
+        sourcePath: sourcePath,
+        targetPath: targetPath,
+        startUs: part.clipFromMs * 1000,
+        endUs: part.clipToMs * 1000,
+      ),
+    );
+  }
+
+  /// Trims the section part of [item] into
+  /// `<cacheDirectory>/ride_export/trim/`, copies it into [folderUri]
+  /// under the clip's name with `replace: true` (a trim never gives the
+  /// same bytes twice) and deletes the temp file.
+  Future<void> _exportTrimmed(
+    RideExportItem item,
+    String folderUri,
+    _Run run,
+  ) async {
+    final directory = Directory(
+      '$cacheDirectory$_sep$rideExportStagingDirectoryName${_sep}trim',
+    );
+    await directory.create(recursive: true);
+    final temp = File('${directory.path}$_sep${item.name}');
+    try {
+      final trimmed = await _trim(item.sourcePath, temp.path, item.part!);
+      final copied = await _native(
+        () => native.exportFile(
+          folderUri: folderUri,
+          sourcePath: temp.path,
+          name: item.name,
+          mimeType: rideExportMimeTypeFor(item.name),
+          replace: true,
+        ),
+      );
+      run.clips.add(_entryOf(item, copied.bytes, copied.copySha256, trimmed));
+      run.counted(copied.bytes, synced: copied.synced);
+    } finally {
+      try {
+        if (await temp.exists()) {
+          await temp.delete();
+        }
+      } catch (_) {
+        // The cache is cleared by the system.
+      }
+    }
+  }
+
+  /// A new, empty staging folder for [plan], named with [at].
+  Future<Directory> _newStaging(RideExportPlan plan, DateTime at) async {
+    final directory = Directory(
+      '$cacheDirectory$_sep$rideExportStagingDirectoryName$_sep'
+      '${plan.folderName}-${at.millisecondsSinceEpoch}',
+    );
+    await directory.create(recursive: true);
+    return directory;
+  }
+
+  /// Writes the manifest and README of [run] into [directory] (a share's
+  /// staging folder that already holds trimmed copies), or into a new
+  /// staging folder, and returns it.
   Future<Directory> _stage(
     RideExportPlan plan,
     _Run run,
-    RideExportDestination destination,
-  ) async {
+    RideExportDestination destination, {
+    Directory? directory,
+  }) async {
     final exportedAt = now();
-    final directory = Directory(
-      '$cacheDirectory$_sep$rideExportStagingDirectoryName$_sep'
-      '${plan.folderName}-${exportedAt.millisecondsSinceEpoch}',
-    );
-    await directory.create(recursive: true);
+    directory ??= await _newStaging(plan, exportedAt);
     final manifest = buildExportManifest(
       plan,
       clips: run.clips,
@@ -1322,6 +1538,9 @@ String rideExportFailureText(
           'shared; export it to a folder instead.';
     case 'NO_TARGET':
       return 'No app on this phone can receive these files.';
+    case 'TRIM_FAILED':
+      return 'Could not cut ${name ?? 'a clip'} for this section. Pick '
+          'another section, or export whole clips.';
     case 'UNAVAILABLE':
       return 'Export is available on Android only.';
     case 'BUSY':
