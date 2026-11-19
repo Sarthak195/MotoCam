@@ -285,6 +285,9 @@ object ActivityRequestCodes {
 
     /** The MediaStore delete prompt for gallery copies ([GalleryCopies]). */
     const val MEDIA_STORE_DELETE_REQUEST = 7102
+
+    /** `ACTION_OPEN_DOCUMENT_TREE` for the ride export folder ([RideExport]). */
+    const val PICK_EXPORT_TREE = 7103
 }
 
 /**
