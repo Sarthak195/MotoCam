@@ -728,7 +728,7 @@ Keys are written in this order. `integrity` is `null` when ride data is not incl
 | `envelopeVersion` | The ride file's envelope version (1 when the envelope has no `envelopeVersion`), or `null` when the file has no envelope |
 | `sessionComplete` | `false` when the ride ended without Stop (a recovered checkpoint) |
 | `mockLocationDetected` | `true` when the phone reported mock locations during the ride |
-| `issues` | The integrity check's issue codes, sanitised: the code keeps its prefix, the private path after the first `:` is replaced by its file name (for example `segment-hash-mismatch:REC1234567890123456789.mp4`), control characters are removed, at most 80 characters. Empty unless `state` is `failed` |
+| `issues` | The integrity check's issue codes, sanitised: the code keeps its prefix, the private path after the first `:` is replaced by its file name (for example `missing-segment-hash:REC1234567890123456789.mp4`), control characters are removed, at most 80 characters. Empty unless `state` is `failed` |
 
 `files[]` entry:
 
