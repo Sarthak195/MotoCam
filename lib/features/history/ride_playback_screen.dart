@@ -162,8 +162,10 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
           tooltip: 'Ride actions',
           icon: const Icon(Icons.more_vert),
           enabled: !_isLoading && !_rideReadFailed,
+          // The State's context: the app bar (and this builder's context)
+          // unmounts when the video goes fullscreen, the screen does not.
           onSelected: (destination) =>
-              unawaited(runRideExportFlow(context, _ride, destination)),
+              unawaited(runRideExportFlow(this.context, _ride, destination)),
           itemBuilder: (_) => const [
             PopupMenuItem<RideExportDestination>(
               value: RideExportDestination.folder,

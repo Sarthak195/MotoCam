@@ -55,6 +55,11 @@ class _RidesListScreenState extends State<RidesListScreen> {
   final Map<String, double?> _lockProgress = <String, double?>{};
   final Set<String> _deletesInFlight = <String>{};
 
+  /// Rides (by lock key) whose export flow runs, from the menu tap until
+  /// [runRideExportFlow] returns: before its export publishes progress,
+  /// too.
+  final Set<String> _exportFlowsPending = <String>{};
+
   /// Video check state of each telemetry ride, by [rideIndexKey] of its
   /// telemetry path.
   Map<String, RideVideoCheck> _videoChecks = <String, RideVideoCheck>{};
@@ -155,9 +160,10 @@ class _RidesListScreenState extends State<RidesListScreen> {
 
   /// While a ride is being exported its files must stay as they are, so
   /// unlocking (which rewrites the ride file) and deleting wait: shows a
-  /// notice and returns `true` while an export runs.
-  bool _refuseWhileExporting() {
-    if (_exportProgress?.value == null) {
+  /// notice and returns `true` while an export runs or the export flow of
+  /// the ride with lock [key] is under way.
+  bool _refuseWhileExporting(String key) {
+    if (_exportProgress?.value == null && !_exportFlowsPending.contains(key)) {
       return false;
     }
     ScaffoldMessenger.of(context).showSnackBar(
@@ -172,13 +178,24 @@ class _RidesListScreenState extends State<RidesListScreen> {
   }
 
   /// The ride menu's "Export to folder" and "Share": never while the ride
-  /// is being deleted or unlocked.
-  void _exportRide(RideRecord ride, RideExportDestination destination) {
+  /// is being deleted or unlocked, or its export flow already runs; the
+  /// ride is marked busy ([_exportFlowsPending]) until the flow ends.
+  Future<void> _exportRide(
+    RideRecord ride,
+    RideExportDestination destination,
+  ) async {
     final key = _lockKeyFor(ride);
-    if (_deletesInFlight.contains(key) || _lockUpdatesInFlight.contains(key)) {
+    if (_deletesInFlight.contains(key) ||
+        _lockUpdatesInFlight.contains(key) ||
+        _exportFlowsPending.contains(key)) {
       return;
     }
-    unawaited(runRideExportFlow(context, ride, destination));
+    _exportFlowsPending.add(key);
+    try {
+      await runRideExportFlow(context, ride, destination);
+    } finally {
+      _exportFlowsPending.remove(key);
+    }
   }
 
   /// Shows a changed gallery-link store (a copy made or removed).
@@ -369,7 +386,7 @@ class _RidesListScreenState extends State<RidesListScreen> {
     if (_lockUpdatesInFlight.contains(lockKey) ||
         _galleryProgress.containsKey(lockKey) ||
         _refuseWhileFilesChange() ||
-        _refuseWhileExporting()) {
+        _refuseWhileExporting(lockKey)) {
       return;
     }
 
@@ -404,7 +421,7 @@ class _RidesListScreenState extends State<RidesListScreen> {
     if (confirmed != true ||
         !mounted ||
         _refuseWhileFilesChange() ||
-        _refuseWhileExporting()) {
+        _refuseWhileExporting(lockKey)) {
       return;
     }
 
@@ -709,7 +726,7 @@ class _RidesListScreenState extends State<RidesListScreen> {
     if (_deletesInFlight.contains(key) ||
         _galleryProgress.containsKey(key) ||
         _refuseWhileFilesChange() ||
-        _refuseWhileExporting()) {
+        _refuseWhileExporting(key)) {
       return;
     }
     final messenger = ScaffoldMessenger.of(context);
@@ -755,7 +772,7 @@ class _RidesListScreenState extends State<RidesListScreen> {
     if (confirmed != true ||
         !mounted ||
         _refuseWhileFilesChange() ||
-        _refuseWhileExporting()) {
+        _refuseWhileExporting(key)) {
       return;
     }
     // Before the ride's files go: deleting them drops the links.
@@ -769,7 +786,7 @@ class _RidesListScreenState extends State<RidesListScreen> {
       if (!mounted ||
           _galleryProgress.containsKey(key) ||
           _refuseWhileFilesChange() ||
-          _refuseWhileExporting()) {
+          _refuseWhileExporting(key)) {
         return;
       }
     }
@@ -1392,9 +1409,11 @@ class _RidesListScreenState extends State<RidesListScreen> {
                     } else if (value == 'remove') {
                       unawaited(_confirmAndRemoveGalleryCopies(ride));
                     } else if (value == 'export') {
-                      _exportRide(ride, RideExportDestination.folder);
+                      unawaited(
+                        _exportRide(ride, RideExportDestination.folder),
+                      );
                     } else if (value == 'share') {
-                      _exportRide(ride, RideExportDestination.share);
+                      unawaited(_exportRide(ride, RideExportDestination.share));
                     }
                   },
                   itemBuilder: (_) => [
@@ -1422,7 +1441,12 @@ class _RidesListScreenState extends State<RidesListScreen> {
           ),
         ),
         onTap: () async {
-          if (_isOpeningRide || _refuseWhileFilesChange()) {
+          // Never while the ride is being unlocked or deleted.
+          final key = _lockKeyFor(ride);
+          if (_isOpeningRide ||
+              _lockUpdatesInFlight.contains(key) ||
+              _deletesInFlight.contains(key) ||
+              _refuseWhileFilesChange()) {
             return;
           }
           _isOpeningRide = true;
