@@ -499,6 +499,7 @@ class RideExport(
         output.parentFile?.mkdirs()
         val extractor = MediaExtractor()
         var muxer: MediaMuxer? = null
+        var started = false
         var finished = false
         var firstUs = -1L
         var lastUs = -1L
@@ -540,18 +541,23 @@ class RideExport(
             }
             val muxTracks = IntArray(extractor.trackCount) { -1 }
             var largestSample = 0
+            var sizeUnreported = false
             for (track in tracks) {
                 val format = extractor.getTrackFormat(track)
                 muxTracks[track] = mux.addTrack(format)
                 if (format.containsKey(MediaFormat.KEY_MAX_INPUT_SIZE)) {
                     largestSample = maxOf(largestSample, format.getInteger(MediaFormat.KEY_MAX_INPUT_SIZE))
+                } else {
+                    sizeUnreported = true
                 }
             }
-            // A 4K keyframe can exceed 1 MiB; a too small buffer fails the read.
+            // A 4K keyframe can exceed 1 MiB and a too small buffer fails the
+            // read, so any track without a reported size gets the fallback.
             val buffer = ByteBuffer.allocate(
-                if (largestSample > 0) maxOf(largestSample, BUFFER_BYTES) else TRIM_FALLBACK_SAMPLE_BYTES,
+                maxOf(largestSample, BUFFER_BYTES, if (sizeUnreported) TRIM_FALLBACK_SAMPLE_BYTES else 0),
             )
             mux.start()
+            started = true
 
             val info = MediaCodec.BufferInfo()
             val ended = BooleanArray(extractor.trackCount)
@@ -602,7 +608,15 @@ class RideExport(
             finished = true
         } finally {
             releaseQuietly("extractor") { extractor.release() }
-            muxer?.let { releaseQuietly("muxer") { it.release() } }
+            muxer?.let { mux ->
+                // After a cancel or error the muxer is still started, and
+                // release() would call stop() itself: a throwing stop() there
+                // skips the native release. Stop it first, on its own.
+                if (started && !finished) {
+                    releaseQuietly("muxer stop") { mux.stop() }
+                }
+                releaseQuietly("muxer") { mux.release() }
+            }
             if (!finished) {
                 output.delete()
             }

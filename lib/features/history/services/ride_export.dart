@@ -1134,6 +1134,9 @@ class RideExporter {
         name: plan.folderName,
         expectedNames: plan.expectedNames,
       );
+      if (plan.clips.any((item) => item.trimmed)) {
+        await _clearTrimDirectory();
+      }
 
       for (final item in plan.clips) {
         try {
@@ -1388,6 +1391,21 @@ class RideExporter {
         endUs: part.clipToMs * 1000,
       ),
     );
+  }
+
+  /// Deletes the temp files that an earlier run, killed mid-trim, left in
+  /// `<cacheDirectory>/ride_export/trim/` (one export runs at a time).
+  Future<void> _clearTrimDirectory() async {
+    try {
+      final directory = Directory(
+        '$cacheDirectory$_sep$rideExportStagingDirectoryName${_sep}trim',
+      );
+      if (await directory.exists()) {
+        await directory.delete(recursive: true);
+      }
+    } catch (_) {
+      // Best effort: the system clears the cache too.
+    }
   }
 
   /// Trims the section part of [item] into

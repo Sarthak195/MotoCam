@@ -1204,6 +1204,19 @@ void main() {
       );
     });
 
+    test('a section run clears temp files a killed run left behind', () async {
+      final p = await sectionPlan('t0', 30000, 150000);
+      final leftover = File('${trimDirectory().path}${_sep}old.mp4')
+        ..createSync(recursive: true)
+        ..writeAsStringSync('left by a killed run');
+      final result = await exporter(
+        _FakeNative(tree),
+      ).exportToFolder(p, treeUri: tree.path);
+      expect(result.outcome, RideExportOutcome.done);
+      expect(leftover.existsSync(), isFalse);
+      expect(trimDirectory().listSync(), isEmpty);
+    });
+
     test('a failed trim fails the run and leaves no temp file', () async {
       final p = await sectionPlan('t2', 30000, 150000);
       final native = _FakeNative(tree)..fail['trim:c.mp4'] = 'TRIM_FAILED';
