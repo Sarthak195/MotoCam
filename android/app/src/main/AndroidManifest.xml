@@ -39,7 +39,7 @@
             android:launchMode="singleTop"
             android:taskAffinity=""
             android:theme="@style/LaunchTheme"
-            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode|mcc|mnc|touchscreen|navigation|colorMode|grammaticalGender|fontWeightAdjustment|assetsPaths"
             android:hardwareAccelerated="true"
             android:windowSoftInputMode="adjustResize"
             android:supportsPictureInPicture="true"
@@ -50,9 +50,16 @@
               android:resource="@style/NormalTheme"
             />
 
-            <!-- The UI and capture are portrait-only. Android 16 ignores the
-                 orientation lock on large screens (sw >= 600dp) for apps that
-                 target API 36 unless this temporary opt-out is set. -->
+            <!-- MotoCam pins the UI to one orientation: portrait, or with the
+                 landscape recording build switch on, the orientation the
+                 phone is held in while idle, frozen for a whole ride so the
+                 preview matches the capture lock. Android 16 ignores such
+                 orientation locks on large screens (sw >= 600dp) for apps
+                 that target API 36 unless this temporary opt-out is set.
+                 configChanges above lists every API 36 configuration change
+                 (except resourcesUnused), so none recreates the activity and
+                 ends a ride. -->
+
             <property
                 android:name="android.window.PROPERTY_COMPAT_ALLOW_RESTRICTED_RESIZABILITY"
                 android:value="true" />
