@@ -8,7 +8,9 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
+import '../../../core/build_flags.dart';
 import '../../../core/services/ride_export_channel.dart';
+import '../../../core/theme/tokens.dart';
 import '../../../core/utils/format_utils.dart';
 import '../../../core/utils/path_utils.dart' as path_utils;
 import '../../camera/providers/camera_provider.dart';
@@ -134,17 +136,55 @@ Future<void> runRideExportFlow(
       destination: destination,
       treeUri: treeUri,
     );
-    show(
-      result == null
-          ? camera.rideExportBlockedReason ??
-                'Could not export the ride on this phone.'
-          : rideExportSummary(result),
-      seconds: 8,
+    messenger.showSnackBar(
+      rideExportSummarySnackBar(
+        text: result == null
+            ? camera.rideExportBlockedReason ??
+                  'Could not export the ride on this phone.'
+            : rideExportSummary(result),
+        success:
+            result != null &&
+            result.outcome == RideExportOutcome.done &&
+            result.sourceDiffers == 0,
+      ),
     );
   } finally {
     releaseMigration();
   }
 }
+
+/// The closing summary of an export, shown for 8 s: a check mark when
+/// every file was exported and matched its recorded hash ([success]),
+/// otherwise an amber mark, then the summary [text] (every outcome:
+/// done, paused, cancelled, failed, share, clips that differ). "Open
+/// folder" waits behind [kOpenExportFolder] and is not in the tree.
+SnackBar rideExportSummarySnackBar({
+  required String text,
+  required bool success,
+}) {
+  return SnackBar(
+    duration: const Duration(seconds: 8),
+    content: Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Icon(
+          success ? Icons.check_circle : Icons.info_outline,
+          size: 28,
+          color: success ? MotoColors.text : MotoColors.amber,
+          semanticLabel: success ? 'Done' : 'Note',
+        ),
+        const SizedBox(width: MotoSize.gapWide),
+        Expanded(child: Text(text)),
+      ],
+    ),
+    action: kOpenExportFolder && success
+        ? SnackBarAction(label: 'Open folder', onPressed: () {})
+        : null,
+  );
+}
+
+/// The title of the dialog's collapsible list of notes.
+const String rideExportNotesTitle = 'Before you hand this over';
 
 /// The export dialog: which clips ([evidence] or [all], the plans of both
 /// choices, or a section: an exact range of whole seconds picked on a
@@ -188,6 +228,10 @@ class _RideExportDialogState extends State<RideExportDialog> {
       ? RideExportClips.all
       : RideExportClips.evidence;
   late bool _includeRideData = widget.hasRideData;
+
+  /// Whether the "Before you hand this over" notes are open (they are
+  /// when the dialog opens).
+  bool _notesExpanded = true;
 
   /// The ride (as the plans read it).
   late final RideRecord _ride = widget.all.source.ride;
@@ -270,7 +314,12 @@ class _RideExportDialogState extends State<RideExportDialog> {
   Widget _nudges(String label, Key key, void Function(int delta) nudge) => Row(
     key: key,
     children: [
-      Expanded(child: Text(label)),
+      Expanded(
+        child: Text(
+          label,
+          style: MotoFonts.bodyStyle(16, weight: FontWeight.w600),
+        ),
+      ),
       TextButton(onPressed: () => nudge(-1), child: const Text('-1 s')),
       TextButton(onPressed: () => nudge(1), child: const Text('+1 s')),
     ],
@@ -288,16 +337,24 @@ class _RideExportDialogState extends State<RideExportDialog> {
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        RangeSlider(
-          values: RangeValues(_fromSeconds.toDouble(), _toSeconds.toDouble()),
-          max: _maxSeconds.toDouble(),
-          onChanged: (values) {
-            final from = values.start.round();
-            final to = values.end.round();
-            if (to - from >= 1) {
-              _setRange(from, to);
-            }
-          },
+        SliderTheme(
+          data: SliderTheme.of(context).copyWith(
+            activeTrackColor: MotoColors.text,
+            inactiveTrackColor: MotoColors.hairlineStrong,
+            thumbColor: MotoColors.text,
+            overlayColor: MotoColors.text.withValues(alpha: 0.12),
+          ),
+          child: RangeSlider(
+            values: RangeValues(_fromSeconds.toDouble(), _toSeconds.toDouble()),
+            max: _maxSeconds.toDouble(),
+            onChanged: (values) {
+              final from = values.start.round();
+              final to = values.end.round();
+              if (to - from >= 1) {
+                _setRange(from, to);
+              }
+            },
+          ),
         ),
         _SectionMarks(
           ticks: <double>[
@@ -332,7 +389,15 @@ class _RideExportDialogState extends State<RideExportDialog> {
           const ValueKey<String>('rideExportSectionEnd'),
           (delta) => _setRange(_fromSeconds, _toSeconds + delta),
         ),
-        Text(_sectionLabel(size)),
+        Text(
+          _sectionLabel(size),
+          style: MotoFonts.condensedStyle(
+            18,
+            weight: FontWeight.w600,
+            color: MotoColors.text,
+            tabularFigures: true,
+          ),
+        ),
       ],
     );
   }
@@ -349,20 +414,59 @@ class _RideExportDialogState extends State<RideExportDialog> {
       RideExportClips.all => widget.all.clips.isNotEmpty || includeRideData,
       RideExportClips.section => size!.files > 0,
     };
-    final notes = <String>[
-      'Videos show other road users: share them only for your own records, '
-          'the police or your insurer.',
+    final notes = <({String text, IconData icon})>[
+      (
+        text:
+            'Videos show other road users: share them only for your own '
+            'records, the police or your insurer.',
+        icon: Icons.groups_outlined,
+      ),
       if (share)
-        'MotoCam cannot check a share. In messengers send as a document, not '
-            'as video, or the video is re-encoded.'
+        (
+          text:
+              'MotoCam cannot check a share. In messengers send as a '
+              'document, not as video, or the video is re-encoded.',
+          icon: Icons.send_outlined,
+        )
       else
-        'The folder you pick is shared storage: other apps with media or '
-            'storage access, and gallery backups, may see these files.',
+        (
+          text:
+              'The folder you pick is shared storage: other apps with media '
+              'or storage access, and gallery backups, may see these files.',
+          icon: Icons.folder_shared_outlined,
+        ),
       if (includeRideData)
-        'All exports from this phone carry the same public key, so they can '
-            'be linked to each other.',
-      'Keep MotoCam open until the export finishes.',
+        (
+          text:
+              'All exports from this phone carry the same public key, so '
+              'they can be linked to each other.',
+          icon: Icons.key_outlined,
+        ),
+      (
+        text: 'Keep MotoCam open until the export finishes.',
+        icon: Icons.phone_android,
+      ),
     ];
+    final dim = MotoFonts.bodyStyle(14, height: 1.4, color: MotoColors.dim);
+    RoundedRectangleBorder optionShape(bool selected) => RoundedRectangleBorder(
+      borderRadius: BorderRadius.circular(MotoRadii.sm),
+      side: BorderSide(
+        color: selected ? MotoColors.text : MotoColors.hairlineStrong,
+        width: selected ? 2 : 1.5,
+      ),
+    );
+    Widget option(RideExportClips value, String title, {bool enabled = true}) =>
+        Padding(
+          padding: const EdgeInsets.only(bottom: 6),
+          child: RadioListTile<RideExportClips>(
+            value: value,
+            enabled: enabled,
+            shape: optionShape(_clips == value),
+            tileColor: _clips == value ? MotoColors.bg : null,
+            contentPadding: const EdgeInsets.only(right: 12),
+            title: Text(title),
+          ),
+        );
     return AlertDialog(
       scrollable: true,
       title: Text(share ? 'Share ride' : 'Export ride'),
@@ -370,6 +474,17 @@ class _RideExportDialogState extends State<RideExportDialog> {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          Padding(
+            padding: const EdgeInsets.only(bottom: 6),
+            child: Text(
+              'CLIPS',
+              style: MotoFonts.bodyStyle(
+                13,
+                letterSpacingEm: 0.08,
+                color: MotoColors.dim,
+              ),
+            ),
+          ),
           RadioGroup<RideExportClips>(
             groupValue: _clips,
             onChanged: (value) {
@@ -380,35 +495,25 @@ class _RideExportDialogState extends State<RideExportDialog> {
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                RadioListTile<RideExportClips>(
-                  value: RideExportClips.evidence,
+                option(
+                  RideExportClips.evidence,
+                  _label('Locked and incident clips', widget.evidence),
                   enabled: widget.evidence.clips.isNotEmpty,
-                  contentPadding: EdgeInsets.zero,
-                  title: Text(
-                    _label('Locked and incident clips', widget.evidence),
-                  ),
                 ),
-                RadioListTile<RideExportClips>(
-                  value: RideExportClips.all,
-                  contentPadding: EdgeInsets.zero,
-                  title: Text(_label('All clips', widget.all)),
-                ),
+                option(RideExportClips.all, _label('All clips', widget.all)),
                 if (_offersSection)
-                  RadioListTile<RideExportClips>(
-                    value: RideExportClips.section,
-                    contentPadding: EdgeInsets.zero,
-                    title: const Text('A section of the ride'),
-                  ),
+                  option(RideExportClips.section, 'A section of the ride'),
               ],
             ),
           ),
           if (isSection) ...[
             _buildSection(size!),
-            const Padding(
-              padding: EdgeInsets.only(top: 8),
+            Padding(
+              padding: const EdgeInsets.only(top: 8),
               child: Text(
                 'A section is video only: it carries no ride data and no '
                 'signature.',
+                style: dim,
               ),
             ),
           ] else
@@ -417,7 +522,8 @@ class _RideExportDialogState extends State<RideExportDialog> {
               onChanged: widget.hasRideData
                   ? (value) => setState(() => _includeRideData = value ?? false)
                   : null,
-              contentPadding: EdgeInsets.zero,
+              shape: optionShape(false),
+              contentPadding: const EdgeInsets.only(left: 4, right: 12),
               controlAffinity: ListTileControlAffinity.leading,
               title: const Text('Include ride data'),
               subtitle: const Text(
@@ -426,16 +532,35 @@ class _RideExportDialogState extends State<RideExportDialog> {
               ),
             ),
           const SizedBox(height: 8),
-          for (final note in notes)
-            Padding(padding: const EdgeInsets.only(top: 8), child: Text(note)),
+          _ExportNotes(
+            expanded: _notesExpanded,
+            onToggle: () => setState(() => _notesExpanded = !_notesExpanded),
+            notes: notes,
+          ),
         ],
       ),
       actions: [
         TextButton(
+          style: TextButton.styleFrom(
+            foregroundColor: MotoColors.text,
+            minimumSize: const Size(0, MotoSize.minTarget),
+            padding: const EdgeInsets.symmetric(horizontal: 20),
+          ),
           onPressed: () => Navigator.of(context).pop(),
           child: const Text('Cancel'),
         ),
         TextButton(
+          style: TextButton.styleFrom(
+            backgroundColor: MotoColors.text,
+            foregroundColor: MotoColors.bg,
+            disabledBackgroundColor: MotoColors.surfaceTop,
+            disabledForegroundColor: MotoColors.muted,
+            minimumSize: const Size(0, MotoSize.minTarget),
+            padding: const EdgeInsets.symmetric(horizontal: 26),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(MotoRadii.sm),
+            ),
+          ),
           onPressed: hasSomething
               ? () => Navigator.of(context).pop(
                   RideExportChoice(
@@ -447,6 +572,88 @@ class _RideExportDialogState extends State<RideExportDialog> {
               : null,
           child: Text(share ? 'Share' : 'Export'),
         ),
+      ],
+    );
+  }
+}
+
+/// The dialog's notes under a "Before you hand this over" header that
+/// folds them away; open when the dialog opens, so no warning is hidden
+/// unless the rider folds it.
+class _ExportNotes extends StatelessWidget {
+  const _ExportNotes({
+    required this.expanded,
+    required this.onToggle,
+    required this.notes,
+  });
+
+  final bool expanded;
+  final VoidCallback onToggle;
+  final List<({String text, IconData icon})> notes;
+
+  @override
+  Widget build(BuildContext context) {
+    // No LayoutBuilder or ExpansionTile: the dialog measures its content's
+    // intrinsic width.
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Semantics(
+          button: true,
+          expanded: expanded,
+          child: InkWell(
+            key: const ValueKey<String>('rideExportNotesHeader'),
+            borderRadius: BorderRadius.circular(MotoRadii.sm),
+            onTap: onToggle,
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(minHeight: MotoSize.minTarget),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      rideExportNotesTitle,
+                      style: MotoFonts.bodyStyle(
+                        16,
+                        weight: FontWeight.w600,
+                        color: MotoColors.text,
+                      ),
+                    ),
+                  ),
+                  Icon(
+                    expanded ? Icons.expand_less : Icons.expand_more,
+                    color: MotoColors.dim,
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+        if (expanded)
+          for (final note in notes)
+            Padding(
+              padding: const EdgeInsets.only(top: 8),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.only(top: 1),
+                    child: Icon(note.icon, size: 18, color: MotoColors.dim),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      note.text,
+                      style: MotoFonts.bodyStyle(
+                        14,
+                        height: 1.4,
+                        color: MotoColors.dim,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
       ],
     );
   }
@@ -491,7 +698,6 @@ class _SectionMarks extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final colors = Theme.of(context).colorScheme;
     // No LayoutBuilder: the dialog measures its content's intrinsic width.
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: _inset - _size / 2),
@@ -506,7 +712,7 @@ class _SectionMarks extends StatelessWidget {
                   width: _size,
                   height: 6,
                   child: Center(
-                    child: Container(width: 1, color: colors.onSurfaceVariant),
+                    child: Container(width: 1, color: MotoColors.dim),
                   ),
                 ),
               ),
@@ -516,7 +722,7 @@ class _SectionMarks extends StatelessWidget {
                 child: Icon(
                   Icons.lock,
                   size: _size,
-                  color: colors.primary,
+                  color: MotoColors.lock,
                   semanticLabel: lock.label,
                 ),
               ),
@@ -524,9 +730,9 @@ class _SectionMarks extends StatelessWidget {
               Align(
                 alignment: Alignment(_align(incident.x), 1),
                 child: Icon(
-                  Icons.warning_amber,
+                  Icons.warning_rounded,
                   size: _size,
-                  color: colors.error,
+                  color: MotoColors.amber,
                   semanticLabel: incident.label,
                 ),
               ),
