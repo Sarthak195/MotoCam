@@ -1,6 +1,6 @@
 # Architecture
 
-MotoCam is a Flutter motorcycle dashcam. One home screen coordinates three app-wide `ChangeNotifier`s, a handful of platform services and seven Android method channels to record segmented video with GPS and accelerometer telemetry. Recorded rides can later be reviewed as one continuous timeline. This page describes how those pieces fit together and links to the deep-dive documents for each area.
+MotoCam is a Flutter motorcycle dashcam. One home screen coordinates three app-wide `ChangeNotifier`s, a handful of platform services and eight Android method channels to record segmented video with GPS and accelerometer telemetry. Recorded rides can later be reviewed as one continuous timeline. This page describes how those pieces fit together and links to the deep-dive documents for each area.
 
 ## Contents
 
@@ -24,7 +24,7 @@ MotoCam is a Flutter motorcycle dashcam. One home screen coordinates three app-w
 
 | Platform | Status |
 |---|---|
-| Android | Primary target. All seven native method channels are implemented in Kotlin. They provide the recording foreground service, Picture-in-Picture (PiP), battery and thermal status, free-space queries, gallery export, checking and removing gallery copies, the ride signing key and Storage Access Framework access to the old public recordings folder. |
+| Android | Primary target. All eight native method channels are implemented in Kotlin. They provide the recording foreground service, Picture-in-Picture (PiP), battery and thermal status, free-space queries, gallery export, checking and removing gallery copies, the ride signing key, Storage Access Framework access to the old public recordings folder and ride export (the folder picker, copies with a read-back check, hashing and the share sheet). |
 | Other | Not targeted; the repository has no web or desktop platform folders. A few generic branches exist: `CameraProvider` uses the application support directory, `TelemetryProvider` plain `LocationSettings`, and `path_utils` lower-cases paths on Windows. |
 
 Current limitations of the recording pipeline:
@@ -52,6 +52,7 @@ There is no backend, account system, analytics or crash reporting. The only netw
 | [core/services/gallery_copies.dart](../lib/core/services/gallery_copies.dart) | `GalleryCopies` (the `gallery` channel: which gallery copies still exist, deleting them without a prompt, and the system delete prompt) and `GalleryCopyStatus`. Never throws |
 | [core/services/legacy_recordings_access.dart](../lib/core/services/legacy_recordings_access.dart) | `LegacyRecordingsAccess` (the `legacy_recordings` channel: the folder picker, listing, copying and deleting the documents of the old public folder) and the `LegacyRideDocumentSource` interface the import is written against. Android only |
 | [core/services/pip_service.dart](../lib/core/services/pip_service.dart) | Singleton PiP bridge: the static `enterPipMode` (returns whether PiP was entered), `isInPipMode` and `pipModeStream` |
+| [core/services/ride_export_channel.dart](../lib/core/services/ride_export_channel.dart) | `RideExportChannel` (the `ride_export` channel: the folder picker, copies into the picked folder with a read-back check, hashing, the share sheet and the keep-screen-on request) and the `RideExportNative` interface the export is written against. Android only |
 | [core/services/ride_signing_service.dart](../lib/core/services/ride_signing_service.dart) | `RideSigningService` (the `integrity` channel: this phone's signing key and `signPayloadHash`, `null` on any failure), `SignedRideRegistry` (the rides this install wrote signed, in SharedPreferences) and `loadRideSignerContext`. See [platform-integration.md](platform-integration.md#comexamplemotocamintegrity) |
 | [core/ride_file/ride_telemetry_codec.dart](../lib/core/ride_file/ride_telemetry_codec.dart) | The ride-file codec: every rule of the ride telemetry JSON. Decoding (summary without samples, separate sample parsing, segment resolution with quarantine, timeline, locks), the segment-list and timeline rules, the writer's payload, sealing and file path, the lock-state rewrite, and the gallery and legacy public folder constants. See [data-formats.md](data-formats.md#ride-file-codec) |
 | [core/ride_file/ride_integrity.dart](../lib/core/ride_file/ride_integrity.dart) | Part of the codec: `RideIntegrityStatus`, `RideIntegrityReport`, building, re-sealing and checking the integrity envelope, and `applySignerContext` |
@@ -97,10 +98,11 @@ Native code (Android only):
 
 | File | Responsibility |
 |---|---|
-| [MainActivity.kt](../android/app/src/main/kotlin/com/example/motocam/MainActivity.kt) | Registers all seven channel handlers (the `integrity` one through `RideSigner.register`, see [RideSigner.kt](../android/app/src/main/kotlin/com/example/motocam/RideSigner.kt), the `legacy_recordings` one through `LegacyRecordingsAccess.register` and the `gallery` one through `GalleryCopies.register`). It routes `onActivityResult` by request code through `ActivityResultDispatcher`. It also triggers automatic PiP on leave/pause while recording, relays PiP mode changes, relays the notification "Stop" broadcast to Dart (its receiver is registered from `onCreate` to `onDestroy`), reports free space and exports clips to the gallery (returning the copy's content URI on every API level). When the activity is destroyed it stops the foreground service |
+| [MainActivity.kt](../android/app/src/main/kotlin/com/example/motocam/MainActivity.kt) | Registers all eight channel handlers (the `integrity` one through `RideSigner.register`, see [RideSigner.kt](../android/app/src/main/kotlin/com/example/motocam/RideSigner.kt), the `legacy_recordings` one through `LegacyRecordingsAccess.register`, the `gallery` one through `GalleryCopies.register` and the `ride_export` one through `RideExport.register`). It routes `onActivityResult` by request code through `ActivityResultDispatcher`. It also triggers automatic PiP on leave/pause while recording, relays PiP mode changes, relays the notification "Stop" broadcast to Dart (its receiver is registered from `onCreate` to `onDestroy`), reports free space and exports clips to the gallery (returning the copy's content URI on every API level). When the activity is destroyed it stops the foreground service |
 | [BackgroundRecordingService.kt](../android/app/src/main/kotlin/com/example/motocam/BackgroundRecordingService.kt) | Foreground service with an ongoing chronometer notification, a "Stop" action and a partial wake lock. On Android 11 and later its types (camera, microphone, location) are derived from the permissions actually granted. It is never restarted (`START_NOT_STICKY`) and tears itself down when the task is removed |
 | [GalleryCopies.kt](../android/app/src/main/kotlin/com/example/motocam/GalleryCopies.kt) | The `gallery` channel: `galleryItemsExist`, `deleteGalleryItems` (`ContentResolver.delete`, no prompt) and `requestDeleteGalleryItems` (`MediaStore.createDeleteRequest` on API 30+, the `RecoverableSecurityException` action on API 29, request code 7102) |
 | [LegacyRecordingsAccess.kt](../android/app/src/main/kotlin/com/example/motocam/LegacyRecordingsAccess.kt) | The `legacy_recordings` channel: `ACTION_OPEN_DOCUMENT_TREE` at `Movies/MotoCam/Recordings` (grant not persisted), listing, streamed copies and deletes of the tree's documents on a background thread; also `ActivityRequestCodes` and `ActivityResultDispatcher` |
+| [RideExport.kt](../android/app/src/main/kotlin/com/example/motocam/RideExport.kt) | The `ride_export` channel: the folder picker (`ACTION_OPEN_DOCUMENT_TREE`, request code 7103), copies into the picked folder with a SHA-256 read-back, `hashFile`, the share sheet through a FileProvider and the keep-screen-on request, on its own single-thread executor with its own cancel flag |
 | [RideSigner.kt](../android/app/src/main/kotlin/com/example/motocam/RideSigner.kt) | The `integrity` channel: an EC P-256 Android Keystore key (alias `motocam_ride_signing_v1`, StrongBox when available, no user authentication) created on first use, which returns its public key and signs a ride's `payloadHash` on a background thread |
 
 **Dependency direction.** `features/*` depend on `core/*`. `core` does not depend on `features`; within `core`, `AppPermissionService` depends on `BackgroundRecordingService` and `DeviceStatusService`. Between features:
@@ -142,9 +144,10 @@ Notes:
 | `PipService` | `pip` | Not gated. Failures are caught and return `false` | `enterPipMode` | `onPipModeChanged` |
 | `CameraProvider.platform` | `media` | Gallery export runs only on Android; a failed free-space query returns `null` | `getAvailableStorageBytes`, `exportVideoToGallery` | none |
 | `GalleryCopies` | `gallery` | Not gated; Ride History offers it only on Android. Errors report `failed` | `galleryItemsExist`, `deleteGalleryItems`, `requestDeleteGalleryItems` | none |
+| `RideExportChannel` | `ride_export` | Not gated; Ride History and playback offer the export only on Android. A cancel is `RideExportCancelled`, other errors are a `RideExportFailure` with the native code, and a missing handler is `UNAVAILABLE` | `pickExportFolder`, `prepareFolder`, `exportFile`, `hashFile`, `cancel`, `shareFiles`, `setKeepScreenOn` | none |
 | `AppPermissionService` | none (uses `permission_handler`) | Android-only extras: notifications, legacy storage (gallery export on, Android 9 and lower), the battery-exemption status | n/a | n/a |
 
-Every Kotlin handler is registered in `MainActivity.configureFlutterEngine` (the `integrity`, `legacy_recordings` and `gallery` ones through their own classes). Channel contracts, manifest permissions, and the foreground service are covered in [platform-integration.md](platform-integration.md).
+Every Kotlin handler is registered in `MainActivity.configureFlutterEngine` (the `integrity`, `legacy_recordings`, `gallery` and `ride_export` ones through their own classes). Channel contracts, manifest permissions, and the foreground service are covered in [platform-integration.md](platform-integration.md).
 
 ## App startup sequence
 
@@ -291,7 +294,7 @@ While recording, the HISTORY button reads MINIMISE, and both it and system back 
 | Path | Contents |
 |---|---|
 | `lib/` | All Dart source, split into `core/` and `features/` (see [Module map](#module-map)) |
-| `test/` | Unit and widget tests under `test/core/` and `test/features/`, grouped by `lib/` area, plus `widget_test.dart` (app smoke test), the ride-file fixtures in `test/fixtures/ride_files/` and shared test helpers in `test/support/` (a P-256 key standing in for the phone's signing key): 640 tests in 48 files |
+| `test/` | Unit and widget tests under `test/core/` and `test/features/`, grouped by `lib/` area, plus `widget_test.dart` (app smoke test), the ride-file fixtures in `test/fixtures/ride_files/` and shared test helpers in `test/support/` (a P-256 key standing in for the phone's signing key): 696 tests in 52 files |
 | `android/` | Gradle project (`app/build.gradle.kts`), manifest, Kotlin `MainActivity` and `BackgroundRecordingService`, resources (themes, the monochrome notification icon, backup and data-extraction rules), ProGuard rules and `key.properties.template` |
 | `scripts/` | `release-security-precheck.ps1` (used by CI) and `generate-keystore.ps1` |
 | `release-notes/` | Per-release notes, `v0.1.8.md` through `v0.1.13.md` |

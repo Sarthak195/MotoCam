@@ -653,7 +653,7 @@ Before planning, a background isolate reads the ride file's bytes and hashes the
 
 ### `manifest.json` (format 1)
 
-Keys are written in this order. `integrity` is `null` when ride data is not included.
+Keys are written in this order. `integrity` is `null` when ride data is not included, except for a video-only export of a ride whose state is `failed` or `none` (see below).
 
 ```json
 {
@@ -708,12 +708,12 @@ Keys are written in this order. `integrity` is `null` when ride data is not incl
 | `format` | `"motocam-ride-export"` |
 | `formatVersion` | `1` |
 | `rideSessionId` | The ride's `rideSessionId`, or `null` for a ride without one |
-| `exportedAt` | UTC ISO 8601 with milliseconds and `Z` |
+| `exportedAt` | UTC ISO 8601 with millisecond precision and `Z` (for example `2026-11-19T13:05:00.000Z`) |
 | `destination` | `"folder"` or `"share"` |
 | `clips` | `"evidence"` (locked and incident clips) or `"all"` |
 | `rideDataIncluded` | `true` when the ride file is part of the export, else `false` (video only) |
 | `sha256Of` | `"copy"` (folder: each `sha256` is of the copy read back) or `"source"` (share: each `sha256` is of the file on the phone, because MotoCam cannot read the receiving app's copy) |
-| `integrity` | `null` when `rideDataIncluded` is `false`: nothing in the export can be checked against the ride's checksums or signature, and no key material is written. Otherwise the block below |
+| `integrity` | When `rideDataIncluded` is `false` (video only): `null`, because nothing in the export can be checked against the ride's checksums or signature, and no key material is written. One exception: a video-only export of a ride whose state is `failed` or `none` writes `{"state": "failed"}` or `{"state": "none"}` and no other key (see [The five integrity states](#the-five-integrity-states)). With ride data: the block below |
 | `files` | The clips exported (hashed, for a share), in recording order. May be empty |
 | `rideData` | `{name, bytes, sha256}`, or `null` when not included |
 | `notExported` | The ride's clips that are not in the export, in recording order. May be empty |
@@ -738,7 +738,7 @@ Keys are written in this order. `integrity` is `null` when ride data is not incl
 | `kind` | `"clip"` (the only value) |
 | `bytes` | Bytes exported |
 | `sha256` | See `sha256Of` |
-| `recordedSha256` | The hash the ride's envelope recorded for this clip, or `null` |
+| `recordedSha256` | The hash the ride's envelope recorded for this clip, or `null`. A recorded value that is not 64 lowercase hex characters is treated as absent: `null`, so `recorded` is `none`, and the README prints it as invalid |
 | `recorded` | `"match"`, `"differs"` (the exported bytes differ from `recordedSha256`) or `"none"` (`recordedSha256` is `null`) |
 | `locked` | `true` when the clip is a locked segment of the ride |
 
@@ -758,14 +758,16 @@ The state is the ride file's own integrity check (the payload-level check of [Ve
 
 When ride data is not included, the README replaces the line above with `Video only: the ride data is not included, so nothing in this export can be checked against the ride's checksums or signature.` (or the `No integrity data` line, when the ride has no ride file at all).
 
+A video-only export of a ride whose state is `failed` or `none` keeps that fact, because the recorded hashes in `files` and `notExported` then cannot be relied on: the manifest writes `integrity` as `{"state": "failed"}` or `{"state": "none"}` with no key fields (no `signed`, `alg`, `keyId`, `publicKey`, `signedBy` and the other fields of the block), and the README carries a line saying that the recorded hashes cannot be relied on. Every other video-only export keeps `integrity` `null`.
+
 ### MOTOCAM-EXPORT.txt
 
-Sections in order (underlined with `-`), after a title block:
+Sections in order (underlined with `-`), after a title block. Every name the README prints (the ride, the clip and file names) is printed on one line: control characters and bidirectional control characters are removed.
 
 1. Title block: `MotoCam ride export`; `Ride:` (the `rideSessionId`, or the video file name); `Exported:` (UTC); `Local time:` (with the UTC offset); `Clips:` (`locked and incident clips` or `all clips`); `Ride data:` (`included (<name>)` or `not included (video only)`); `Destination:` (`a folder picked on the phone` or `the Android share sheet`).
 2. **Integrity**: the line of the state (above), then, with ride data only: `This ride ended without Stop: the ride data ends at its last checkpoint; clips recorded after it are separate rides and are not covered.` when `sessionComplete` is false, and `SIMULATED GPS: the phone reported mock locations during this ride.` when `mockLocationDetected` is true. Always: `Recorded-hash results mean something only when the integrity line is SIGNED or Unsigned.` and `N of M exported clips match their recorded hash; K differ; L have none.`
 3. **Signer key** (state `signed` with ride data only): the `keyId`, the full `publicKey` and its fingerprint (the SHA-256 of the key DER, as hex), with `Compare the full public key (or its fingerprint) with a key you already know, not the short keyId.` and one sentence on the signer: the exporting phone holds this key, this is not the key of the phone that made the export, or the exporting phone could not read its own key. A video-only README prints no key, keyId or fingerprint, so a video-only export cannot be linked to the ride's other exports.
-4. **Files**: each clip (name, `locked` when locked, bytes, SHA-256, recorded hash `matches`, `DIFFERS, recorded <hash>` or `none`) and the ride data, preceded by `Each SHA-256 is of the copy in this folder, read back after copying.` (folder) or `Each SHA-256 is of the file on the phone: MotoCam cannot read the copy the receiving app made.` (share).
+4. **Files**: each clip (name, `locked` when locked, bytes, SHA-256, recorded hash `matches`, `DIFFERS, recorded <hash>`, `none` or `invalid` (a recorded value that is not 64 lowercase hex characters, treated as absent)) and the ride data, preceded by `Each SHA-256 is of the copy in this folder, read back after copying.` (folder) or `Each SHA-256 is of the file on the phone: MotoCam cannot read the copy the receiving app made.` (share).
 5. **Not exported** (when there is something): each clip with `not selected` or `missing on the phone` and its recorded SHA-256, and each `Incident at mm:ss not in any kept clip`.
 6. **How to check**: the steps of the next section (with ride data), or only the clip hash step (video only).
 7. **Privacy**: `Videos show other road users: share them only for your own records, the police or your insurer.`; with ride data `The ride data holds the route, the speed every second and private file paths of the phone.` and `All exports from this phone carry the same public key, so they can be linked to each other.`; for a folder `The folder you pick is shared storage: other apps with media or storage access, and gallery backups, may see these files.` and `A folder without MOTOCAM-EXPORT.txt is an incomplete export.`; always `manifest.json and this file are not signed.`
@@ -797,7 +799,7 @@ Every step is required; a step that fails says what is wrong, not that the ride 
 
 ### Video only
 
-With "Include ride data" off, no ride data, key, `keyId` or fingerprint is written anywhere in the export: `rideDataIncluded` is `false`, `integrity` and `rideData` are `null`, and the README has no **Signer key** section. Each clip's `recordedSha256` stays, because it comes from the ride's envelope but is not a key. Such an export can show only that a copy matches the manifest; it cannot be checked against the ride's checksums or signature, and it carries nothing that links it to other exports from the same phone.
+With "Include ride data" off, no ride data, key, `keyId` or fingerprint is written anywhere in the export: `rideDataIncluded` is `false`, `rideData` is `null`, `integrity` is `null` (or `{"state": "failed"}` or `{"state": "none"}` for a ride in that state, see [The five integrity states](#the-five-integrity-states)), and the README has no **Signer key** section. Each clip's `recordedSha256` stays, because it comes from the ride's envelope but is not a key. Such an export can show only that a copy matches the manifest; it cannot be checked against the ride's checksums or signature, and it carries nothing that links it to other exports from the same phone.
 
 ### Share variant
 
