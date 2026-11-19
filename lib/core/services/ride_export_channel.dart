@@ -1,9 +1,9 @@
 /// The native side of ride export (Android only): the system folder
 /// picker, copies into a picked Storage Access Framework tree with a
-/// read-back check, hashing for a share, the share sheet and the
-/// keep-screen-on request. The native side is `RideExport.kt` (channel
-/// `com.example.motocam/ride_export`); the contract is in the ride export
-/// design, section 11.8.
+/// read-back check, hashing for a share, trimming a clip without
+/// re-encoding, the share sheet and the keep-screen-on request. The native
+/// side is `RideExport.kt` (channel `com.example.motocam/ride_export`); the
+/// contract is in the ride export design, sections 11.8 and 13.1.
 library;
 
 import 'package:flutter/foundation.dart';
@@ -79,6 +79,27 @@ class RideHashedFile {
   final String sha256;
 }
 
+/// The reply of [RideExportNative.trimClip].
+@immutable
+class RideTrimmedClip {
+  /// Creates a reply.
+  const RideTrimmedClip({
+    required this.bytes,
+    required this.firstUs,
+    required this.lastUs,
+  });
+
+  /// Bytes of the trimmed file.
+  final int bytes;
+
+  /// Source time, in microseconds, of the first video keyframe written
+  /// (the requested start snapped back to a keyframe).
+  final int firstUs;
+
+  /// Source time, in microseconds, of the last sample written.
+  final int lastUs;
+}
+
 /// The native operations of ride export. The app uses [RideExportChannel];
 /// tests use a fake.
 abstract class RideExportNative {
@@ -99,19 +120,35 @@ abstract class RideExportNative {
   /// Copies the private file [sourcePath] into the folder [folderUri] as
   /// [name], reads the copy back and hashes both. An equal file already
   /// there is skipped; a different one is never overwritten
-  /// (`EXISTS_DIFFERENT`). Throws [RideExportCancelled] after [cancel].
+  /// (`EXISTS_DIFFERENT`), unless [replace]: then an existing file of that
+  /// name is deleted and the copy made fresh. Throws [RideExportCancelled]
+  /// after [cancel].
   Future<RideExportedFile> exportFile({
     required String folderUri,
     required String sourcePath,
     required String name,
     required String mimeType,
+    bool replace = false,
+  });
+
+  /// Writes the part [startUs] to [endUs] (clip-local microseconds) of the
+  /// clip [sourcePath] to [targetPath] (under `<cache>/ride_export/`)
+  /// without re-encoding; the start snaps back to the keyframe at or before
+  /// it. Throws [RideExportCancelled] after [cancel] and a
+  /// [RideExportFailure] `TRIM_FAILED` when the clip cannot be cut.
+  Future<RideTrimmedClip> trimClip({
+    required String sourcePath,
+    required String targetPath,
+    required int startUs,
+    required int endUs,
   });
 
   /// Hashes the private file [path]. Throws [RideExportCancelled] after
   /// [cancel].
   Future<RideHashedFile> hashFile(String path);
 
-  /// Stops the [exportFile] or [hashFile] in progress at its next buffer.
+  /// Stops the [exportFile], [hashFile] or [trimClip] in progress at its
+  /// next buffer or sample.
   /// Never throws.
   Future<void> cancel();
 
@@ -189,6 +226,7 @@ class RideExportChannel implements RideExportNative {
     required String sourcePath,
     required String name,
     required String mimeType,
+    bool replace = false,
   }) async {
     final reply = await _guard(
       () => channel
@@ -197,6 +235,7 @@ class RideExportChannel implements RideExportNative {
             'sourcePath': sourcePath,
             'name': name,
             'mimeType': mimeType,
+            'replace': replace,
           }),
     );
     final bytes = reply?['bytes'];
@@ -234,6 +273,31 @@ class RideExportChannel implements RideExportNative {
       _invalidReply('hashFile');
     }
     return RideHashedFile(bytes: bytes, sha256: sha256.toLowerCase());
+  }
+
+  @override
+  Future<RideTrimmedClip> trimClip({
+    required String sourcePath,
+    required String targetPath,
+    required int startUs,
+    required int endUs,
+  }) async {
+    final reply = await _guard(
+      () => channel
+          .invokeMapMethod<String, Object?>('trimClip', <String, Object?>{
+            'sourcePath': sourcePath,
+            'targetPath': targetPath,
+            'startUs': startUs,
+            'endUs': endUs,
+          }),
+    );
+    final bytes = reply?['bytes'];
+    final firstUs = reply?['firstUs'];
+    final lastUs = reply?['lastUs'];
+    if (bytes is! int || firstUs is! int || lastUs is! int) {
+      _invalidReply('trimClip');
+    }
+    return RideTrimmedClip(bytes: bytes, firstUs: firstUs, lastUs: lastUs);
   }
 
   @override
