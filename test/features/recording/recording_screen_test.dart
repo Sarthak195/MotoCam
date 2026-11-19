@@ -28,6 +28,15 @@ const _mockedChannels = [
   MethodChannel('com.example.motocam/background_recording'),
   MethodChannel('com.example.motocam/device_status'),
   _pipChannel,
+  // Telemetry start-up asks for location services once the camera is up.
+  MethodChannel('flutter.baseflow.com/geolocator'),
+  MethodChannel('flutter.baseflow.com/geolocator_service_updates'),
+  MethodChannel('flutter.baseflow.com/geolocator_updates'),
+  // The motion sensors incident detection listens to.
+  MethodChannel('dev.fluttercommunity.plus/sensors/method'),
+  MethodChannel('dev.fluttercommunity.plus/sensors/accelerometer'),
+  MethodChannel('dev.fluttercommunity.plus/sensors/user_accel'),
+  MethodChannel('dev.fluttercommunity.plus/sensors/gyroscope'),
 ];
 
 class _FakeCameraPlatform extends CameraPlatform {
@@ -154,6 +163,10 @@ void main() {
             return true;
           case 'getBatteryStatus':
             return {'batteryLevelPercent': 80};
+          case 'isLocationServiceEnabled':
+            return true;
+          case 'checkPermission':
+            return 3; // whileInUse
         }
         return null;
       });

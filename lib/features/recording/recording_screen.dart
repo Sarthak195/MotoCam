@@ -7,7 +7,6 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
-import 'package:camera/camera.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -25,6 +24,12 @@ import 'recording_screen_logic.dart';
 import 'widgets/recording_settings_sheet.dart';
 import 'start_preflight_evaluator.dart';
 import 'widgets/start_preflight_sheet.dart';
+import 'widgets/recording_controls.dart';
+import 'widgets/recording_header.dart';
+import 'widgets/recording_preview.dart';
+import 'widgets/recording_profile_bar.dart';
+import 'widgets/recording_stats.dart';
+import 'widgets/recording_view_state.dart';
 
 /// The app's home screen: camera preview, live telemetry and the controls
 /// that start, stop and lock recordings.
@@ -1636,20 +1641,26 @@ class _RecordingScreenState extends State<RecordingScreen>
                   body: SafeArea(
                     child: Stack(
                       children: [
-                        Column(
-                          children: [
-                            _buildHeader(camera),
-                            _buildActiveProfileBar(),
-                            // Rides moving into private storage (idle only:
-                            // a run pauses while recording).
-                            if (!camera.isRecording)
-                              RecordingsMigrationBanner(
-                                migration: camera.recordingsMigration,
+                        Consumer<AppSettingsProvider>(
+                          builder: (context, settings, _) =>
+                              Selector<TelemetryProvider, _TelemetryFlags>(
+                                selector: (_, telemetry) => (
+                                  incidentUnavailable:
+                                      !telemetry.isIncidentDetectionAvailable,
+                                  locationOff:
+                                      telemetry.isTracking &&
+                                      !telemetry.isLocationServiceEnabled,
+                                  persistingRide: telemetry.isPersistingRide,
+                                ),
+                                builder: (context, flags, _) => _buildBody(
+                                  camera: camera,
+                                  view: _viewState(
+                                    camera: camera,
+                                    settings: settings,
+                                    flags: flags,
+                                  ),
+                                ),
                               ),
-                            Expanded(child: _buildCameraPreview()),
-                            _buildTelemetryStats(),
-                            _buildControls(),
-                          ],
                         ),
                         if (_isBlackoutMode)
                           _buildBlackoutOverlay(camera: camera),
@@ -1661,6 +1672,185 @@ class _RecordingScreenState extends State<RecordingScreen>
                 ),
         );
       },
+    );
+  }
+
+  /// One snapshot of what the widgets show, from the providers and the
+  /// State's flags.
+  RecordingViewState _viewState({
+    required CameraProvider camera,
+    required AppSettingsProvider settings,
+    required _TelemetryFlags flags,
+  }) {
+    return RecordingViewState(
+      isRecording: camera.isRecording,
+      isBlackoutMode: _isBlackoutMode,
+      isApplyingSettings: _isApplyingSettings,
+      isStarting: _isStartingRecording || camera.isStartingRecording,
+      isStopping: _isStoppingRecording || camera.isStoppingRecording,
+      isPersistingRide: flags.persistingRide,
+      isPreparingCamera: !camera.isRecording && camera.isInitializing,
+      isSegmentLocked: camera.isRecordingSegmentLocked,
+      cameraName: settings.selectedCameraName,
+      requestedResolution: settings.recordingResolution,
+      requestedFps: settings.recordingFps,
+      appliedResolution: CameraProvider.resolutionForPreset(
+        camera.resolutionPreset,
+      ),
+      appliedFps: camera.recordingFps,
+      // Saved values are the rider's request; when the camera negotiated
+      // something else, the applied value is shown next to the request.
+      showApplied: camera.isInitialized && !_hasPendingCameraSettings,
+      requestedBitrateMbps: settings.videoBitrateMbps,
+      appliedBitrateMbps: camera.appliedVideoBitrateMbps,
+      audioEnabled: settings.audioEnabled,
+      segmentLabel: AppSettingsProvider.segmentDurationLabel(
+        settings.segmentDurationSeconds,
+      ),
+      loopSegmentCount: settings.loopSegmentCount,
+      incidentSensitivityName: settings.incidentSensitivity.name,
+      speedRefreshMs: settings.speedRefreshMs,
+      incidentDetectionUnavailable: flags.incidentUnavailable,
+      locationOff: flags.locationOff,
+      highIncidentSensitivity:
+          settings.incidentSensitivity == IncidentSensitivity.high,
+      presetWarning: _presetWarning(camera: camera, settings: settings),
+    );
+  }
+
+  /// Warning about a saved resolution known to fail on this camera, or null.
+  String? _presetWarning({
+    required CameraProvider camera,
+    required AppSettingsProvider settings,
+  }) {
+    final selectedPreset = CameraProvider.presetForResolution(
+      settings.recordingResolution,
+    );
+    final resolvedPreset = camera.resolvePresetForRequestedResolution(
+      settings.recordingResolution,
+    );
+    final unsupportedPresets = camera.knownUnsupportedResolutionPresets;
+    final isPresetUnsupported =
+        !camera.isRecording && unsupportedPresets.contains(selectedPreset);
+    if (!isPresetUnsupported) {
+      return null;
+    }
+    final willAutoFallback = resolvedPreset != selectedPreset;
+    final supportedResolutions = AppSettingsProvider.resolutionOptions
+        .where(
+          (resolution) => !unsupportedPresets.contains(
+            CameraProvider.presetForResolution(resolution),
+          ),
+        )
+        .toList();
+    final suggestedResolution = supportedResolutions.isEmpty
+        ? null
+        : supportedResolutions.last;
+    if (willAutoFallback) {
+      return 'Current ${settings.recordingResolution}p is unstable on this device. Recording will auto-fallback to ${CameraProvider.resolutionForPreset(resolvedPreset)}p.';
+    }
+    return suggestedResolution == null
+        ? 'Current ${settings.recordingResolution}p is known unstable on this device. Choose a lower resolution in Settings.'
+        : 'Current ${settings.recordingResolution}p is known unstable on this device. Choose ${suggestedResolution}p or lower in Settings.';
+  }
+
+  void _onStartPressed(CameraProvider camera) {
+    unawaited(
+      _startRecordingFlow(
+        camera: camera,
+        telemetry: context.read<TelemetryProvider>(),
+        messenger: ScaffoldMessenger.of(context),
+      ),
+    );
+  }
+
+  void _onStopPressed(CameraProvider camera) {
+    unawaited(
+      _stopRecordingFlow(
+        camera: camera,
+        telemetry: context.read<TelemetryProvider>(),
+        messenger: ScaffoldMessenger.of(context),
+      ),
+    );
+  }
+
+  void _onBlackoutPressed(CameraProvider camera) {
+    if (_isBlackoutMode) {
+      unawaited(_exitBlackoutMode(camera: camera));
+    } else {
+      unawaited(_enterBlackoutMode(camera: camera));
+    }
+  }
+
+  void _onLockPressed(CameraProvider camera) {
+    final registeredSegments = camera.lastSessionSegmentPaths.length;
+    camera.markIncident(
+      protectPastSegments: 2,
+      protectCurrentSegment: true,
+      reason: 'manual-emergency',
+    );
+    _checkpointRideIfChanged(camera);
+    unawaited(HapticFeedback.heavyImpact());
+    _showInAppNotice(
+      incidentLockNotice(registeredSegments: registeredSegments),
+    );
+  }
+
+  Widget _buildBody({
+    required CameraProvider camera,
+    required RecordingViewState view,
+  }) {
+    final controller = camera.isInitialized ? camera.controller : null;
+    return Column(
+      children: [
+        RecordingHeader(
+          view: view,
+          onBlackout: () => _onBlackoutPressed(camera),
+          onSettings: () => unawaited(_openSettingsSheet()),
+        ),
+        RecordingProfileBar(view: view),
+        // Rides moving into private storage (idle only: a run pauses while
+        // recording).
+        if (!camera.isRecording)
+          RecordingsMigrationBanner(migration: camera.recordingsMigration),
+        Expanded(
+          child: RecordingPreview(
+            isBlackoutMode: _isBlackoutMode,
+            controller: controller,
+            mode: cameraPreviewMode(
+              cameraReady: false,
+              initState: camera.initState,
+              initAttempted: _cameraInitAttempted,
+              setupBusy:
+                  _isBootstrapping ||
+                  _isNavigatingHistory ||
+                  camera.isInitializing ||
+                  camera.isRecording,
+            ),
+            initFailure: camera.initFailure,
+            previewKey: ValueKey(
+              'camera-preview-${camera.resolutionPreset}-${camera.recordingFps}-${camera.activeCameraName}-${controller.hashCode}',
+            ),
+            isRecording: camera.isRecording,
+            isSegmentLocked: camera.isRecordingSegmentLocked,
+            onRetry: _retryCameraSetup,
+            onOpenSettings: () => unawaited(_openAppSettingsAndRetry()),
+          ),
+        ),
+        RecordingStats(
+          timerStream: camera.timerStream,
+          elapsed: camera.elapsedTime,
+          deviceStatus: _deviceStatus,
+        ),
+        RecordingControls(
+          view: view,
+          onStart: () => _onStartPressed(camera),
+          onStop: () => _onStopPressed(camera),
+          onRides: () => unawaited(_openRideHistory(camera: camera)),
+          onPop: () => unawaited(_handleBackPressWhileRecording()),
+          onLock: () => _onLockPressed(camera),
+        ),
+      ],
     );
   }
 
@@ -1831,57 +2021,6 @@ class _RecordingScreenState extends State<RecordingScreen>
     );
   }
 
-  Widget _buildHeader(CameraProvider camera) {
-    return Container(
-      padding: const EdgeInsets.all(16),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-        children: [
-          const Text(
-            'MotoCam',
-            style: TextStyle(
-              color: Colors.white,
-              fontSize: 24,
-              fontWeight: FontWeight.bold,
-            ),
-          ),
-          Row(
-            children: [
-              IconButton(
-                icon: Icon(
-                  _isBlackoutMode ? Icons.light_mode : Icons.dark_mode,
-                  color: camera.isRecording ? Colors.white : Colors.white30,
-                ),
-                tooltip: _isBlackoutMode ? 'Exit blackout' : 'Enter blackout',
-                onPressed: _isApplyingSettings || !camera.isRecording
-                    ? null
-                    : () {
-                        if (_isBlackoutMode) {
-                          unawaited(_exitBlackoutMode(camera: camera));
-                        } else {
-                          unawaited(_enterBlackoutMode(camera: camera));
-                        }
-                      },
-              ),
-              IconButton(
-                icon: const Icon(Icons.settings, color: Colors.white),
-                tooltip: 'Settings',
-                onPressed:
-                    _isApplyingSettings ||
-                        _isStartingRecording ||
-                        _isStoppingRecording ||
-                        camera.isStartingRecording ||
-                        camera.isStoppingRecording
-                    ? null
-                    : _openSettingsSheet,
-              ),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-
   Future<void> _openSettingsSheet() async {
     if (_isApplyingSettings) {
       return;
@@ -2040,698 +2179,6 @@ class _RecordingScreenState extends State<RecordingScreen>
     }
   }
 
-  Widget _buildActiveProfileBar() {
-    return Consumer2<AppSettingsProvider, CameraProvider>(
-      builder: (context, settings, camera, _) {
-        // Saved values are the rider's request; when the camera negotiated
-        // something else, show the applied value next to the request.
-        final showApplied = camera.isInitialized && !_hasPendingCameraSettings;
-        final appliedResolution = CameraProvider.resolutionForPreset(
-          camera.resolutionPreset,
-        );
-        final resolutionLabel =
-            showApplied && appliedResolution != settings.recordingResolution
-            ? '${appliedResolution}p (set ${settings.recordingResolution}p)'
-            : '${settings.recordingResolution}p';
-        final fpsLabel =
-            showApplied && camera.recordingFps != settings.recordingFps
-            ? '${camera.recordingFps} FPS (set ${settings.recordingFps})'
-            : '${settings.recordingFps} FPS';
-        final chips = <Widget>[
-          if (settings.selectedCameraName.isNotEmpty)
-            _buildProfileChip('Cam ${settings.selectedCameraName}'),
-          _buildProfileChip(resolutionLabel),
-          _buildProfileChip(fpsLabel),
-          _buildProfileChip('${settings.videoBitrateMbps} Mbps'),
-          _buildProfileChip(settings.audioEnabled ? 'Audio On' : 'Audio Off'),
-          _buildProfileChip(
-            '${AppSettingsProvider.segmentDurationLabel(settings.segmentDurationSeconds)} x ${settings.loopSegmentCount} loop',
-          ),
-          _buildProfileChip(
-            'Incident ${settings.incidentSensitivity.name.toUpperCase()}',
-          ),
-          _buildProfileChip('Speed ${settings.speedRefreshMs}ms'),
-        ];
-
-        final showHighSensitivityWarning =
-            settings.incidentSensitivity == IncidentSensitivity.high;
-
-        return Container(
-          width: double.infinity,
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-          decoration: BoxDecoration(
-            color: Colors.white.withValues(alpha: 0.05),
-            border: Border(
-              bottom: BorderSide(color: Colors.white.withValues(alpha: 0.08)),
-            ),
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              SizedBox(
-                height: 34,
-                child: ListView.separated(
-                  scrollDirection: Axis.horizontal,
-                  itemCount: chips.length,
-                  separatorBuilder: (_, _) => const SizedBox(width: 8),
-                  itemBuilder: (_, index) => chips[index],
-                ),
-              ),
-              Selector<TelemetryProvider, bool>(
-                selector: (_, telemetry) =>
-                    !telemetry.isIncidentDetectionAvailable,
-                builder: (context, unavailable, _) {
-                  if (!unavailable) {
-                    return const SizedBox.shrink();
-                  }
-                  return Padding(
-                    padding: const EdgeInsets.only(top: 6),
-                    child: Text(
-                      'Incident detection unavailable (no motion sensor): '
-                      'clips are not auto-locked. Use LOCK.',
-                      style: TextStyle(
-                        color: Colors.orange.withValues(alpha: 0.9),
-                        fontSize: 11,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  );
-                },
-              ),
-              Selector<TelemetryProvider, bool>(
-                selector: (_, telemetry) =>
-                    telemetry.isTracking && !telemetry.isLocationServiceEnabled,
-                builder: (context, locationOff, _) {
-                  if (!locationOff) {
-                    return const SizedBox.shrink();
-                  }
-                  return Padding(
-                    padding: const EdgeInsets.only(top: 6),
-                    child: Text(
-                      'Location is off: no speed, distance or route is recorded.',
-                      style: TextStyle(
-                        color: Colors.orange.withValues(alpha: 0.9),
-                        fontSize: 11,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  );
-                },
-              ),
-              if (showHighSensitivityWarning)
-                Padding(
-                  padding: const EdgeInsets.only(top: 6),
-                  child: Text(
-                    'High incident sensitivity may increase auto-lock frequency.',
-                    style: TextStyle(
-                      color: Colors.orange.withValues(alpha: 0.9),
-                      fontSize: 11,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ),
-            ],
-          ),
-        );
-      },
-    );
-  }
-
-  Widget _buildProfileChip(String label) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-      decoration: BoxDecoration(
-        color: Colors.blue.withValues(alpha: 0.18),
-        borderRadius: BorderRadius.circular(14),
-      ),
-      child: Text(
-        label,
-        style: const TextStyle(
-          color: Colors.white,
-          fontSize: 11,
-          fontWeight: FontWeight.w600,
-        ),
-      ),
-    );
-  }
-
-  Widget _buildCameraPreview() {
-    return Consumer<CameraProvider>(
-      builder: (context, camera, _) {
-        if (_isBlackoutMode) {
-          return const ColoredBox(color: Colors.black);
-        }
-
-        if (!camera.isInitialized || camera.controller == null) {
-          final mode = cameraPreviewMode(
-            cameraReady: false,
-            initState: camera.initState,
-            initAttempted: _cameraInitAttempted,
-            setupBusy:
-                _isBootstrapping ||
-                _isNavigatingHistory ||
-                camera.isInitializing ||
-                camera.isRecording,
-          );
-          if (mode == CameraPreviewMode.failed) {
-            return _buildCameraUnavailable(camera.initFailure);
-          }
-          return const Center(
-            child: CircularProgressIndicator(color: Colors.white),
-          );
-        }
-
-        final controller = camera.controller!;
-        if (!controller.value.isInitialized) {
-          return const Center(
-            child: CircularProgressIndicator(color: Colors.white),
-          );
-        }
-        final rawAspectRatio = controller.value.aspectRatio;
-        final safeAspectRatio = rawAspectRatio.isFinite && rawAspectRatio > 0
-            ? rawAspectRatio
-            : (16 / 9);
-        final portraitAspectRatio = safeAspectRatio > 1
-            ? (1 / safeAspectRatio)
-            : safeAspectRatio;
-
-        return Stack(
-          key: ValueKey(
-            'camera-preview-${camera.resolutionPreset}-${camera.recordingFps}-${camera.activeCameraName}-${controller.hashCode}',
-          ),
-          children: [
-            Positioned.fill(
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(10),
-                child: ColoredBox(
-                  color: Colors.black,
-                  child: Center(
-                    child: AspectRatio(
-                      aspectRatio: portraitAspectRatio,
-                      child: CameraPreview(controller),
-                    ),
-                  ),
-                ),
-              ),
-            ),
-            if (camera.isRecording)
-              Positioned(
-                top: 12,
-                left: 12,
-                child: Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 12,
-                    vertical: 8,
-                  ),
-                  decoration: BoxDecoration(
-                    color: Colors.red,
-                    borderRadius: BorderRadius.circular(20),
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Container(
-                        width: 10,
-                        height: 10,
-                        decoration: const BoxDecoration(
-                          color: Colors.white,
-                          shape: BoxShape.circle,
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      const Text(
-                        'REC',
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                      if (camera.isRecordingSegmentLocked) ...[
-                        const SizedBox(width: 10),
-                        const Icon(Icons.lock, color: Colors.white, size: 14),
-                        const SizedBox(width: 4),
-                        const Text(
-                          'LOCKED',
-                          style: TextStyle(
-                            color: Colors.white,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                      ],
-                    ],
-                  ),
-                ),
-              ),
-          ],
-        );
-      },
-    );
-  }
-
-  Widget _buildCameraUnavailable(CameraInitFailure? failure) {
-    final panel = cameraInitPanelFor(failure);
-    return Center(
-      child: SingleChildScrollView(
-        padding: const EdgeInsets.all(24),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Icon(Icons.videocam_off, color: Colors.white54, size: 40),
-            const SizedBox(height: 12),
-            Text(
-              panel.title,
-              textAlign: TextAlign.center,
-              style: const TextStyle(
-                color: Colors.white,
-                fontSize: 16,
-                fontWeight: FontWeight.bold,
-              ),
-            ),
-            const SizedBox(height: 6),
-            Text(
-              panel.message,
-              textAlign: TextAlign.center,
-              style: const TextStyle(color: Colors.white70, fontSize: 13),
-            ),
-            const SizedBox(height: 16),
-            Wrap(
-              alignment: WrapAlignment.center,
-              spacing: 12,
-              runSpacing: 8,
-              children: [
-                if (panel.showRetry)
-                  ElevatedButton(
-                    onPressed: _retryCameraSetup,
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: recordingStartButtonColor,
-                      foregroundColor: recordingButtonLabelColor,
-                    ),
-                    child: const Text('Retry'),
-                  ),
-                if (panel.showOpenSettings)
-                  OutlinedButton(
-                    onPressed: () => unawaited(_openAppSettingsAndRetry()),
-                    style: OutlinedButton.styleFrom(
-                      foregroundColor: Colors.white,
-                      side: BorderSide(
-                        color: Colors.white.withValues(alpha: 0.4),
-                      ),
-                    ),
-                    child: const Text('Open Settings'),
-                  ),
-              ],
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildTelemetryStats() {
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: Colors.black.withValues(alpha: 0.7),
-        border: Border(
-          top: BorderSide(color: Colors.white.withValues(alpha: 0.1)),
-        ),
-      ),
-      child: Row(
-        children: [
-          Expanded(
-            child: Selector<TelemetryProvider, String>(
-              selector: (_, telemetry) =>
-                  '${telemetry.currentData.speed.toStringAsFixed(0)} km/h',
-              builder: (context, speed, _) {
-                return _buildStatItem(
-                  icon: Icons.speed,
-                  label: 'Speed',
-                  value: speed,
-                  compact: true,
-                );
-              },
-            ),
-          ),
-          Expanded(
-            child: Consumer<CameraProvider>(
-              builder: (context, camera, _) {
-                return StreamBuilder<Duration>(
-                  stream: camera.timerStream,
-                  initialData: camera.elapsedTime,
-                  builder: (context, snapshot) {
-                    final formattedTime = formatRecordingElapsed(
-                      snapshot.data ?? Duration.zero,
-                    );
-
-                    return _buildStatItem(
-                      icon: Icons.timer,
-                      label: 'Duration',
-                      value: formattedTime,
-                      compact: true,
-                    );
-                  },
-                );
-              },
-            ),
-          ),
-          Expanded(
-            child: Selector<TelemetryProvider, String>(
-              selector: (_, telemetry) =>
-                  '${telemetry.rideDistanceKm.toStringAsFixed(2)} km',
-              builder: (context, distance, _) {
-                return _buildStatItem(
-                  icon: Icons.route,
-                  label: 'Distance',
-                  value: distance,
-                  compact: true,
-                );
-              },
-            ),
-          ),
-          Expanded(
-            child: ValueListenableBuilder<DeviceStatusSnapshot>(
-              valueListenable: _deviceStatus,
-              builder: (context, status, _) {
-                final batteryLevel = status.batteryLevelPercent;
-                return _buildStatItem(
-                  icon: Icons.battery_std,
-                  label: 'Battery',
-                  value: batteryLevel == null ? '--' : '$batteryLevel%',
-                  compact: true,
-                );
-              },
-            ),
-          ),
-          Expanded(
-            child: ValueListenableBuilder<DeviceStatusSnapshot>(
-              valueListenable: _deviceStatus,
-              builder: (context, status, _) {
-                final batteryTemp = status.batteryTemperatureC;
-                return _buildStatItem(
-                  icon: Icons.device_thermostat,
-                  label: 'Temp',
-                  value: batteryTemp == null
-                      ? '--'
-                      : '${batteryTemp.toStringAsFixed(1)} C',
-                  compact: true,
-                );
-              },
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildStatItem({
-    required IconData icon,
-    required String label,
-    required String value,
-    bool compact = false,
-  }) {
-    final iconSize = compact ? 20.0 : 24.0;
-    final valueStyle = TextStyle(
-      color: Colors.white,
-      fontSize: compact ? 12 : 18,
-      fontWeight: FontWeight.bold,
-    );
-    final labelStyle = TextStyle(
-      color: Colors.grey[400],
-      fontSize: compact ? 10 : 12,
-    );
-
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Icon(icon, color: Colors.blue, size: iconSize),
-        SizedBox(height: compact ? 2 : 4),
-        // Scales the value down instead of ellipsizing it at large system
-        // font sizes.
-        FittedBox(
-          fit: BoxFit.scaleDown,
-          child: Text(
-            value,
-            maxLines: 1,
-            textAlign: TextAlign.center,
-            style: valueStyle,
-          ),
-        ),
-        Text(
-          label,
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-          textAlign: TextAlign.center,
-          style: labelStyle,
-        ),
-      ],
-    );
-  }
-
-  Widget _buildControls() {
-    return Container(
-      padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Selector<TelemetryProvider, bool>(
-            selector: (_, telemetry) => telemetry.isPersistingRide,
-            builder: (context, isPersistingRide, _) =>
-                Consumer2<CameraProvider, AppSettingsProvider>(
-                  builder: (context, camera, settings, _) {
-                    final selectedPreset = CameraProvider.presetForResolution(
-                      settings.recordingResolution,
-                    );
-                    final resolvedPreset = camera
-                        .resolvePresetForRequestedResolution(
-                          settings.recordingResolution,
-                        );
-                    final unsupportedPresets =
-                        camera.knownUnsupportedResolutionPresets;
-                    final isPresetUnsupported =
-                        !camera.isRecording &&
-                        unsupportedPresets.contains(selectedPreset);
-                    final willAutoFallback =
-                        isPresetUnsupported && resolvedPreset != selectedPreset;
-                    final supportedResolutions = AppSettingsProvider
-                        .resolutionOptions
-                        .where(
-                          (resolution) => !unsupportedPresets.contains(
-                            CameraProvider.presetForResolution(resolution),
-                          ),
-                        )
-                        .toList();
-                    final isStarting =
-                        _isStartingRecording || camera.isStartingRecording;
-                    // A ride is still being saved (also a Retry of a failed save):
-                    // START waits for it.
-                    final isStopping =
-                        _isStoppingRecording ||
-                        camera.isStoppingRecording ||
-                        (isPersistingRide && !camera.isRecording);
-                    final isPreparingCamera =
-                        !camera.isRecording && camera.isInitializing;
-                    final isBusy =
-                        _isApplyingSettings ||
-                        isStarting ||
-                        isStopping ||
-                        isPreparingCamera;
-                    final String buttonLabel;
-                    if (_isApplyingSettings) {
-                      buttonLabel = 'APPLYING SETTINGS...';
-                    } else if (isStopping) {
-                      buttonLabel = 'SAVING RECORDING...';
-                    } else if (isStarting) {
-                      buttonLabel = 'STARTING...';
-                    } else if (isPreparingCamera) {
-                      buttonLabel = 'PREPARING CAMERA...';
-                    } else {
-                      buttonLabel = camera.isRecording
-                          ? 'STOP RECORDING'
-                          : 'START RECORDING';
-                    }
-                    final suggestedResolution = supportedResolutions.isEmpty
-                        ? null
-                        : supportedResolutions.last;
-
-                    return Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        ElevatedButton(
-                          onPressed: isBusy
-                              ? null
-                              : () async {
-                                  final messenger = ScaffoldMessenger.of(
-                                    context,
-                                  );
-                                  final telemetry = context
-                                      .read<TelemetryProvider>();
-                                  if (camera.isRecording) {
-                                    await _stopRecordingFlow(
-                                      camera: camera,
-                                      telemetry: telemetry,
-                                      messenger: messenger,
-                                    );
-                                  } else {
-                                    await _startRecordingFlow(
-                                      camera: camera,
-                                      telemetry: telemetry,
-                                      messenger: messenger,
-                                    );
-                                  }
-                                },
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: camera.isRecording
-                                ? recordingStopButtonColor
-                                : recordingStartButtonColor,
-                            foregroundColor: recordingButtonLabelColor,
-                            disabledBackgroundColor: Colors.grey.shade800,
-                            disabledForegroundColor: Colors.white70,
-                            minimumSize: const Size(double.infinity, 52),
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(12),
-                            ),
-                          ),
-                          child: Text(
-                            buttonLabel,
-                            style: const TextStyle(
-                              fontSize: 16,
-                              fontWeight: FontWeight.bold,
-                            ),
-                          ),
-                        ),
-                        if (_isApplyingSettings)
-                          const Padding(
-                            padding: EdgeInsets.only(top: 8),
-                            child: Text(
-                              'Applying settings... camera controls are temporarily locked.',
-                              textAlign: TextAlign.center,
-                              style: TextStyle(
-                                color: Colors.white70,
-                                fontSize: 12,
-                                fontWeight: FontWeight.w600,
-                              ),
-                            ),
-                          ),
-                        if (isPresetUnsupported)
-                          Padding(
-                            padding: const EdgeInsets.only(top: 8),
-                            child: Text(
-                              willAutoFallback
-                                  ? 'Current ${settings.recordingResolution}p is unstable on this device. Recording will auto-fallback to ${CameraProvider.resolutionForPreset(resolvedPreset)}p.'
-                                  : (suggestedResolution == null
-                                        ? 'Current ${settings.recordingResolution}p is known unstable on this device. Choose a lower resolution in Settings.'
-                                        : 'Current ${settings.recordingResolution}p is known unstable on this device. Choose ${suggestedResolution}p or lower in Settings.'),
-                              textAlign: TextAlign.center,
-                              style: const TextStyle(
-                                color: Colors.orange,
-                                fontSize: 12,
-                                fontWeight: FontWeight.w600,
-                              ),
-                            ),
-                          ),
-                      ],
-                    );
-                  },
-                ),
-          ),
-          const SizedBox(height: 8),
-          Consumer<CameraProvider>(
-            builder: (context, camera, _) {
-              final isStopping =
-                  _isStoppingRecording || camera.isStoppingRecording;
-              final isBusy =
-                  _isApplyingSettings ||
-                  _isStartingRecording ||
-                  camera.isStartingRecording ||
-                  isStopping;
-              // While recording this button minimises into PiP instead of
-              // opening history, so it says so.
-              final historyLabel = camera.isRecording ? 'MINIMISE' : 'HISTORY';
-              final historyIcon = camera.isRecording
-                  ? Icons.picture_in_picture_alt
-                  : Icons.video_library_outlined;
-              return Row(
-                children: [
-                  Expanded(
-                    child: OutlinedButton.icon(
-                      onPressed: isBusy
-                          ? null
-                          : (camera.isRecording
-                                ? () {
-                                    unawaited(_handleBackPressWhileRecording());
-                                  }
-                                : () async {
-                                    await _openRideHistory(camera: camera);
-                                  }),
-                      icon: Icon(historyIcon, color: Colors.blue),
-                      label: Text(
-                        historyLabel,
-                        style: const TextStyle(
-                          fontSize: 14,
-                          color: Colors.blue,
-                        ),
-                      ),
-                      style: OutlinedButton.styleFrom(
-                        minimumSize: const Size.fromHeight(44),
-                        side: const BorderSide(color: Colors.blue),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: OutlinedButton.icon(
-                      onPressed: camera.isRecording && !isStopping
-                          ? () {
-                              final registeredSegments =
-                                  camera.lastSessionSegmentPaths.length;
-                              camera.markIncident(
-                                protectPastSegments: 2,
-                                protectCurrentSegment: true,
-                                reason: 'manual-emergency',
-                              );
-                              _checkpointRideIfChanged(camera);
-                              unawaited(HapticFeedback.heavyImpact());
-                              _showInAppNotice(
-                                incidentLockNotice(
-                                  registeredSegments: registeredSegments,
-                                ),
-                              );
-                            }
-                          : null,
-                      icon: const Icon(
-                        Icons.warning_amber_rounded,
-                        color: Colors.orange,
-                      ),
-                      label: const Text(
-                        'LOCK',
-                        style: TextStyle(fontSize: 14, color: Colors.orange),
-                      ),
-                      style: OutlinedButton.styleFrom(
-                        minimumSize: const Size.fromHeight(44),
-                        side: BorderSide(
-                          color: camera.isRecording
-                              ? Colors.orange
-                              : Colors.orange.withValues(alpha: 0.3),
-                        ),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                      ),
-                    ),
-                  ),
-                ],
-              );
-            },
-          ),
-        ],
-      ),
-    );
-  }
-
   @override
   void dispose() {
     _telemetryProvider?.removeListener(_onTelemetryChanged);
@@ -2803,6 +2250,14 @@ class _BlinkingRecDotState extends State<_BlinkingRecDot> {
     );
   }
 }
+
+/// Telemetry values the recording screen's widgets show; a [Selector] on
+/// them rebuilds the screen only when one changes, never on a speed tick.
+typedef _TelemetryFlags = ({
+  bool incidentUnavailable,
+  bool locationOff,
+  bool persistingRide,
+});
 
 enum _PermissionRecoveryAction { dismiss, retryRequest, openSettings }
 
