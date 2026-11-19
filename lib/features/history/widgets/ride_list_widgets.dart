@@ -94,20 +94,21 @@ class _FilterChip extends StatelessWidget {
       ),
     );
     return Semantics(
+      container: true,
       button: true,
       selected: selected,
       label: '$label filter',
-      child: ExcludeSemantics(
-        child: Material(
-          color: selected ? MotoColors.text : MotoColors.surface,
-          shape: shape,
-          clipBehavior: Clip.antiAlias,
-          child: InkWell(
-            onTap: onTap,
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(minHeight: MotoSize.minTarget),
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 8),
+      child: Material(
+        color: selected ? MotoColors.text : MotoColors.surface,
+        shape: shape,
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: onTap,
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(minHeight: MotoSize.minTarget),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              child: ExcludeSemantics(
                 child: Row(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
