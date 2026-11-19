@@ -334,6 +334,7 @@ void main() {
     String id, {
     RideExportClips clips = RideExportClips.all,
     bool includeRideData = true,
+    RideExportSection? section,
   }) async {
     final source = await loadRideExportSource(
       await screenRecord(telemetry, id),
@@ -342,6 +343,7 @@ void main() {
       source,
       clips: clips,
       includeRideData: includeRideData,
+      section: section,
     );
   }
 
@@ -556,6 +558,215 @@ void main() {
         'MOTOCAM-EXPORT.txt',
       ]);
     });
+
+    group('a section', () {
+      Future<RideFileStamp?> sized(String path) async =>
+          const RideFileStamp(size: 10, modifiedUs: 0, changedUs: 0);
+
+      Future<RideExportPlan> section(
+        RideRecord record,
+        int first,
+        int last, {
+        RideFileStatSource? stat,
+        bool withData = true,
+      }) => planRideExport(
+        RideExportSource(
+          ride: record,
+          rideDataSha256: withData ? 'h0' : null,
+          rideDataBytes: withData ? 5 : null,
+        ),
+        clips: RideExportClips.section,
+        includeRideData: true,
+        section: RideExportSection(first, last),
+        stat: stat ?? sized,
+      );
+
+      List<String> omitted(RideExportPlan p) => <String>[
+        for (final o in p.notExported) '${o.name}:${o.reason.name}',
+      ];
+
+      test('exports only its clips; the rest are not selected', () async {
+        final p = await section(ride(), 2, 3);
+        expect(p.clipChoice, RideExportClips.section);
+        expect(p.section, const RideExportSection(2, 3));
+        expect(p.clips.map((c) => c.name), <String>['b.mp4', 'c.mp4']);
+        expect(p.clipBytes, 20);
+        expect(omitted(p), <String>['a.mp4:notSelected']);
+        expect(p.folderName, 'MotoCam ride x (clips 2 to 3)');
+        expect(p.rideData, isNotNull);
+        final videoOnly = await section(ride(), 2, 3, withData: false);
+        expect(
+          videoOnly.folderName,
+          'MotoCam ride x (clips 2 to 3, video only)',
+        );
+        expect(videoOnly.rideData, isNull);
+      });
+
+      test('its boundaries are inclusive', () async {
+        final first = await section(ride(), 1, 1);
+        expect(first.clips.map((c) => c.name), <String>['a.mp4']);
+        expect(omitted(first), <String>[
+          'b.mp4:notSelected',
+          'c.mp4:notSelected',
+        ]);
+        final last = await section(ride(), 3, 3);
+        expect(last.clips.map((c) => c.name), <String>['c.mp4']);
+        final whole = await section(ride(), 1, 3);
+        expect(whole.clips.map((c) => c.name), <String>[
+          'a.mp4',
+          'b.mp4',
+          'c.mp4',
+        ]);
+        expect(whole.notExported, isEmpty);
+      });
+
+      test('a single-clip ride can be exported as a section', () async {
+        final p = await section(ride(segments: <String>['a']), 1, 1);
+        expect(p.clips.map((c) => c.name), <String>['a.mp4']);
+        expect(p.folderName, 'MotoCam ride x (clips 1 to 1)');
+      });
+
+      test('a missing clip inside the range is listed, never copied', () async {
+        final p = await section(
+          ride(),
+          1,
+          2,
+          stat: (path) async => path.endsWith('b.mp4') ? null : sized(path),
+        );
+        expect(p.clips.map((c) => c.name), <String>['a.mp4']);
+        expect(omitted(p), <String>['b.mp4:missing', 'c.mp4:notSelected']);
+        expect(p.expectedNames, isNot(contains('b.mp4')));
+      });
+
+      test('incidents outside the range are in no kept clip', () async {
+        final p = await section(
+          ride(incidents: <int>[30000, 65000, 130000, 181001]),
+          2,
+          2,
+        );
+        // 65000 lies in b (its lead-up is a); 181001 lies in no clip.
+        expect(p.unmappedIncidentsMs, <int>[30000, 130000, 181001]);
+        final whole = await section(
+          ride(incidents: <int>[30000, 130000]),
+          1,
+          3,
+        );
+        expect(whole.unmappedIncidentsMs, isEmpty);
+      });
+
+      test('without a timeline it lists no incident and has no span', () async {
+        final record = ride(
+          timeline: const <RideSegmentTimelineEntry>[],
+          incidents: <int>[30000],
+        );
+        final p = await section(record, 2, 3);
+        expect(p.clips.map((c) => c.name), <String>['b.mp4', 'c.mp4']);
+        expect(p.unmappedIncidentsMs, isEmpty);
+        expect(
+          rideExportSectionSpan(record, const RideExportSection(2, 3)),
+          isNull,
+        );
+        expect(rideIncidentClipNumbers(record), isEmpty);
+      });
+
+      test('its span runs from its first clip start to its last clip end', () {
+        expect(rideExportSectionSpan(ride(), const RideExportSection(2, 3)), (
+          fromMs: 60200,
+          toMs: 180000,
+        ));
+        expect(rideExportSectionSpan(ride(), const RideExportSection(1, 1)), (
+          fromMs: 0,
+          toMs: 60000,
+        ));
+        // The ride starts at local midnight.
+        expect(rideExportClockText(ride(), 125000), '00:02');
+        expect(rideExportClockText(ride(), 14 * 3600000 + 5 * 60000), '14:05');
+      });
+
+      test('clip numbers follow the trusted clips list', () {
+        final record = ride(incidents: <int>[30000, 130000, 181001]);
+        expect(rideIncidentClipNumbers(record), <int>[1, 3]);
+        expect(rideClipNumberOf(record, '$_sep${'r'}${_sep}b.mp4'), 2);
+        expect(rideClipNumberOf(record, '$_sep${'r'}${_sep}z.mp4'), isNull);
+      });
+
+      test('a range outside the ride, or no range, is refused', () async {
+        await expectLater(section(ride(), 0, 2), throwsArgumentError);
+        await expectLater(section(ride(), 2, 4), throwsArgumentError);
+        await expectLater(section(ride(), 3, 2), throwsArgumentError);
+        await expectLater(
+          planRideExport(
+            RideExportSource(ride: ride()),
+            clips: RideExportClips.section,
+            includeRideData: false,
+          ),
+          throwsArgumentError,
+        );
+      });
+
+      test('the manifest and README describe it', () async {
+        final record = ride();
+        final p = await section(record, 2, 3);
+        final manifest = buildExportManifest(
+          p,
+          clips: const <RideExportFileEntry>[],
+          rideData: null,
+          destination: RideExportDestination.folder,
+          exportedAt: exportedAt,
+        );
+        expect(manifest['clips'], 'section');
+        expect(manifest['section'], <String, Object?>{
+          'firstClip': 2,
+          'lastClip': 3,
+          'clipCount': 3,
+          'fromMs': 60200,
+          'toMs': 180000,
+        });
+        final readme = buildExportReadme(
+          p,
+          clips: const <RideExportFileEntry>[],
+          rideData: null,
+          destination: RideExportDestination.folder,
+          exportedAt: exportedAt,
+        );
+        final from = rideExportClockText(record, 60200);
+        final to = rideExportClockText(record, 180000);
+        expect(
+          readme,
+          contains('Clips: clips 2 to 3 of 3 (ride time $from to $to)\n'),
+        );
+
+        final untimed = await section(
+          ride(timeline: const <RideSegmentTimelineEntry>[]),
+          1,
+          2,
+        );
+        final untimedManifest = buildExportManifest(
+          untimed,
+          clips: const <RideExportFileEntry>[],
+          rideData: null,
+          destination: RideExportDestination.share,
+          exportedAt: exportedAt,
+        );
+        expect(untimedManifest['section'], <String, Object?>{
+          'firstClip': 1,
+          'lastClip': 2,
+          'clipCount': 3,
+          'fromMs': null,
+          'toMs': null,
+        });
+        expect(
+          buildExportReadme(
+            untimed,
+            clips: const <RideExportFileEntry>[],
+            rideData: null,
+            destination: RideExportDestination.share,
+            exportedAt: exportedAt,
+          ),
+          contains('Clips: clips 1 to 2 of 3\n'),
+        );
+      });
+    });
   });
 
   group('folder naming', () {
@@ -596,6 +807,34 @@ void main() {
       expect(
         name(RideExportClips.all, false),
         'MotoCam ride 1794558143532_1aec41b3127e1626 (all clips, video only)',
+      );
+    });
+
+    test('a section names its clips, with and without ride data', () {
+      final ride = named('1794558143532_1aec41b3127e1626', 'REC_1.mp4');
+      String name(int first, int last, bool data) => rideExportFolderName(
+        ride,
+        clips: RideExportClips.section,
+        includeRideData: data,
+        section: RideExportSection(first, last),
+      );
+      expect(
+        name(3, 5, true),
+        'MotoCam ride 1794558143532_1aec41b3127e1626 (clips 3 to 5)',
+      );
+      expect(
+        name(3, 5, false),
+        'MotoCam ride 1794558143532_1aec41b3127e1626 '
+        '(clips 3 to 5, video only)',
+      );
+      expect(name(3, 3, true), isNot(name(3, 5, true)));
+      expect(
+        () => rideExportFolderName(
+          ride,
+          clips: RideExportClips.section,
+          includeRideData: true,
+        ),
+        throwsArgumentError,
       );
     });
 
@@ -1234,6 +1473,8 @@ void main() {
       expect(read.manifest['rideData'], isNull);
       expect(read.manifest['rideDataIncluded'], isFalse);
       expect(read.manifest['clips'], 'evidence');
+      expect(read.manifest.containsKey('section'), isTrue);
+      expect(read.manifest['section'], isNull);
       final files = (read.manifest['files'] as List)
           .cast<Map<String, dynamic>>();
       expect(files.single['recordedSha256'], isNotNull);
@@ -1260,6 +1501,61 @@ void main() {
         'a.mp4',
         'manifest.json',
       ]);
+    });
+
+    test('a section exports its clips and the whole ride file', () async {
+      final a = clip('a.mp4', 'aaaa');
+      final b = clip('b.mp4', 'bbbb');
+      final c = clip('c.mp4', 'cccc');
+      final telemetry = await writeRide(
+        's9',
+        <File>[a, b, c],
+        incidents: <Map<String, dynamic>>[
+          <String, dynamic>{'elapsedMs': 30000},
+          <String, dynamic>{'elapsedMs': 90000},
+        ],
+      );
+      final p = await plan(
+        telemetry,
+        's9',
+        clips: RideExportClips.section,
+        section: const RideExportSection(2, 3),
+      );
+      expect(p.folderName, 'MotoCam ride s9 (clips 2 to 3)');
+      final read = await exportAndRead(p);
+      expect(namesIn(exportFolder(p)), <String>[
+        'MOTOCAM-EXPORT.txt',
+        'b.mp4',
+        'c.mp4',
+        'manifest.json',
+        'ride_s9.telemetry.json',
+      ]);
+      expect(read.manifest['clips'], 'section');
+      expect(read.manifest['section'], <String, Object?>{
+        'firstClip': 2,
+        'lastClip': 3,
+        'clipCount': 3,
+        'fromMs': 60000,
+        'toMs': 179800,
+      });
+      expect(read.manifest['notExported'], <Object?>[
+        <String, Object?>{
+          'name': 'a.mp4',
+          'recordedSha256': sha256.convert(utf8.encode('aaaa')).toString(),
+          'reason': 'notSelected',
+        },
+      ]);
+      final ride = p.source.ride;
+      expect(
+        read.readme,
+        contains(
+          'Clips: clips 2 to 3 of 3 (ride time '
+          '${rideExportClockText(ride, 60000)} to '
+          '${rideExportClockText(ride, 179800)})\n',
+        ),
+      );
+      expect(read.readme, contains('Incident at 00:30 not in any kept clip'));
+      expect(read.readme, isNot(contains('Incident at 01:30')));
     });
 
     test('a video-only recovery exports its video without ride data', () async {
