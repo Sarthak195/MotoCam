@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Roots the ride export FileProvider may share (RideExport.shareFiles):
+     the private recordings folder (filesDir/MotoCam Recordings) and the
+     share staging folder of the manifest and README (cacheDir/ride_export).
+     A path outside them cannot be shared (NOT_SHAREABLE). -->
+<paths>
+    <files-path name="rides" path="MotoCam Recordings/" />
+    <cache-path name="ride_export" path="ride_export/" />
+</paths>
