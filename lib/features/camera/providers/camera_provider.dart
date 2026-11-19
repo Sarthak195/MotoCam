@@ -21,6 +21,8 @@ import '../../history/models/ride_record.dart';
 import '../../history/services/gallery_links.dart';
 import '../../history/services/legacy_ride_import.dart';
 import '../../history/services/ride_deletion.dart';
+import '../../history/services/ride_export.dart';
+import '../../../core/services/ride_export_channel.dart';
 import '../../../core/services/legacy_recordings_access.dart';
 import 'dart:io';
 import 'dart:async';
@@ -69,6 +71,35 @@ class SegmentTimelineEntry {
     'startMs': startMs,
     'endMs': endMs,
   };
+}
+
+/// Where a running ride export is: the ride ([rideKey], its telemetry path
+/// or else its video path), the files done of [total] and the
+/// [destination].
+@immutable
+class RideExportProgress {
+  /// Creates a progress value.
+  const RideExportProgress({
+    required this.rideKey,
+    required this.done,
+    required this.total,
+    required this.destination,
+  });
+
+  /// The ride's telemetry path, or its video path when it has none.
+  final String rideKey;
+
+  /// Files done.
+  final int done;
+
+  /// Files in the run.
+  final int total;
+
+  /// Folder or share.
+  final RideExportDestination destination;
+
+  /// The share of files done, from 0 to 1 (`null` while [total] is 0).
+  double? get fraction => total <= 0 ? null : (done / total).clamp(0.0, 1.0);
 }
 
 /// Manages the device camera lifecycle, segmented video recording, rolling
@@ -140,6 +171,11 @@ class CameraProvider extends ChangeNotifier {
   /// budget is not enforced.
   String? Function()? currentRideSessionIdSource;
 
+  /// Returns whether the telemetry provider is still writing a ride file
+  /// (its `isPersistingRide`), so a ride export waits for it. Set by the
+  /// recording screen.
+  bool Function()? isPersistingRideSource;
+
   ResolutionPreset _resolutionPreset = ResolutionPreset.medium;
   int _recordingFps = 30;
   int _videoBitrateBps = 8 * 1000 * 1000;
@@ -181,6 +217,15 @@ class CameraProvider extends ChangeNotifier {
   String? _lastRecordingError;
   int _consecutiveRollStopFailures = 0;
   bool _isDisposed = false;
+
+  // Set for the whole of a ride export run (one at a time, app-wide).
+  bool _isRideExportRunning = false;
+
+  // The exporter of the running ride export, for cancelRideExport.
+  RideExporter? _rideExporter;
+
+  final ValueNotifier<RideExportProgress?> _rideExportProgress =
+      ValueNotifier<RideExportProgress?>(null);
 
   /// Sequence number of the segment currently being recorded (1-based per
   /// session; 0 before the first segment starts).
@@ -314,6 +359,9 @@ class CameraProvider extends ChangeNotifier {
     }
     if (_legacyRideImport.isRunning) {
       return 'An import is already running.';
+    }
+    if (_isRideExportRunning) {
+      return 'A ride is being exported. Try again when the export finishes.';
     }
     return null;
   }
@@ -2585,6 +2633,154 @@ class CameraProvider extends ChangeNotifier {
       return null;
     } finally {
       releaseMigration();
+    }
+  }
+
+  /// Progress of the running ride export, or `null` when none runs. Ride
+  /// History shows it on the ride's row and Playback in its app bar.
+  ValueListenable<RideExportProgress?> get rideExportProgress =>
+      _rideExportProgress;
+
+  /// Why a ride export cannot start now, as a rider-facing sentence, or
+  /// `null` when it can (see [rideExportBlockedReasonFor]).
+  String? get rideExportBlockedReason => rideExportBlockedReasonFor(
+    isAndroid: Platform.isAndroid,
+    recording: isRecording || _isStartingRecording || _isStoppingRecording,
+    migrationRunning: _recordingsMigration.isRunning,
+    importRunning: _legacyRideImport.isRunning,
+    storageBudgetRunning: _isStorageBudgetRunning,
+    persistingRide: isPersistingRideSource?.call() ?? false,
+    maintenancePending:
+        _isDeferredMaintenanceRunning ||
+        (_deferredMaintenanceTimer?.isActive ?? false),
+    exportRunning: _isRideExportRunning,
+  );
+
+  /// The ride export gate as a function of its flags; the first match
+  /// wins: off Android, a recording starting, running or stopping, the
+  /// move into private storage, an import, the storage budget, a ride file
+  /// still being written, the deferred maintenance prune (queued or
+  /// running), then another export. `null` means an export may start.
+  @visibleForTesting
+  static String? rideExportBlockedReasonFor({
+    required bool isAndroid,
+    required bool recording,
+    required bool migrationRunning,
+    required bool importRunning,
+    required bool storageBudgetRunning,
+    required bool persistingRide,
+    required bool maintenancePending,
+    required bool exportRunning,
+  }) {
+    if (!isAndroid) {
+      return 'Export is available on Android only.';
+    }
+    if (recording) {
+      return 'Stop recording before exporting.';
+    }
+    if (migrationRunning) {
+      return 'Rides are being moved to private storage. Try again when the '
+          'move finishes.';
+    }
+    if (importRunning) {
+      return 'Rides are being imported from the old folder. Try again when '
+          'the import finishes.';
+    }
+    if (storageBudgetRunning) {
+      return 'Old rides are being deleted for the storage budget. Try again '
+          'in a moment.';
+    }
+    if (persistingRide) {
+      return 'A ride is still being saved. Try again in a moment.';
+    }
+    if (maintenancePending) {
+      return 'MotoCam is tidying up after the last recording. Try again in '
+          'a moment.';
+    }
+    if (exportRunning) {
+      return 'An export is already running.';
+    }
+    return null;
+  }
+
+  /// Stops the running ride export at once (the copy in flight is
+  /// cancelled); the run ends with [RideExportOutcome.cancelled]. Does
+  /// nothing when no export runs.
+  Future<void> cancelRideExport() async {
+    await _rideExporter?.cancel();
+  }
+
+  /// Runs [plan] into a folder of the picked tree [treeUri] or, when
+  /// [destination] is [RideExportDestination.share], to the share sheet,
+  /// with the screen kept on and [rideExportProgress] published under
+  /// [rideKey] (the ride's telemetry path, else its video path). The run
+  /// pauses when a recording starts; [cancelRideExport] stops it.
+  ///
+  /// Returns `null` when [rideExportBlockedReason] refuses it, a folder run
+  /// has no [treeUri], or the cache directory is unavailable. The caller
+  /// holds [holdRecordingsMigration] around the whole flow and releases it
+  /// after this returns, so the hold ends after the export flag clears.
+  Future<RideExportResult?> runRideExport(
+    RideExportPlan plan, {
+    required String rideKey,
+    required RideExportDestination destination,
+    String? treeUri,
+  }) async {
+    final folder = destination == RideExportDestination.folder;
+    if (rideExportBlockedReason != null || (folder && treeUri == null)) {
+      return null;
+    }
+    // Set with no await after the gate check, so a second run is refused.
+    _isRideExportRunning = true;
+    const native = RideExportChannel();
+    final total =
+        plan.clips.length + (plan.rideData == null ? 0 : 1) + (folder ? 2 : 0);
+    void publish(int done) {
+      if (!_isDisposed) {
+        _rideExportProgress.value = RideExportProgress(
+          rideKey: rideKey,
+          done: done,
+          total: total,
+          destination: destination,
+        );
+      }
+    }
+
+    publish(0);
+    try {
+      await native.setKeepScreenOn(true);
+      final String cacheDirectory;
+      try {
+        cacheDirectory = (await getTemporaryDirectory()).path;
+      } catch (e) {
+        _logError('Ride export: no cache directory: $e');
+        return null;
+      }
+      final exporter = RideExporter(
+        native: native,
+        cacheDirectory: cacheDirectory,
+        shouldPause: () =>
+            _isDisposed ||
+            isRecording ||
+            _isStartingRecording ||
+            _isStoppingRecording,
+      );
+      _rideExporter = exporter;
+      void onProgress(int done, int _) => publish(done);
+      return folder
+          ? await exporter.exportToFolder(
+              plan,
+              treeUri: treeUri!,
+              onProgress: onProgress,
+            )
+          : await exporter.share(plan, onProgress: onProgress);
+    } finally {
+      await native.setKeepScreenOn(false);
+      if (!_isDisposed) {
+        _rideExportProgress.value = null;
+      }
+      _rideExporter = null;
+      _isRideExportRunning = false;
     }
   }
 

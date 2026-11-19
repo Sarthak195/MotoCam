@@ -793,6 +793,8 @@ class _RecordingScreenState extends State<RecordingScreen>
     // Off by default; the budget never deletes the ride being recorded.
     camera.storageBudgetBytes = settings.recordingsStorageBudgetBytes;
     camera.currentRideSessionIdSource = () => telemetry.rideSessionId;
+    // A ride export waits while the ride file is still being written.
+    camera.isPersistingRideSource = () => telemetry.isPersistingRide;
     final started = await camera.startRecording();
     var backgroundProtected = true;
     if (started && camera.isRecording) {
