@@ -5,6 +5,11 @@ import android.content.ActivityNotFoundException
 import android.content.ClipData
 import android.content.Intent
 import android.database.Cursor
+import android.media.MediaCodec
+import android.media.MediaExtractor
+import android.media.MediaFormat
+import android.media.MediaMetadataRetriever
+import android.media.MediaMuxer
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
@@ -23,6 +28,7 @@ import java.io.FileNotFoundException
 import java.io.FileOutputStream
 import java.io.InputStream
 import java.io.OutputStream
+import java.nio.ByteBuffer
 import java.security.MessageDigest
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.RejectedExecutionException
@@ -35,7 +41,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  * Storage Access Framework, each checked by reading it back, plus hashing
  * and the share sheet for a share. Dart side:
  * `lib/core/services/ride_export_channel.dart`; contract: ride export
- * design, section 11.8.
+ * design, sections 11.8 and 13.1.
  *
  * The picked tree grant is never persisted (`takePersistableUriPermission`
  * is not called): a killed export is run again with a new pick, and files
@@ -55,8 +61,8 @@ import java.util.concurrent.atomic.AtomicBoolean
  *   the new folder another name; it is deleted), `FOLDER_NOT_EMPTY`,
  *   `NOT_WRITABLE` (the tree does not support creating documents, or
  *   creating returned nothing), `WRITE_FAILED`, `INVALID_ARGS`.
- * - `exportFile({folderUri, sourcePath, name, mimeType})` copies the
- *   private file `sourcePath` into the folder as `name` and returns
+ * - `exportFile({folderUri, sourcePath, name, mimeType, replace})` copies
+ *   the private file `sourcePath` into the folder as `name` and returns
  *   `{bytes, sourceSha256, copySha256, skipped, synced}`. A file of that
  *   name already there with the same content is skipped (`skipped` true,
  *   nothing written); a shorter one is a partial copy from a killed run
@@ -70,12 +76,29 @@ import java.util.concurrent.atomic.AtomicBoolean
  *   `CANCELLED`, `SOURCE_NOT_FOUND`, `EXISTS_DIFFERENT`, `NAME_CONFLICT`,
  *   `NOT_WRITABLE`, `WRITE_FAILED` (also a source read failure or a lost
  *   grant), `COPY_MISMATCH`, `INVALID_ARGS`. On any error the document
- *   this call created is deleted; an existing one is kept.
+ *   this call created is deleted; an existing one is kept. With `replace`
+ *   true (default false; used for trimmed copies, which differ on every
+ *   run) an existing file of that name is deleted and the file copied
+ *   fresh, without the size and hash comparison.
  * - `hashFile({path})` returns `{bytes, sha256}` of a private file.
  *   Errors `CANCELLED`, `SOURCE_NOT_FOUND`, `READ_FAILED`, `INVALID_ARGS`.
- * - `cancel()` makes the `exportFile` or `hashFile` in progress (or the
- *   next one already queued) stop at its next buffer; returns true. The
- *   flag is reset when `exportFile` or `hashFile` is called.
+ * - `trimClip({sourcePath, targetPath, startUs, endUs})` writes the part
+ *   of the private clip `sourcePath` from `startUs` to `endUs` (source
+ *   microseconds) to `targetPath` with MediaExtractor and MediaMuxer,
+ *   without re-encoding: the first video and audio tracks are copied, the
+ *   start snaps back to the video keyframe at or before `startUs`,
+ *   timestamps are rebased so that keyframe is 0 (samples before it are
+ *   dropped), each track stops after `endUs`, and the source rotation is
+ *   kept. Returns `{bytes, firstUs, lastUs}`: `firstUs` is the source time
+ *   of the first video keyframe written, `lastUs` the source time of the
+ *   last sample written (either track). The target must be under
+ *   `<cacheDir>/ride_export/`; a partial target is deleted on any error.
+ *   Errors `CANCELLED`, `SOURCE_NOT_FOUND`, `TRIM_FAILED` (no video track,
+ *   an extractor or muxer failure; message kept), `INVALID_ARGS`.
+ * - `cancel()` makes the `exportFile`, `hashFile` or `trimClip` in
+ *   progress (or the next one already queued) stop at its next buffer or
+ *   sample; returns true. The flag is reset when `exportFile`, `hashFile`
+ *   or `trimClip` is called.
  * - `shareFiles({paths, mimeTypes, subject})` opens the share sheet
  *   (`ACTION_SEND_MULTIPLE` through `Intent.createChooser`) with read-only
  *   `content://` URIs from the app's FileProvider and returns true. The
@@ -105,6 +128,12 @@ class RideExport(
         const val REQUEST_PICK_TREE = ActivityRequestCodes.PICK_EXPORT_TREE
 
         private const val BUFFER_BYTES = 1024 * 1024
+
+        /** The [trimClip] sample buffer when no track reports its largest sample. */
+        private const val TRIM_FALLBACK_SAMPLE_BYTES = 8 * 1024 * 1024
+
+        /** The cache folder every [trimClip] target must be under. */
+        private const val EXPORT_CACHE_DIR = "ride_export"
         private const val MANIFEST_NAME = "manifest.json"
         private const val README_NAME = "MOTOCAM-EXPORT.txt"
         private const val TAG = "MotoCam"
@@ -168,6 +197,7 @@ class RideExport(
                 val sourcePath = call.argument<String>("sourcePath")
                 val name = call.argument<String>("name")
                 val mimeType = call.argument<String>("mimeType")
+                val replace = call.argument<Boolean>("replace") ?: false
                 if (folderUri.isNullOrBlank() || sourcePath.isNullOrBlank() ||
                     name.isNullOrBlank() || mimeType.isNullOrBlank()
                 ) {
@@ -182,7 +212,28 @@ class RideExport(
                 // call waits in the queue still applies to it.
                 cancelRequested.set(false)
                 runInBackground(result, "WRITE_FAILED") {
-                    exportFile(Uri.parse(folderUri), File(sourcePath), name, mimeType)
+                    exportFile(Uri.parse(folderUri), File(sourcePath), name, mimeType, replace)
+                }
+            }
+            "trimClip" -> {
+                val sourcePath = call.argument<String>("sourcePath")
+                val targetPath = call.argument<String>("targetPath")
+                // A Dart int arrives as an Integer or a Long, by its size.
+                val startUs = call.argument<Number>("startUs")?.toLong()
+                val endUs = call.argument<Number>("endUs")?.toLong()
+                if (sourcePath.isNullOrBlank() || targetPath.isNullOrBlank() ||
+                    startUs == null || endUs == null || startUs < 0 || endUs <= startUs
+                ) {
+                    result.error(
+                        "INVALID_ARGS",
+                        "sourcePath, targetPath and 0 <= startUs < endUs are required",
+                        null,
+                    )
+                    return
+                }
+                cancelRequested.set(false)
+                runInBackground(result, "TRIM_FAILED") {
+                    trimClip(File(sourcePath), File(targetPath), startUs, endUs)
                 }
             }
             "hashFile" -> {
@@ -304,13 +355,15 @@ class RideExport(
 
     /**
      * Copies [source] into the folder [folderUri] as [name], or skips it
-     * when an equal file is there; see the class comment.
+     * when an equal file is there (never with [replace]); see the class
+     * comment.
      */
     private fun exportFile(
         folderUri: Uri,
         source: File,
         name: String,
         mimeType: String,
+        replace: Boolean,
     ): Map<String, Any> {
         if (!source.isFile) {
             throw ExportError("SOURCE_NOT_FOUND", "source file not found")
@@ -319,33 +372,36 @@ class RideExport(
             ?: throw ExportError("WRITE_FAILED", "cannot read the export folder")
         val existing = listChildren(folderUri).firstOrNull { !it.isDirectory && it.name == name }
         if (existing != null) {
-            val sourceLength = source.length()
-            val knownSize = existing.size
-            if (knownSize == null || knownSize >= sourceLength) {
-                val copy = hashDocument(existing.uri)
-                if (copy.bytes == sourceLength) {
-                    val sourceDigest = hashSource(source)
-                    if (sourceDigest.bytes == copy.bytes && sourceDigest.sha256 == copy.sha256) {
-                        return mapOf(
-                            "bytes" to sourceDigest.bytes,
-                            "sourceSha256" to sourceDigest.sha256,
-                            "copySha256" to copy.sha256,
-                            "skipped" to true,
-                            "synced" to true,
-                        )
+            if (!replace) {
+                val sourceLength = source.length()
+                val knownSize = existing.size
+                if (knownSize == null || knownSize >= sourceLength) {
+                    val copy = hashDocument(existing.uri)
+                    if (copy.bytes == sourceLength) {
+                        val sourceDigest = hashSource(source)
+                        if (sourceDigest.bytes == copy.bytes && sourceDigest.sha256 == copy.sha256) {
+                            return mapOf(
+                                "bytes" to sourceDigest.bytes,
+                                "sourceSha256" to sourceDigest.sha256,
+                                "copySha256" to copy.sha256,
+                                "skipped" to true,
+                                "synced" to true,
+                            )
+                        }
+                        throw ExportError("EXISTS_DIFFERENT", "a different $name is already in the folder")
                     }
-                    throw ExportError("EXISTS_DIFFERENT", "a different $name is already in the folder")
-                }
-                // A killed run only ever leaves a shorter copy. A longer one
-                // may be the only intact copy of a clip that has changed on
-                // the phone since: never replace it.
-                if (copy.bytes > sourceLength) {
-                    throw ExportError("EXISTS_DIFFERENT", "a longer $name is already in the folder")
+                    // A killed run only ever leaves a shorter copy. A longer one
+                    // may be the only intact copy of a clip that has changed on
+                    // the phone since: never replace it.
+                    if (copy.bytes > sourceLength) {
+                        throw ExportError("EXISTS_DIFFERENT", "a longer $name is already in the folder")
+                    }
                 }
             }
-            // Shorter than the source: a partial copy left by a killed run.
+            // Shorter than the source (a partial copy left by a killed
+            // run), or a trimmed copy made again ([replace]).
             if (!deleteDocument(existing.uri)) {
-                throw ExportError("WRITE_FAILED", "cannot replace the partial $name")
+                throw ExportError("WRITE_FAILED", "cannot replace the existing $name")
             }
         }
         val input = openSource(source)
@@ -424,6 +480,156 @@ class RideExport(
             throw ExportError("WRITE_FAILED", "sync failed: ${e.message}")
         }
         return true
+    }
+
+    /**
+     * Writes [source] from [startUs] to [endUs] into [target] without
+     * re-encoding and returns `{bytes, firstUs, lastUs}`; see the class
+     * comment.
+     */
+    private fun trimClip(source: File, target: File, startUs: Long, endUs: Long): Map<String, Any> {
+        val exportRoot = File(activity.cacheDir, EXPORT_CACHE_DIR).canonicalFile
+        val output = target.canonicalFile
+        if (!output.path.startsWith(exportRoot.path + File.separator)) {
+            throw ExportError("INVALID_ARGS", "targetPath must be under the export cache")
+        }
+        if (!source.isFile) {
+            throw ExportError("SOURCE_NOT_FOUND", "source file not found")
+        }
+        output.parentFile?.mkdirs()
+        val extractor = MediaExtractor()
+        var muxer: MediaMuxer? = null
+        var finished = false
+        var firstUs = -1L
+        var lastUs = -1L
+        try {
+            extractor.setDataSource(source.path)
+            var videoTrack = -1
+            var audioTrack = -1
+            for (track in 0 until extractor.trackCount) {
+                val mime = extractor.getTrackFormat(track).getString(MediaFormat.KEY_MIME) ?: continue
+                if (videoTrack < 0 && mime.startsWith("video/")) {
+                    videoTrack = track
+                } else if (audioTrack < 0 && mime.startsWith("audio/")) {
+                    audioTrack = track
+                }
+            }
+            if (videoTrack < 0) {
+                throw ExportError("TRIM_FAILED", "the clip has no video track")
+            }
+            val tracks = if (audioTrack < 0) listOf(videoTrack) else listOf(videoTrack, audioTrack)
+
+            // The keyframe first, with only the video selected; then the
+            // audio from that keyframe, not from startUs.
+            extractor.selectTrack(videoTrack)
+            extractor.seekTo(startUs, MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
+            firstUs = extractor.sampleTime
+            if (firstUs < 0 || firstUs > endUs) {
+                throw ExportError("TRIM_FAILED", "no video keyframe before $endUs us")
+            }
+            if (audioTrack >= 0) {
+                extractor.selectTrack(audioTrack)
+                extractor.seekTo(firstUs, MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
+            }
+
+            val rotation = readRotation(source)
+            val mux = MediaMuxer(output.path, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+            muxer = mux
+            if (rotation == 90 || rotation == 180 || rotation == 270) {
+                mux.setOrientationHint(rotation)
+            }
+            val muxTracks = IntArray(extractor.trackCount) { -1 }
+            var largestSample = 0
+            for (track in tracks) {
+                val format = extractor.getTrackFormat(track)
+                muxTracks[track] = mux.addTrack(format)
+                if (format.containsKey(MediaFormat.KEY_MAX_INPUT_SIZE)) {
+                    largestSample = maxOf(largestSample, format.getInteger(MediaFormat.KEY_MAX_INPUT_SIZE))
+                }
+            }
+            // A 4K keyframe can exceed 1 MiB; a too small buffer fails the read.
+            val buffer = ByteBuffer.allocate(
+                if (largestSample > 0) maxOf(largestSample, BUFFER_BYTES) else TRIM_FALLBACK_SAMPLE_BYTES,
+            )
+            mux.start()
+
+            val info = MediaCodec.BufferInfo()
+            val ended = BooleanArray(extractor.trackCount)
+            var open = tracks.size
+            lastUs = firstUs
+            while (open > 0) {
+                if (cancelRequested.get()) {
+                    throw ExportError("CANCELLED", "export cancelled")
+                }
+                val track = extractor.sampleTrackIndex
+                if (track < 0) {
+                    break
+                }
+                val timeUs = extractor.sampleTime
+                if (ended[track]) {
+                    // Still delivered after unselectTrack: skip it.
+                    extractor.advance()
+                    continue
+                }
+                if (timeUs > endUs) {
+                    ended[track] = true
+                    open--
+                    extractor.unselectTrack(track)
+                    continue
+                }
+                // Samples before the keyframe (audio, or leading frames of an
+                // open GOP) are dropped, so no rebased time is negative.
+                if (timeUs >= firstUs) {
+                    val size = extractor.readSampleData(buffer, 0)
+                    if (size < 0) {
+                        break
+                    }
+                    val keyFrame = extractor.sampleFlags and MediaExtractor.SAMPLE_FLAG_SYNC != 0
+                    info.set(
+                        0,
+                        size,
+                        timeUs - firstUs,
+                        if (keyFrame) MediaCodec.BUFFER_FLAG_KEY_FRAME else 0,
+                    )
+                    mux.writeSampleData(muxTracks[track], buffer, info)
+                    if (timeUs > lastUs) {
+                        lastUs = timeUs
+                    }
+                }
+                extractor.advance()
+            }
+            mux.stop()
+            finished = true
+        } finally {
+            releaseQuietly("extractor") { extractor.release() }
+            muxer?.let { releaseQuietly("muxer") { it.release() } }
+            if (!finished) {
+                output.delete()
+            }
+        }
+        return mapOf("bytes" to output.length(), "firstUs" to firstUs, "lastUs" to lastUs)
+    }
+
+    /** The video rotation of [source] in degrees (0 when not reported). */
+    private fun readRotation(source: File): Int {
+        // release(), not close(): close() exists only from API 29.
+        val retriever = MediaMetadataRetriever()
+        try {
+            retriever.setDataSource(source.path)
+            return retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)
+                ?.toIntOrNull() ?: 0
+        } finally {
+            releaseQuietly("retriever") { retriever.release() }
+        }
+    }
+
+    /** Runs [release], logging a failure (cleanup must not mask the result). */
+    private inline fun releaseQuietly(what: String, release: () -> Unit) {
+        try {
+            release()
+        } catch (e: Exception) {
+            Log.w(TAG, "ride export $what release failed", e)
+        }
     }
 
     /** Returns `{bytes, sha256}` of the private file [file]. */
