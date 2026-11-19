@@ -796,7 +796,25 @@ Every step is required; a step that fails says what is wrong, not that the ride 
    - version 2: remove `integrity.payloadHash`;
    - version 1 (no `envelopeVersion`): remove the whole `integrity` key;
    - then take the SHA-256 (lowercase hex) of the canonical JSON of the result: keys sorted by UTF-16 code unit at every level, list order kept, compact, numbers printed as Dart prints them. The canonical form is defined in [What is hashed](#what-is-hashed) (`hashJsonCanonical`).
-3. **Signature** (version 3 only). The message is the 64 ASCII characters of the lowercase `payloadHash`, with no newline. `integrity.signature.sig` is base64 of a **DER** ECDSA signature (`SEQUENCE { r, s }`), not JOSE `r||s`. `integrity.signature.publicKey` is base64 of an X.509 SubjectPublicKeyInfo DER holding a P-256 key, and `alg` is `ES256`. With OpenSSL (checked with 3.5), where `PAYLOADHASH`, `SIG` and `PUBLICKEY` are the three values from the ride data:
+
+   The README prints this Python 3 recipe (the Dart constant `_payloadHashRecipe`) at column 1, to save as `check.py` and run as `python3 check.py RIDEDATA` (Linux or macOS) or `py check.py RIDEDATA` (Windows) on the ride data file. It prints the hash and `MATCH` or `MISMATCH`:
+
+   ```python
+   import hashlib, json, sys
+   d = json.load(open(sys.argv[1], encoding='utf-8'))
+   i = dict(d['integrity'])
+   stored = i.pop('payloadHash')
+   v = i.get('envelopeVersion')
+   if v == 3: i.pop('signature', None)
+   if v in (2, 3): d['integrity'] = i
+   else: del d['integrity']
+   s = json.dumps(d, sort_keys=True, separators=(',', ':'), ensure_ascii=False)
+   h = hashlib.sha256(s.encode('utf-8')).hexdigest()
+   print(h, 'MATCH' if h == stored else 'MISMATCH')
+   ```
+
+   It reproduced the stored `payloadHash` of a real signed export (envelope version 3, a bench ride without motion) and of a real version 2 ride, and gave `MISMATCH` for a copy with one speed changed. It gives a false `MISMATCH` on a real version 2 checkpoint whose `distanceKm` was `0.00005255301962689643` (Python prints `5.255301962689643e-05`). The README follows it with: `Numbers are hashed as Dart prints them. Python prints a float nearer to 0 than 0.0001 (other than 0), or of 1e16 or more, differently (5e-05 for 0.00005), and real rides contain such values (a small distanceKm, for example), so a MISMATCH from this recipe or another JSON encoder alone is not proof of tampering.`
+3. **Signature** (version 3 only), in a POSIX shell (Linux, macOS, or Git Bash or WSL on Windows; the recipe uses `printf` and `>`, which `cmd` and PowerShell do not provide in the same form). The message is the 64 ASCII characters of the lowercase `payloadHash`, with no newline. `integrity.signature.sig` is base64 of a **DER** ECDSA signature (`SEQUENCE { r, s }`), not JOSE `r||s`. `integrity.signature.publicKey` is base64 of an X.509 SubjectPublicKeyInfo DER holding a P-256 key, and `alg` is `ES256`. With OpenSSL (checked with 3.5), where `PAYLOADHASH`, `SIG` and `PUBLICKEY` are the three values from the ride data:
 
    ```sh
    printf %s PAYLOADHASH > m
@@ -805,9 +823,9 @@ Every step is required; a step that fails says what is wrong, not that the ride 
    openssl dgst -sha256 -verify pub.pem -signature sig.der m
    ```
 
-   It prints `Verified OK`. If an older OpenSSL rejects the 124-character key line, wrap the key at 64 characters (for example with `fold -w 64`).
+   It prints `Verified OK`; a changed `PAYLOADHASH`, `SIG` or `PUBLICKEY` prints `Verification failure` (with error details). The README prints both lines. If an older OpenSSL rejects the 124-character key line, wrap the key at 64 characters (for example with `fold -w 64`).
 
-**Canonical-JSON caveat.** Step 2 depends on reproducing Dart's `jsonEncode` of the canonicalised value exactly, including how numbers are printed (`2` and `2.0` hash differently). A tool written in another language that prints a number differently gets a `payloadHash` mismatch without anything having been changed, so a mismatch from another language's JSON encoder is not by itself evidence of tampering; the README says so. The signature check of step 3 needs no JSON at all (only the stored `payloadHash`, `sig` and `publicKey`), but it proves nothing about the ride data unless step 2 holds. The README prints the URL of this document at the release tag (the Dart constant `rideExportFormatDocUrl`, bumped at each release).
+**Canonical-JSON caveat.** Step 2 depends on reproducing Dart's `jsonEncode` of the canonicalised value exactly, including how numbers are printed (`2` and `2.0` hash differently). A tool written in another language that prints a number differently gets a `payloadHash` mismatch without anything having been changed, so a mismatch from another language's JSON encoder is not by itself evidence of tampering; the README says so after its Python recipe (step 2). The signature check of step 3 needs no JSON at all (only the stored `payloadHash`, `sig` and `publicKey`), but it proves nothing about the ride data unless step 2 holds. The README prints the URL of this document at the release tag (the Dart constant `rideExportFormatDocUrl`, bumped at each release); the link resolves only once that tag is pushed.
 
 **What the signature does and does not show.** The key was made by the phone and no one certifies it. It identifies the signer only if the reader already knows the key from another source; the README prints the full public key and its fingerprint for that comparison, and says to compare the full key, not the 16-character `keyId`. It does not prove the footage is genuine (see [What it does and does not protect against](#what-it-does-and-does-not-protect-against)). `manifest.json` and the README are not signed: they are a convenience, and the signed ride data and the clip hashes it covers are the evidence.
 

@@ -29,6 +29,22 @@ const int _maxFieldLength = 120;
 /// Column the README is wrapped at.
 const int _wrapColumn = 72;
 
+/// The README's Python 3 recipe for step 2 (recompute payloadHash), printed
+/// at column 1 so it runs as saved. Checked against a real export.
+const List<String> _payloadHashRecipe = <String>[
+  "import hashlib, json, sys",
+  "d = json.load(open(sys.argv[1], encoding='utf-8'))",
+  "i = dict(d['integrity'])",
+  "stored = i.pop('payloadHash')",
+  "v = i.get('envelopeVersion')",
+  "if v == 3: i.pop('signature', None)",
+  "if v in (2, 3): d['integrity'] = i",
+  "else: del d['integrity']",
+  "s = json.dumps(d, sort_keys=True, separators=(',', ':'), ensure_ascii=False)",
+  "h = hashlib.sha256(s.encode('utf-8')).hexdigest()",
+  "print(h, 'MATCH' if h == stored else 'MISMATCH')",
+];
+
 /// The integrity state of [source] for the text files (fixed strings):
 /// `signed` (verified, a valid signature and envelope version 3),
 /// `checksums` (verified, version 2, unsigned), `checksumsUnbound`
@@ -516,10 +532,30 @@ String buildExportReadme(
       'remove integrity.payloadHash; for version 1 (no envelopeVersion) '
       'remove integrity. Then take the SHA-256 of the canonical JSON (keys '
       'sorted, compact, as Dart jsonEncode writes it) and compare it with '
-      'the stored integrity.payloadHash.',
+      'the stored integrity.payloadHash. With Python 3, save these lines '
+      'as check.py:',
+    );
+    for (final recipeLine in _payloadHashRecipe) {
+      line(recipeLine);
+    }
+    line();
+    para(
+      'Run it on the ride data file listed above (RIDEDATA); it prints the '
+      'hash and MATCH or MISMATCH:',
+    );
+    line('  python3 check.py RIDEDATA         (Linux or macOS)');
+    line('  py check.py RIDEDATA              (Windows)');
+    line();
+    para(
+      'Numbers are hashed as Dart prints them. Python prints a float '
+      'nearer to 0 than 0.0001 (other than 0), or of 1e16 or more, '
+      'differently (5e-05 for 0.00005), and real rides contain such '
+      'values (a small distanceKm, for example), so a MISMATCH from this '
+      'recipe or another JSON encoder alone is not proof of tampering.',
     );
     para(
-      '3. Verify the signature (SIGNED rides): the message is the 64 ASCII '
+      '3. Verify the signature (SIGNED rides) in a POSIX shell (Linux, '
+      'macOS, or Git Bash or WSL on Windows): the message is the 64 ASCII '
       'characters of the lowercase payloadHash, with no newline. '
       'integrity.signature.sig is base64 DER (not JOSE r||s). With '
       'openssl, where PAYLOADHASH, SIG and PUBLICKEY are the values from '
@@ -533,15 +569,19 @@ String buildExportReadme(
     line('  openssl dgst -sha256 -verify pub.pem -signature sig.der m');
     line();
     para(
+      'A good signature prints the first line below; a changed '
+      'PAYLOADHASH, SIG or PUBLICKEY prints the second (with error '
+      'details):',
+    );
+    line('  Verified OK');
+    line('  Verification failure');
+    line();
+    para(
       'The canonical form and the integrity envelope are defined in '
       'docs/data-formats.md at:',
     );
     line(rideExportFormatDocUrl);
     line();
-    para(
-      'A payloadHash mismatch caused by another language\'s JSON encoder '
-      'is not by itself evidence of tampering.',
-    );
   } else {
     para(
       'Hash each clip and compare it with the list above. Without the ride '
