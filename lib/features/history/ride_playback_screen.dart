@@ -164,17 +164,13 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
           enabled: !_isLoading && !_rideReadFailed,
           // The State's context: the app bar (and this builder's context)
           // unmounts when the video goes fullscreen, the screen does not.
-          // A section starts at the clip under the playhead.
+          // A section starts around the playhead (ride time).
           onSelected: (destination) => unawaited(
             runRideExportFlow(
               this.context,
               _ride,
               destination,
-              currentClipPath:
-                  _activeSegmentIndex >= 0 &&
-                      _activeSegmentIndex < _segmentPaths.length
-                  ? _segmentPaths[_activeSegmentIndex]
-                  : null,
+              playheadMs: _positionNotifier.value.position.inMilliseconds,
             ),
           ),
           itemBuilder: (_) => const [

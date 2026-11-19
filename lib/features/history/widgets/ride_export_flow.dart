@@ -10,6 +10,7 @@ import 'package:provider/provider.dart';
 
 import '../../../core/services/ride_export_channel.dart';
 import '../../../core/utils/format_utils.dart';
+import '../../../core/utils/path_utils.dart' as path_utils;
 import '../../camera/providers/camera_provider.dart';
 import '../models/ride_record.dart';
 import '../services/ride_export.dart';
@@ -27,10 +28,10 @@ class RideExportChoice {
   /// Which clips to export.
   final RideExportClips clips;
 
-  /// The clips of a [RideExportClips.section] choice, else `null`.
+  /// The range of a [RideExportClips.section] choice, else `null`.
   final RideExportSection? section;
 
-  /// Whether the ride file goes with them.
+  /// Whether the ride file goes with them (never for a section).
   final bool includeRideData;
 }
 
@@ -40,14 +41,14 @@ class RideExportChoice {
 /// (for a folder), checks the gate again, runs the export through
 /// [CameraProvider.runRideExport] and shows its summary for 8 s.
 ///
-/// [currentClipPath] (Playback: the clip under the playhead) is the
-/// section the dialog starts with; without it (or when it is not a clip of
-/// the ride) the section starts as the whole ride.
+/// [playheadMs] (Playback: the playhead, in ms from the ride start) centres
+/// the section the dialog starts with; without it the section starts as
+/// the first minute of the ride.
 Future<void> runRideExportFlow(
   BuildContext context,
   RideRecord ride,
   RideExportDestination destination, {
-  String? currentClipPath,
+  int? playheadMs,
 }) async {
   // Both are captured before the first await: the screen may close while
   // the export runs.
@@ -88,9 +89,6 @@ Future<void> runRideExportFlow(
       clips: RideExportClips.all,
       includeRideData: source.hasRideData,
     );
-    final current = currentClipPath == null
-        ? null
-        : rideClipNumberOf(source.ride, currentClipPath);
     if (!context.mounted) {
       return;
     }
@@ -101,9 +99,7 @@ Future<void> runRideExportFlow(
         evidence: evidence,
         all: all,
         hasRideData: source.hasRideData,
-        initialSection: current == null
-            ? null
-            : RideExportSection(current, current),
+        playheadMs: playheadMs,
       ),
     );
     if (choice == null || !context.mounted) {
@@ -151,10 +147,10 @@ Future<void> runRideExportFlow(
 }
 
 /// The export dialog: which clips ([evidence] or [all], the plans of both
-/// choices, or a section of whole clips picked on a slider when the ride
-/// has more than one clip), whether to include the ride data, and what the
-/// rider should know before handing the files over. Pops a
-/// [RideExportChoice], or `null` on Cancel.
+/// choices, or a section: an exact range of whole seconds picked on a
+/// slider, offered when the ride has a timeline), whether to include the
+/// ride data (never for a section), and what the rider should know before
+/// handing the files over. Pops a [RideExportChoice], or `null` on Cancel.
 class RideExportDialog extends StatefulWidget {
   /// Creates the dialog.
   const RideExportDialog({
@@ -163,7 +159,7 @@ class RideExportDialog extends StatefulWidget {
     required this.evidence,
     required this.all,
     required this.hasRideData,
-    this.initialSection,
+    this.playheadMs,
   });
 
   /// Folder or share; sets the title, the button and the notes.
@@ -172,15 +168,16 @@ class RideExportDialog extends StatefulWidget {
   /// The plan of the locked and incident clips.
   final RideExportPlan evidence;
 
-  /// The plan of all clips.
+  /// The plan of all clips (its sizes give the section's estimate).
   final RideExportPlan all;
 
   /// Whether the ride has a ride file to include.
   final bool hasRideData;
 
-  /// The section the slider starts at (Playback: the clip under the
-  /// playhead); the whole ride when `null` or outside the ride.
-  final RideExportSection? initialSection;
+  /// The playhead (Playback), in ms from the ride start: the section
+  /// starts 30 s before it and ends 30 s after it, within the ride.
+  /// Without it the section is the first minute.
+  final int? playheadMs;
 
   @override
   State<RideExportDialog> createState() => _RideExportDialogState();
@@ -192,89 +189,150 @@ class _RideExportDialogState extends State<RideExportDialog> {
       : RideExportClips.evidence;
   late bool _includeRideData = widget.hasRideData;
 
-  /// The ride (as the plans read it) and its clip count.
+  /// The ride (as the plans read it).
   late final RideRecord _ride = widget.all.source.ride;
-  late final int _clipCount = _ride.segmentPaths.length;
 
-  late RideExportSection _section = _initialSection();
+  /// The ride's length for a section, or `null` without a timeline.
+  late final int? _lengthMs = rideExportLengthMs(_ride);
 
-  RideExportSection _initialSection() {
-    final initial = widget.initialSection;
-    return initial != null &&
-            initial.firstClip >= 1 &&
-            initial.firstClip <= initial.lastClip &&
-            initial.lastClip <= _clipCount
-        ? initial
-        : RideExportSection(1, _clipCount);
+  /// The slider's end, in whole seconds.
+  late final int _maxSeconds = ((_lengthMs ?? 0) / 1000).ceil();
+
+  /// Whether the ride offers a section (it has a timeline of 1 s or more).
+  bool get _offersSection => _lengthMs != null && _maxSeconds >= 1;
+
+  /// The section's ends, in whole seconds of ride time.
+  late int _fromSeconds;
+  late int _toSeconds;
+
+  @override
+  void initState() {
+    super.initState();
+    final playhead = widget.playheadMs;
+    if (playhead == null) {
+      _fromSeconds = 0;
+      _toSeconds = _maxSeconds < 60 ? _maxSeconds : 60;
+    } else {
+      final at = (playhead ~/ 1000).clamp(0, _maxSeconds);
+      _fromSeconds = at - 30 < 0 ? 0 : at - 30;
+      _toSeconds = at + 30 > _maxSeconds ? _maxSeconds : at + 30;
+      if (_toSeconds - _fromSeconds < 1) {
+        _fromSeconds = _toSeconds - 1;
+      }
+    }
   }
+
+  RideExportSection get _section =>
+      RideExportSection(_fromSeconds * 1000, _toSeconds * 1000);
 
   String _label(String text, RideExportPlan plan) =>
       '$text (${plan.clips.length}, ${formatFileSize(plan.clipBytes)})';
 
-  /// The existing clips of [_section] (from the all-clips plan).
-  List<RideExportItem> _sectionClips() {
-    final numbers = <String, int>{
-      for (var i = 0; i < _clipCount; i++) _ride.segmentPaths[i]: i + 1,
-    };
-    return <RideExportItem>[
-      for (final item in widget.all.clips)
-        if (numbers[item.sourcePath] case final number?)
-          if (number >= _section.firstClip && number <= _section.lastClip) item,
-    ];
+  /// Moves the section's ends to [from] and [to] (whole seconds), keeping
+  /// them in the ride and at least 1 s apart.
+  void _setRange(int from, int to) {
+    if (from < 0 || to > _maxSeconds || to - from < 1) {
+      return;
+    }
+    setState(() {
+      _fromSeconds = from;
+      _toSeconds = to;
+    });
   }
 
-  /// For example 'Clips 3 to 5 of 6 (14:05 to 14:21), 3 clips, 1.1 GB';
-  /// without a timeline the ride times are left out.
-  String _sectionLabel(List<RideExportItem> clips) {
-    final first = _section.firstClip;
-    final last = _section.lastClip;
-    final range = first == last
-        ? 'Clip $first of $_clipCount'
-        : 'Clips $first to $last of $_clipCount';
-    final span = rideExportSectionSpan(_ride, _section);
-    final times = span == null
-        ? ''
-        : ' (${rideExportClockText(_ride, span.fromMs)} to '
-              '${rideExportClockText(_ride, span.toMs)})';
-    final count = clips.length == 1 ? '1 clip' : '${clips.length} clips';
-    final bytes = clips.fold(0, (sum, item) => sum + item.bytes);
-    return '$range$times, $count, ${formatFileSize(bytes)}';
+  /// The section's files that exist (clip sizes from the all-clips plan)
+  /// and their estimated bytes.
+  ({int files, int bytes}) _sectionSize() {
+    final sizes = <String, int>{
+      for (final item in widget.all.clips) item.sourcePath: item.bytes,
+    };
+    var files = 0;
+    var bytes = 0;
+    for (final part in rideExportSectionParts(_ride, _section)) {
+      final size = sizes[part.path];
+      if (size != null) {
+        files++;
+        bytes += rideExportPartBytes(part, size);
+      }
+    }
+    return (files: files, bytes: bytes);
   }
 
-  Widget _buildSection(List<RideExportItem> clips) {
-    final hasTimeline = _ride.segmentTimeline.isNotEmpty;
-    final locks = <int>{
-      if (hasTimeline)
-        for (final path in _ride.lockedSegmentPaths)
-          ?rideClipNumberOf(_ride, path),
+  /// For example '05:12 to 06:40 (1 min 28 s), 2 files, about 310 MB'.
+  String _sectionLabel(({int files, int bytes}) size) {
+    final files = size.files == 1 ? '1 file' : '${size.files} files';
+    return '${_rideTime(_fromSeconds)} to ${_rideTime(_toSeconds)} '
+        '(${_lengthText(_toSeconds - _fromSeconds)}), $files, about '
+        '${formatFileSize(size.bytes)}';
+  }
+
+  /// A row of the -1 s and +1 s buttons of one end of the section.
+  Widget _nudges(String label, Key key, void Function(int delta) nudge) => Row(
+    key: key,
+    children: [
+      Expanded(child: Text(label)),
+      TextButton(onPressed: () => nudge(-1), child: const Text('-1 s')),
+      TextButton(onPressed: () => nudge(1), child: const Text('+1 s')),
+    ],
+  );
+
+  Widget _buildSection(({int files, int bytes}) size) {
+    final length = _maxSeconds * 1000;
+    double at(int ms) => (ms / length).clamp(0.0, 1.0);
+    final clips = rideExportSectionParts(_ride, RideExportSection(0, length));
+    final locked = <String>{
+      for (final path in _ride.lockedSegmentPaths)
+        path_utils.normalizePath(path),
     };
-    final incidents = <int>{if (hasTimeline) ...rideIncidentClipNumbers(_ride)};
     return Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         RangeSlider(
-          values: RangeValues(
-            _section.firstClip.toDouble(),
-            _section.lastClip.toDouble(),
-          ),
-          min: 1,
-          max: _clipCount.toDouble(),
-          divisions: _clipCount - 1,
-          onChanged: (values) => setState(
-            () => _section = RideExportSection(
-              values.start.round(),
-              values.end.round(),
-            ),
-          ),
+          values: RangeValues(_fromSeconds.toDouble(), _toSeconds.toDouble()),
+          max: _maxSeconds.toDouble(),
+          onChanged: (values) {
+            final from = values.start.round();
+            final to = values.end.round();
+            if (to - from >= 1) {
+              _setRange(from, to);
+            }
+          },
         ),
-        if (locks.isNotEmpty || incidents.isNotEmpty)
-          _SectionMarks(
-            clipCount: _clipCount,
-            locks: locks,
-            incidents: incidents,
-          ),
-        Text(_sectionLabel(clips)),
+        _SectionMarks(
+          ticks: <double>[
+            for (final clip in clips)
+              if (clip.rideStartMs > 0) at(clip.rideStartMs),
+          ],
+          locks: <({double x, String label})>[
+            for (final clip in clips)
+              if (locked.contains(path_utils.normalizePath(clip.path)))
+                (
+                  x: at(clip.rideStartMs + clip.clipLengthMs ~/ 2),
+                  label:
+                      'Locked clip at ${_rideTime(clip.rideStartMs ~/ 1000)}',
+                ),
+          ],
+          incidents: <({double x, String label})>[
+            for (final incident in _ride.incidents ?? const <RideIncident>[])
+              if (incident.elapsedMs >= 0 && incident.elapsedMs <= length)
+                (
+                  x: at(incident.elapsedMs),
+                  label: 'Incident at ${_rideTime(incident.elapsedMs ~/ 1000)}',
+                ),
+          ],
+        ),
+        _nudges(
+          'Start',
+          const ValueKey<String>('rideExportSectionStart'),
+          (delta) => _setRange(_fromSeconds + delta, _toSeconds),
+        ),
+        _nudges(
+          'End',
+          const ValueKey<String>('rideExportSectionEnd'),
+          (delta) => _setRange(_fromSeconds, _toSeconds + delta),
+        ),
+        Text(_sectionLabel(size)),
       ],
     );
   }
@@ -282,14 +340,15 @@ class _RideExportDialogState extends State<RideExportDialog> {
   @override
   Widget build(BuildContext context) {
     final share = widget.destination == RideExportDestination.share;
-    final sectionClips = _sectionClips();
-    final chosen = switch (_clips) {
-      RideExportClips.evidence => widget.evidence.clips,
-      RideExportClips.all => widget.all.clips,
-      RideExportClips.section => sectionClips,
-    };
-    final hasSomething = chosen.isNotEmpty || _includeRideData;
     final isSection = _clips == RideExportClips.section;
+    final size = isSection ? _sectionSize() : null;
+    final includeRideData = _includeRideData && !isSection;
+    final hasSomething = switch (_clips) {
+      RideExportClips.evidence =>
+        widget.evidence.clips.isNotEmpty || includeRideData,
+      RideExportClips.all => widget.all.clips.isNotEmpty || includeRideData,
+      RideExportClips.section => size!.files > 0,
+    };
     final notes = <String>[
       'Videos show other road users: share them only for your own records, '
           'the police or your insurer.',
@@ -299,10 +358,7 @@ class _RideExportDialogState extends State<RideExportDialog> {
       else
         'The folder you pick is shared storage: other apps with media or '
             'storage access, and gallery backups, may see these files.',
-      if (_includeRideData && isSection)
-        'The ride data covers the whole ride, including the route outside '
-            'this section.',
-      if (_includeRideData)
+      if (includeRideData)
         'All exports from this phone carry the same public key, so they can '
             'be linked to each other.',
       'Keep MotoCam open until the export finishes.',
@@ -337,7 +393,7 @@ class _RideExportDialogState extends State<RideExportDialog> {
                   contentPadding: EdgeInsets.zero,
                   title: Text(_label('All clips', widget.all)),
                 ),
-                if (_clipCount > 1)
+                if (_offersSection)
                   RadioListTile<RideExportClips>(
                     value: RideExportClips.section,
                     contentPadding: EdgeInsets.zero,
@@ -346,20 +402,29 @@ class _RideExportDialogState extends State<RideExportDialog> {
               ],
             ),
           ),
-          if (isSection) _buildSection(sectionClips),
-          CheckboxListTile(
-            value: _includeRideData,
-            onChanged: widget.hasRideData
-                ? (value) => setState(() => _includeRideData = value ?? false)
-                : null,
-            contentPadding: EdgeInsets.zero,
-            controlAffinity: ListTileControlAffinity.leading,
-            title: const Text('Include ride data'),
-            subtitle: const Text(
-              'Route, speed every second and private file paths. Needed to '
-              'check the signature. Leave it out to hand over video only.',
+          if (isSection) ...[
+            _buildSection(size!),
+            const Padding(
+              padding: EdgeInsets.only(top: 8),
+              child: Text(
+                'A section is video only: it carries no ride data and no '
+                'signature.',
+              ),
             ),
-          ),
+          ] else
+            CheckboxListTile(
+              value: _includeRideData,
+              onChanged: widget.hasRideData
+                  ? (value) => setState(() => _includeRideData = value ?? false)
+                  : null,
+              contentPadding: EdgeInsets.zero,
+              controlAffinity: ListTileControlAffinity.leading,
+              title: const Text('Include ride data'),
+              subtitle: const Text(
+                'Route, speed every second and private file paths. Needed to '
+                'check the signature. Leave it out to hand over video only.',
+              ),
+            ),
           const SizedBox(height: 8),
           for (final note in notes)
             Padding(padding: const EdgeInsets.only(top: 8), child: Text(note)),
@@ -375,7 +440,7 @@ class _RideExportDialogState extends State<RideExportDialog> {
               ? () => Navigator.of(context).pop(
                   RideExportChoice(
                     clips: _clips,
-                    includeRideData: _includeRideData,
+                    includeRideData: includeRideData,
                     section: isSection ? _section : null,
                   ),
                 )
@@ -387,26 +452,42 @@ class _RideExportDialogState extends State<RideExportDialog> {
   }
 }
 
-/// Small lock and incident marks under the section slider, at the clip
-/// numbers in [locks] and [incidents] (1 to [clipCount]).
+String _two(int value) => value.toString().padLeft(2, '0');
+
+/// [seconds] of ride time as `MM:SS` (minutes not wrapped at 60).
+String _rideTime(int seconds) => '${_two(seconds ~/ 60)}:${_two(seconds % 60)}';
+
+/// [seconds] as '45 s', '1 min 28 s', '2 min' or '1 h 5 min 12 s'.
+String _lengthText(int seconds) {
+  final hours = seconds ~/ 3600;
+  final minutes = (seconds % 3600) ~/ 60;
+  final rest = seconds % 60;
+  return <String>[
+    if (hours > 0) '$hours h',
+    if (minutes > 0) '$minutes min',
+    if (rest > 0 || seconds == 0) '$rest s',
+  ].join(' ');
+}
+
+/// Clip-boundary ticks and lock and incident marks under the section
+/// slider; each `x` is a fraction of the slider's range (0 to 1).
 class _SectionMarks extends StatelessWidget {
   const _SectionMarks({
-    required this.clipCount,
+    required this.ticks,
     required this.locks,
     required this.incidents,
   });
 
-  final int clipCount;
-  final Set<int> locks;
-  final Set<int> incidents;
+  final List<double> ticks;
+  final List<({double x, String label})> locks;
+  final List<({double x, String label})> incidents;
 
   /// The slider's track inset on each side (its thumb overlay radius).
   static const double _inset = 24;
   static const double _size = 12;
 
-  /// The horizontal alignment of [clip]'s stop: -1 first, 1 last.
-  double _x(int clip) =>
-      clipCount < 2 ? 0 : 2 * (clip - 1) / (clipCount - 1) - 1;
+  /// The horizontal alignment of [x]: -1 start, 1 end.
+  static double _align(double x) => 2 * x - 1;
 
   @override
   Widget build(BuildContext context) {
@@ -415,27 +496,38 @@ class _SectionMarks extends StatelessWidget {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: _inset - _size / 2),
       child: SizedBox(
-        height: 2 * _size + 2,
+        height: 2 * _size + 8,
         child: Stack(
           children: [
-            for (final clip in locks)
+            for (final x in ticks)
               Align(
-                alignment: Alignment(_x(clip), -1),
+                alignment: Alignment(_align(x), -1),
+                child: SizedBox(
+                  width: _size,
+                  height: 6,
+                  child: Center(
+                    child: Container(width: 1, color: colors.onSurfaceVariant),
+                  ),
+                ),
+              ),
+            for (final lock in locks)
+              Align(
+                alignment: Alignment(_align(lock.x), 0),
                 child: Icon(
                   Icons.lock,
                   size: _size,
                   color: colors.primary,
-                  semanticLabel: 'Locked clip $clip',
+                  semanticLabel: lock.label,
                 ),
               ),
-            for (final clip in incidents)
+            for (final incident in incidents)
               Align(
-                alignment: Alignment(_x(clip), 1),
+                alignment: Alignment(_align(incident.x), 1),
                 child: Icon(
                   Icons.warning_amber,
                   size: _size,
                   color: colors.error,
-                  semanticLabel: 'Incident in clip $clip',
+                  semanticLabel: incident.label,
                 ),
               ),
           ],
