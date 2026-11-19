@@ -113,7 +113,7 @@ MotoCam/
 ├── scripts/                   release-security-precheck.ps1, generate-keystore.ps1
 ├── .gitattributes             Line-ending policy
 ├── analysis_options.yaml      Lints: flutter_lints plus seven stricter rules
-├── pubspec.yaml               Package manifest (version 1.0.1+13)
+├── pubspec.yaml               Package manifest (version 0.1.18+18)
 └── pubspec.lock               Resolved dependency versions
 ```
 
@@ -245,7 +245,7 @@ More commands, debugging tips and troubleshooting are in [docs/development.md](d
 
 ## Release notes
 
-Release notes are in [release-notes/](release-notes/) (`v0.1.8.md` to `v0.1.14.md`; earlier releases have none). The latest released version is [v0.1.13](release-notes/v0.1.13.md); [v0.1.14](release-notes/v0.1.14.md) is a draft for the next release and is not released. Release tags use a `v0.1.x` scheme, while `pubspec.yaml` is at `1.0.1+13` (Android versionName 1.0.1, versionCode 13). [docs/release.md](docs/release.md) explains the versioning, the release checklist, signing, the precheck and the changelog index.
+Release notes are in [release-notes/](release-notes/) (`v0.1.8.md` to `v0.1.14.md` and `v0.1.18.md`; earlier releases have none). v0.1.14 to v0.1.17 were published as GitHub pre-releases with their notes in the release bodies ([v0.1.14](release-notes/v0.1.14.md) here is an earlier draft). The latest version is [v0.1.18](release-notes/v0.1.18.md). Release tags use a `v0.1.x` scheme, and from v0.1.18 `pubspec.yaml` follows it (`0.1.18+18`: Android versionName 0.1.18, versionCode 18). [docs/release.md](docs/release.md) explains the versioning, the release checklist, signing, the precheck and the changelog index.
 
 ## Contributing
 

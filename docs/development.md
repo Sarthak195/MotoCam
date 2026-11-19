@@ -276,7 +276,7 @@ This section describes how work has actually been done in the repository's histo
   pwsh ./scripts/release-security-precheck.ps1 -SkipTests -SkipAnalyze   # if you touched Gradle or the manifest
   ```
 
-- **Versions and tags.** `pubspec.yaml` is at `1.0.1+13`, while tags follow a separate `v0.1.x` scheme (the first three are uppercase `V0.1.0` to `V0.1.2`). Tagging and release notes are covered in [release.md](release.md).
+- **Versions and tags.** `pubspec.yaml` is at `0.1.18+18` and follows the `v0.1.x` tags from v0.1.18 on (it said `1.0.1+13` until v0.1.17) (the first three are uppercase `V0.1.0` to `V0.1.2`). Tagging and release notes are covered in [release.md](release.md).
 - **License.** The repository has no LICENSE file and no license has been chosen yet. Keep this in mind before reusing code from or contributing code to the project.
 - **Documentation.** If a change alters behaviour described in `docs/`, update the relevant document in the same PR. [docs/README.md](README.md) explains how the documentation set is organized.
 

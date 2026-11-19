@@ -1,6 +1,6 @@
 name: motocam
 description: Motorcycle dashcam app with GPS route logging
-version: 1.0.1+13
+version: 0.1.18+18
 
 environment:
   # Floor taken from the `sdks` section of pubspec.lock; the project is

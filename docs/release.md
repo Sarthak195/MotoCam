@@ -47,10 +47,10 @@ A Google Play upload needs a different applicationId first; see [Application ID]
 
 | Stage | What happens | Source |
 |---|---|---|
-| pubspec | `version: 1.0.1+13` (build name `1.0.1`, build number `13`) | [pubspec.yaml](../pubspec.yaml) |
+| pubspec | `version: 0.1.18+18` (build name `0.1.18`, build number `18`) | [pubspec.yaml](../pubspec.yaml) |
 | Flutter tool | Writes `flutter.versionName` and `flutter.versionCode` into `android/local.properties` (git-ignored, machine-local) on each build | Flutter tooling |
 | Gradle | `flutterVersionCode` / `flutterVersionName` read those keys and feed `defaultConfig.versionCode` / `versionName`. If a key is missing, they fall back to `1` and `"1.0"` | [android/app/build.gradle.kts](../android/app/build.gradle.kts) |
-| Result (Android) | versionName `1.0.1`, versionCode `13` | |
+| Result (Android) | versionName `0.1.18`, versionCode `18` | |
 
 Reading the version from `local.properties` arrived in commit cd39097, first tagged as v0.1.13. From V0.1.1 to v0.1.12 the Gradle file hard-coded `versionCode = 1` and `versionName = "1.0"` (V0.1.0 still used the template's `flutter.versionCode` / `flutter.versionName`), and every tag before v0.1.13 set the release build to `signingConfig = signingConfigs.getByName("debug")` (for example `git show v0.1.12:android/app/build.gradle.kts`). The APKs published for v0.1.5 to v0.1.12 came from such trees, so they report version 1 / "1.0" and are debug-signed regardless of pubspec; the v0.1.5 asset, for example, reports `versionCode='1' versionName='1.0'` and is signed by `CN=Android Debug`. The consequences are described in [Signing of published APKs](#signing-of-published-apks).
 
@@ -68,11 +68,11 @@ Git tags are the release identifiers. The GitHub repository [Sarthak195/MotoCam]
 | `v0.1.10` to `v0.1.12` | annotated | ef2dfb5, 76974c1, 055b9e1 | 2026-04-02 to 2026-04-05 |
 | `v0.1.13` | lightweight | a33a583 | 2026-07-07 |
 
-Release notes live in [release-notes/](../release-notes/) as `vX.Y.Z.md` with a lowercase `v`. Files exist only for v0.1.8 to v0.1.14; v0.1.14.md is marked as a draft that is not released.
+Release notes live in [release-notes/](../release-notes/) as `vX.Y.Z.md` with a lowercase `v`. Files exist for v0.1.8 to v0.1.14 and for v0.1.18. v0.1.14.md is an earlier draft: v0.1.14 to v0.1.17 were published on 2026-11-19 as GitHub pre-releases (tags at their original commits) whose notes are in the GitHub release bodies only.
 
 ### Current inconsistencies
 
-- **Two version schemes.** pubspec says `1.0.1+13` (so Android reports 1.0.1 / 13), while the tag and release notes say v0.1.13. Earlier pubspec values followed the tags from v0.1.5 (`0.1.5+5` ... `0.1.11+11`; the tags before v0.1.5 carried `1.0.0+1`); build number 12 never appears in pubspec history, and the tree tagged v0.1.12 still had `0.1.11+11`.
+- **Two version schemes (until v0.1.17).** pubspec said `1.0.1+13` (so Android reported 1.0.1 / 13) from v0.1.13 to v0.1.17, while the tags said v0.1.13 and later; the v0.1.17 debug APK got 0.1.17 / 17 from `--build-name` and `--build-number` at build time. From v0.1.18 pubspec follows the tag (`0.1.18+18`). Earlier pubspec values followed the tags from v0.1.5 (`0.1.5+5` ... `0.1.11+11`; the tags before v0.1.5 carried `1.0.0+1`); build number 12 never appears in pubspec history, and the tree tagged v0.1.12 still had `0.1.11+11`.
 - **Tag case.** `V0.1.0`, `V0.1.1` and `V0.1.2` use an uppercase `V`; all later tags use lowercase. `V0.1.1` and `V0.1.2` point at the same commit.
 - **GitHub release bodies differ from the notes files.** The v0.1.13 GitHub release ("v0.1.13: Performance Optimization, Telemetry Memory Leak Fix, and Unit Tests", published 2026-07-07, no assets) has a different text from [v0.1.13.md](../release-notes/v0.1.13.md), and the v0.1.11 release carries the v0.1.12 APK (see [Computing artifact checksums](#computing-artifact-checksums)). Replacing the body and relabelling the asset on GitHub are owner tasks that have not been done.
 - **Mixed tag types.** Lightweight and annotated tags are both in use (see the table).
@@ -313,5 +313,7 @@ The pubspec line under Release Traceability is not in the existing notes; it mak
 | v0.1.11 | 2026-04-05 | Android storage hardening and permission recovery, missing-segment seekbar, seconds-based segment duration. The attached APK is the v0.1.12 build | [v0.1.11.md](../release-notes/v0.1.11.md) |
 | v0.1.12 | 2026-04-05 | Segment rollover optimization, click-through popup, Blackout Mode | [v0.1.12.md](../release-notes/v0.1.12.md) |
 | v0.1.13 | 2026-07-07 | Release-key signing and pubspec-driven version codes (uninstall required), recordings in app-specific storage, storage permissions removed, backups disabled, CI and release scripts, unit tests. No APK published | [v0.1.13.md](../release-notes/v0.1.13.md) |
+| v0.1.14 to v0.1.17 | 2026-10-28 to 2026-11-17 (published 2026-11-19) | Scan fixes and private storage, screen-off recording, Blackout overlay and crash confirm, no lost video after 2160p60 rolls. GitHub pre-releases; debug APK on v0.1.17 | GitHub release bodies |
+| v0.1.18 | 2026-11-19 | Lighter main thread while recording (sensor averaging off the main thread, fewer rebuilds), iOS removed (Android only). Pre-release, debug APK | [v0.1.18.md](../release-notes/v0.1.18.md) |
 
 Statements in older notes describe the code at their tag, not today. For example, the v0.1.11/v0.1.12 "public folder only" storage policy no longer applies; see [recording-pipeline.md](recording-pipeline.md) and [data-formats.md](data-formats.md) for current behaviour.
