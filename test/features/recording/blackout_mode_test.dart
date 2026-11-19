@@ -88,10 +88,12 @@ void main() {
   });
 
   late CameraPlatform originalPlatform;
+  var batteryLevelPercent = 80;
   late _RecordingCameraPlatform platform;
   late CameraController controller;
 
   setUp(() {
+    batteryLevelPercent = 80;
     SharedPreferences.setMockInitialValues({
       'recording_resolution_p': 720,
       'recording_fps': 30,
@@ -112,7 +114,7 @@ void main() {
           case 'isIgnoringBatteryOptimizations':
             return true;
           case 'getBatteryStatus':
-            return {'batteryLevelPercent': 80};
+            return {'batteryLevelPercent': batteryLevelPercent};
         }
         return null;
       });
@@ -248,6 +250,29 @@ void main() {
     await tester.pump();
     expect(overlay, findsOneWidget);
     expect(platform.previewCalls, isEmpty);
+
+    await disposeTree(tester);
+  });
+
+  // Not a Blackout test: it reuses this file's recording-screen harness.
+  testWidgets('the 15 s device status poll updates the Battery item without '
+      'rebuilding the whole recording screen', (tester) async {
+    await pumpRecordingScreen(tester);
+    await tester.pump(const Duration(seconds: 1));
+    expect(find.text('80%'), findsOneWidget);
+
+    batteryLevelPercent = 79;
+    final rebuilt = <Widget>[];
+    debugOnRebuildDirtyWidget = (element, _) => rebuilt.add(element.widget);
+    try {
+      await tester.pump(const Duration(seconds: 15));
+      await tester.pump();
+    } finally {
+      debugOnRebuildDirtyWidget = null;
+    }
+
+    expect(find.text('79%'), findsOneWidget);
+    expect(rebuilt.whereType<RecordingScreen>(), isEmpty);
 
     await disposeTree(tester);
   });

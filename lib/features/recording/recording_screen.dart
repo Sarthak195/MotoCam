@@ -76,7 +76,11 @@ class _RecordingScreenState extends State<RecordingScreen>
   bool _isNavigatingHistory = false;
   bool _isBlackoutMode = false;
   String? _inAppNoticeText;
-  DeviceStatusSnapshot _deviceStatus = DeviceStatusSnapshot.empty;
+  // Only the Battery and Temp items listen, so a poll that changes the
+  // temperature does not rebuild the whole screen.
+  final ValueNotifier<DeviceStatusSnapshot> _deviceStatus = ValueNotifier(
+    DeviceStatusSnapshot.empty,
+  );
   Timer? _inAppNoticeTimer;
   Timer? _blackoutExitHoldTimer;
   bool _blackoutExitTriggered = false;
@@ -503,13 +507,10 @@ class _RecordingScreenState extends State<RecordingScreen>
     _isFetchingDeviceStatus = true;
     try {
       final snapshot = await _deviceStatusService.getBatteryAndThermalStatus();
-      if (!mounted || snapshot == _deviceStatus) {
+      if (!mounted) {
         return;
       }
-
-      setState(() {
-        _deviceStatus = snapshot;
-      });
+      _deviceStatus.value = snapshot;
     } finally {
       _isFetchingDeviceStatus = false;
     }
@@ -1110,8 +1111,8 @@ class _RecordingScreenState extends State<RecordingScreen>
         incidentDetectionAvailable:
             !mounted ||
             context.read<TelemetryProvider>().isIncidentDetectionAvailable,
-        batteryLevelPercent: _deviceStatus.batteryLevelPercent,
-        batteryTemperatureC: _deviceStatus.batteryTemperatureC,
+        batteryLevelPercent: _deviceStatus.value.batteryLevelPercent,
+        batteryTemperatureC: _deviceStatus.value.batteryTemperatureC,
       ),
     );
   }
@@ -2346,9 +2347,6 @@ class _RecordingScreenState extends State<RecordingScreen>
   }
 
   Widget _buildTelemetryStats() {
-    final batteryLevel = _deviceStatus.batteryLevelPercent;
-    final batteryTemp = _deviceStatus.batteryTemperatureC;
-
     return Container(
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
@@ -2410,21 +2408,33 @@ class _RecordingScreenState extends State<RecordingScreen>
             ),
           ),
           Expanded(
-            child: _buildStatItem(
-              icon: Icons.battery_std,
-              label: 'Battery',
-              value: batteryLevel == null ? '--' : '$batteryLevel%',
-              compact: true,
+            child: ValueListenableBuilder<DeviceStatusSnapshot>(
+              valueListenable: _deviceStatus,
+              builder: (context, status, _) {
+                final batteryLevel = status.batteryLevelPercent;
+                return _buildStatItem(
+                  icon: Icons.battery_std,
+                  label: 'Battery',
+                  value: batteryLevel == null ? '--' : '$batteryLevel%',
+                  compact: true,
+                );
+              },
             ),
           ),
           Expanded(
-            child: _buildStatItem(
-              icon: Icons.device_thermostat,
-              label: 'Temp',
-              value: batteryTemp == null
-                  ? '--'
-                  : '${batteryTemp.toStringAsFixed(1)} C',
-              compact: true,
+            child: ValueListenableBuilder<DeviceStatusSnapshot>(
+              valueListenable: _deviceStatus,
+              builder: (context, status, _) {
+                final batteryTemp = status.batteryTemperatureC;
+                return _buildStatItem(
+                  icon: Icons.device_thermostat,
+                  label: 'Temp',
+                  value: batteryTemp == null
+                      ? '--'
+                      : '${batteryTemp.toStringAsFixed(1)} C',
+                  compact: true,
+                );
+              },
             ),
           ),
         ],
@@ -2731,6 +2741,7 @@ class _RecordingScreenState extends State<RecordingScreen>
     unawaited(_backgroundEventSubscription?.cancel());
     unawaited(_pipModeSubscription?.cancel());
     _deviceStatusTimer?.cancel();
+    _deviceStatus.dispose();
     final resumeWaiter = _resumeWaiter;
     _resumeWaiter = null;
     if (resumeWaiter != null && !resumeWaiter.isCompleted) {
