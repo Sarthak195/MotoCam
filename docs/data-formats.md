@@ -612,9 +612,9 @@ An export never changes the ride in private storage, and the ride JSON is copied
 `MotoCam ride <id> (<scope>)`:
 
 - `<id>` is the ride's `rideSessionId`, or for a ride without one (older rides) the base name of its video file (the file name without its extension). Every character outside `[A-Za-z0-9_-]` becomes `_`, the rule of the ride file's name (see [Directory layout and file naming](#directory-layout-and-file-naming)).
-- `<scope>` is one of `locked clips`, `all clips`, `locked clips, video only` and `all clips, video only`.
+- `<scope>` is `locked clips`, `all clips` or, for a section, `clips <first> to <last>` (the 1-based clip numbers; one clip is written `clips 3 to 3`), each followed by `, video only` when the ride data is left out. For example `locked clips, video only` and `clips 3 to 5`.
 
-The name depends only on the ride and the rider's two choices (which clips, with or without ride data). Exporting the same choice again lands in the same folder, which is how a stopped export is continued; a different choice never mixes with it. Example: `MotoCam ride 1794558143532_1aec41b3127e1626 (locked clips)`.
+The name depends only on the ride and the rider's choices (which clips, and the section's first and last clip; with or without ride data). Exporting the same choice again lands in the same folder, which is how a stopped export is continued; a different choice never mixes with it. Example: `MotoCam ride 1794558143532_1aec41b3127e1626 (locked clips)`; a section with the ride data left out: `MotoCam ride 1794558143532_1aec41b3127e1626 (clips 3 to 5, video only)`.
 
 ### Files and their order
 
@@ -625,7 +625,7 @@ The name depends only on the ride and the rider's two choices (which clips, with
 | 3 | `manifest.json` | `manifest.json` | UTF-8 JSON, 2-space indent, one trailing newline. Not signed |
 | 4 | README | `MOTOCAM-EXPORT.txt` | Plain text, wrapped near 72 columns, one trailing newline. Not signed. Always last |
 
-- **Clips.** The ride's trusted segments (`segmentPaths`; a quarantined path is never exported). "All clips" is every segment file that still exists. "Locked and incident clips" is the locked segments plus, for each recorded incident at time `t`, the timeline entry that holds `t` (entries sorted by `startMs`: the last entry with `startMs <= t`, and `t <= endMs + 1000`) and, when `t` is less than 10 s after that entry's start, the entry before it (the lead-up). An incident that fits no entry is listed in the README ("Incident at mm:ss not in any kept clip"). Without a segment timeline only the locked clips are selected. A clip whose file is gone is never copied; it is listed as `missing`.
+- **Clips.** The ride's trusted segments (`segmentPaths`; a quarantined path is never exported). "All clips" is every segment file that still exists. A **section** is a range of whole clips, `firstClip` to `lastClip` inclusive, numbered from 1 over the same `segmentPaths` list in recording order (a missing file keeps its number); no clip is cut, so every exported clip is byte for byte the recorded one and can be checked against the signed hashes. A clip outside the range is listed in `notExported` as `notSelected`; a clip inside the range whose file is gone is listed as `missing` and never copied. An incident counts as kept when its own clip is in the range (its lead-up clip does not matter); every other incident is listed in the README as "Incident at mm:ss not in any kept clip", the wording the locked and incident choice uses. The ride data is not narrowed by a section: it is the whole ride, byte for byte, including the route outside the section. "Locked and incident clips" is the locked segments plus, for each recorded incident at time `t`, the timeline entry that holds `t` (entries sorted by `startMs`: the last entry with `startMs <= t`, and `t <= endMs + 1000`) and, when `t` is less than 10 s after that entry's start, the entry before it (the lead-up). An incident that fits no entry is listed in the README ("Incident at mm:ss not in any kept clip"). Without a segment timeline only the locked clips are selected. A clip whose file is gone is never copied; it is listed as `missing`.
 - **MIME types** passed to the folder app: `video/mp4` for `.mp4`, `application/json` for `.json`, `text/plain` for `.txt`, else `application/octet-stream`.
 - **The folder must be empty or an earlier export of the same choice.** Before the first clip, the folder is listed: a file whose name is not one the export would write (the plan's clip and ride-data names, `manifest.json`, `MOTOCAM-EXPORT.txt`) refuses the folder (`FOLDER_NOT_EMPTY`), and an old `manifest.json` and `MOTOCAM-EXPORT.txt` there are deleted, so a failed re-run never leaves a manifest that describes other files.
 - **An existing file of the same name** is never overwritten. If it is shorter than the source (a partial copy left by a killed run) it is deleted and copied again. If the size is equal, both are hashed: equal means it is skipped (nothing is written); different fails the export with `EXISTS_DIFFERENT`. A longer file also fails with `EXISTS_DIFFERENT` (a killed run never leaves a longer copy). Both rules exist because that file may be the only intact copy of a clip that changed on the phone since.
@@ -663,6 +663,7 @@ Keys are written in this order. `integrity` is `null` when ride data is not incl
   "exportedAt": "2026-11-19T13:05:00.000Z",
   "destination": "folder",
   "clips": "evidence",
+  "section": null,
   "rideDataIncluded": true,
   "sha256Of": "copy",
   "integrity": {
@@ -710,7 +711,8 @@ Keys are written in this order. `integrity` is `null` when ride data is not incl
 | `rideSessionId` | The ride's `rideSessionId`, or `null` for a ride without one |
 | `exportedAt` | UTC ISO 8601 with millisecond precision and `Z` (for example `2026-11-19T13:05:00.000Z`) |
 | `destination` | `"folder"` or `"share"` |
-| `clips` | `"evidence"` (locked and incident clips) or `"all"` |
+| `clips` | `"evidence"` (locked and incident clips), `"all"` or `"section"` (a range of whole clips) |
+| `section` | Always present. `null` for `evidence` and `all`. For `section`: `{"firstClip": n, "lastClip": m, "clipCount": total, "fromMs": a, "toMs": b}`: the 1-based first and last clip of the range, the number of clips in the ride (`segmentPaths`, missing files included), and the range's ride time in milliseconds from the ride start (`fromMs` the timeline start of the first clip, `toMs` the timeline end of the last). `fromMs` and `toMs` are both `null` when either clip has no segment timeline entry (a ride without a timeline) |
 | `rideDataIncluded` | `true` when the ride file is part of the export, else `false` (video only) |
 | `sha256Of` | `"copy"` (folder: each `sha256` is of the copy read back) or `"source"` (share: each `sha256` is of the file on the phone, because MotoCam cannot read the receiving app's copy) |
 | `integrity` | When `rideDataIncluded` is `false` (video only): `null`, because nothing in the export can be checked against the ride's checksums or signature, and no key material is written. One exception: a video-only export of a ride whose state is `failed` or `none` writes `{"state": "failed"}` or `{"state": "none"}` and no other key (see [The five integrity states](#the-five-integrity-states)). With ride data: the block below |
@@ -742,7 +744,7 @@ Keys are written in this order. `integrity` is `null` when ride data is not incl
 | `recorded` | `"match"`, `"differs"` (the exported bytes differ from `recordedSha256`) or `"none"` (`recordedSha256` is `null`) |
 | `locked` | `true` when the clip is a locked segment of the ride |
 
-`notExported[]` entry: `name`; `recordedSha256` (written only when the ride recorded one); `reason`: `"notSelected"` (the rider chose the locked and incident clips and this is neither) or `"missing"` (the file is no longer on the phone).
+`notExported[]` entry: `name`; `recordedSha256` (written only when the ride recorded one); `reason`: `"notSelected"` (the rider chose the locked and incident clips and this is neither, or chose a section and this clip is outside it) or `"missing"` (the file is no longer on the phone).
 
 ### The five integrity states
 
@@ -764,7 +766,7 @@ A video-only export of a ride whose state is `failed` or `none` keeps that fact,
 
 Sections in order (underlined with `-`), after a title block. Every name the README prints (the ride, the clip and file names) is printed on one line: control characters and bidirectional control characters are removed.
 
-1. Title block: `MotoCam ride export`; `Ride:` (the `rideSessionId`, or the video file name); `Exported:` (UTC); `Local time:` (with the UTC offset); `Clips:` (`locked and incident clips` or `all clips`); `Ride data:` (`included (<name>)` or `not included (video only)`); `Destination:` (`a folder picked on the phone` or `the Android share sheet`).
+1. Title block: `MotoCam ride export`; `Ride:` (the `rideSessionId`, or the video file name); `Exported:` (UTC); `Local time:` (with the UTC offset); `Clips:` (`locked and incident clips`, `all clips` or, for a section, `clips F to L of N (ride time HH:mm to HH:mm)`, or `clips F to L of N` when either clip has no timeline entry; the times are the ride's start time plus the offset in the phone's local time); `Ride data:` (`included (<name>)` or `not included (video only)`); `Destination:` (`a folder picked on the phone` or `the Android share sheet`).
 2. **Integrity**: the line of the state (above), then, with ride data only: `This ride ended without Stop: the ride data ends at its last checkpoint; clips recorded after it are separate rides and are not covered.` when `sessionComplete` is false, and `SIMULATED GPS: the phone reported mock locations during this ride.` when `mockLocationDetected` is true. Always: `Recorded-hash results mean something only when the integrity line is SIGNED or Unsigned.` and `N of M exported clips match their recorded hash; K differ; L have none.`
 3. **Signer key** (state `signed` with ride data only): the `keyId`, the full `publicKey` and its fingerprint (the SHA-256 of the key DER, as hex), with `Compare the full public key (or its fingerprint) with a key you already know, not the short keyId.` and one sentence on the signer: the exporting phone holds this key, this is not the key of the phone that made the export, or the exporting phone could not read its own key. A video-only README prints no key, keyId or fingerprint, so a video-only export cannot be linked to the ride's other exports.
 4. **Files**: each clip (name, `locked` when locked, bytes, SHA-256, recorded hash `matches`, `DIFFERS, recorded <hash>`, `none` or `invalid` (a recorded value that is not 64 lowercase hex characters, treated as absent)) and the ride data, preceded by `Each SHA-256 is of the copy in this folder, read back after copying.` (folder) or `Each SHA-256 is of the file on the phone: MotoCam cannot read the copy the receiving app made.` (share).
