@@ -115,6 +115,10 @@ android {
         }
     }
 
+    testOptions {
+        unitTests.isIncludeAndroidResources = true
+    }
+
     buildTypes {
         release {
             signingConfig = signingConfigs.getByName("release")
@@ -130,6 +134,10 @@ android {
 
 dependencies {
     implementation("androidx.concurrent:concurrent-futures:1.1.0")
+
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.robolectric:robolectric:4.16")
+    testImplementation("androidx.test:core:1.7.0")
 }
 
 flutter {

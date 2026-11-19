@@ -16,7 +16,6 @@ import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
 import android.util.Log
-import androidx.core.app.NotificationCompat
 
 class BackgroundRecordingService : Service() {
     companion object {
@@ -247,40 +246,17 @@ class BackgroundRecordingService : Service() {
         }
     }
 
-    /**
-     * Builds the ongoing recording notification. The elapsed time is rendered
-     * by the system chronometer from [elapsedMs], so it does not need to be
-     * re-posted every second.
-     */
-    private fun buildNotification(elapsedMs: Long): Notification {
-        return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_stat_recording)
-            .setContentTitle("MotoCam recording in progress")
-            .setContentText("Designed to keep recording with the screen off")
-            .setWhen(System.currentTimeMillis() - elapsedMs.coerceAtLeast(0L))
-            .setShowWhen(true)
-            .setUsesChronometer(true)
-            .setOngoing(true)
-            .setOnlyAlertOnce(true)
-            .setPriority(NotificationCompat.PRIORITY_LOW)
-            .setCategory(NotificationCompat.CATEGORY_SERVICE)
-            .setContentIntent(openAppPendingIntent)
-            .addAction(0, "Stop", stopPendingIntent)
-            .build()
-    }
+    private fun buildNotification(elapsedMs: Long): Notification =
+        RecordingNotifications.recording(
+            this,
+            CHANNEL_ID,
+            elapsedMs,
+            openAppPendingIntent,
+            stopPendingIntent,
+        )
 
-    private fun buildStoppingNotification(): Notification {
-        return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_stat_recording)
-            .setContentTitle("MotoCam is stopping the recording")
-            .setContentText("Saving the ride - open MotoCam to check")
-            .setOngoing(true)
-            .setOnlyAlertOnce(true)
-            .setPriority(NotificationCompat.PRIORITY_LOW)
-            .setCategory(NotificationCompat.CATEGORY_SERVICE)
-            .setContentIntent(openAppPendingIntent)
-            .build()
-    }
+    private fun buildStoppingNotification(): Notification =
+        RecordingNotifications.stopping(this, CHANNEL_ID, openAppPendingIntent)
 
     private fun acquireWakeLockIfNeeded() {
         val existing = wakeLock
