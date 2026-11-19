@@ -44,6 +44,7 @@ class MainActivity: FlutterActivity() {
     private var pipMethodChannel: MethodChannel? = null
     private var legacyRecordingsAccess: LegacyRecordingsAccess? = null
     private var galleryCopies: GalleryCopies? = null
+    private var rideExport: RideExport? = null
 
     // Every startActivityForResult of this activity is answered through
     // this dispatcher, by request code (see ActivityRequestCodes).
@@ -64,8 +65,13 @@ class MainActivity: FlutterActivity() {
 
     // Rider's keep-screen-on choice for the current recording (Dart's
     // setKeepScreenOn). FLAG_KEEP_SCREEN_ON is set only while it and
-    // isRecordingActive are both true; see applyKeepScreenOn.
+    // isRecordingActive are both true, or while a ride export runs
+    // (exportKeepScreenOn); see applyKeepScreenOn.
     private var keepScreenOnRequested = false
+
+    // True while a ride export runs (RideExport's setKeepScreenOn): keeps
+    // the screen on whether or not a recording runs. Cleared on destroy.
+    private var exportKeepScreenOn = false
 
     // ---- Camera lifecycle hold (F004) ----
     //
@@ -206,7 +212,7 @@ class MainActivity: FlutterActivity() {
     }
 
     private fun applyKeepScreenOn() {
-        if (isRecordingActive && keepScreenOnRequested) {
+        if ((isRecordingActive && keepScreenOnRequested) || exportKeepScreenOn) {
             window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         } else {
             window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -269,6 +275,18 @@ class MainActivity: FlutterActivity() {
             }
         }
         galleryCopies?.register(flutterEngine.dartExecutor.binaryMessenger)
+
+        if (rideExport == null) {
+            val export = RideExport(this) { enabled ->
+                exportKeepScreenOn = enabled
+                applyKeepScreenOn()
+            }
+            rideExport = export
+            activityResults.register(RideExport.REQUEST_PICK_TREE) { resultCode, data ->
+                export.onTreePicked(resultCode, data)
+            }
+        }
+        rideExport?.register(flutterEngine.dartExecutor.binaryMessenger)
 
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, DEVICE_STATUS_CHANNEL)
             .setMethodCallHandler { call, result ->
@@ -819,8 +837,11 @@ class MainActivity: FlutterActivity() {
         legacyRecordingsAccess = null
         galleryCopies?.dispose()
         galleryCopies = null
+        rideExport?.dispose()
+        rideExport = null
         isRecordingActive = false
         keepScreenOnRequested = false
+        exportKeepScreenOn = false
         applyKeepScreenOn()
         releaseCameraHold("onDestroy")
         if (isForegroundServiceStarted) {
