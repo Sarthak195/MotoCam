@@ -98,8 +98,10 @@ class RideExportProgress {
   /// Folder or share.
   final RideExportDestination destination;
 
-  /// The share of files done, from 0 to 1 (`null` while [total] is 0).
-  double? get fraction => total <= 0 ? null : (done / total).clamp(0.0, 1.0);
+  /// The share of files done, from 0 to 1, or `null` (an indeterminate
+  /// ring) until the first file is done, as a copy can take minutes.
+  double? get fraction =>
+      done <= 0 || total <= 0 ? null : (done / total).clamp(0.0, 1.0);
 }
 
 /// Manages the device camera lifecycle, segmented video recording, rolling

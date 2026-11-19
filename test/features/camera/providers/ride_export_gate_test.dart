@@ -1,5 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:motocam/features/camera/providers/camera_provider.dart';
+import 'package:motocam/features/history/services/ride_export.dart';
 
 void main() {
   String? reason({
@@ -119,6 +120,20 @@ void main() {
       reason(exportRunning: true),
     ]);
     expect(order.toSet(), hasLength(order.length));
+  });
+
+  test('progress is indeterminate until the first file is done', () {
+    RideExportProgress progress(int done, int total) => RideExportProgress(
+      rideKey: 'k',
+      done: done,
+      total: total,
+      destination: RideExportDestination.folder,
+    );
+
+    expect(progress(0, 4).fraction, isNull);
+    expect(progress(1, 4).fraction, 0.25);
+    expect(progress(4, 4).fraction, 1.0);
+    expect(progress(0, 0).fraction, isNull);
   });
 
   test('a new provider has no export running and no progress', () {
