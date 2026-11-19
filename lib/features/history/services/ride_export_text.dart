@@ -363,16 +363,21 @@ String buildExportReadme(
     line();
   }
 
+  void hashCommands() {
+    line('  sha256sum FILE                    (Linux or macOS)');
+    line('  certutil -hashfile FILE SHA256    (Windows)');
+    line();
+  }
+
   heading('How to check');
   if (plan.includeRideData) {
     para('Every step is required.');
     para(
-      '1. Hash each clip (Linux or macOS: sha256sum FILE; Windows: '
-      'certutil -hashfile FILE SHA256). It must equal the SHA-256 listed '
-      'above and the integrity.segmentHashes value in the ride data whose '
-      'key ends in that file name (the keys are the phone\'s private '
-      'paths).',
+      '1. Hash each clip. It must equal the SHA-256 listed above and the '
+      'integrity.segmentHashes value in the ride data whose key ends in '
+      'that file name (the keys are the phone\'s private paths):',
     );
+    hashCommands();
     para(
       '2. Recompute payloadHash from the ride data: for envelopeVersion 3 '
       'remove integrity.payloadHash and integrity.signature; for version 2 '
@@ -407,10 +412,10 @@ String buildExportReadme(
     );
   } else {
     para(
-      'Hash each clip (Linux or macOS: sha256sum FILE; Windows: certutil '
-      '-hashfile FILE SHA256) and compare it with the list above. Without '
-      'the ride data that only shows that a copy matches this list.',
+      'Hash each clip and compare it with the list above. Without the ride '
+      'data that only shows that a copy matches this list:',
     );
+    hashCommands();
   }
 
   heading('Privacy');
