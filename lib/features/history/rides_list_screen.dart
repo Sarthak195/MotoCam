@@ -5,16 +5,17 @@ import 'dart:isolate';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 
 import 'package:permission_handler/permission_handler.dart';
 
+import '../../core/build_flags.dart';
 import '../../core/providers/app_settings_provider.dart';
 import '../../core/services/app_permission_service.dart';
 import '../../core/services/device_status_service.dart';
 import '../../core/services/legacy_recordings_access.dart';
 import '../../core/services/ride_signing_service.dart';
+import '../../core/theme/tokens.dart';
 import '../../core/utils/format_utils.dart';
 import '../../core/utils/path_utils.dart' as path_utils;
 import '../camera/providers/camera_provider.dart';
@@ -28,15 +29,18 @@ import 'ride_playback_screen.dart';
 import 'services/gallery_copy_removal.dart';
 import 'services/gallery_links.dart';
 import 'services/legacy_ride_import.dart';
+import 'services/ride_integrity_text.dart';
 import 'services/ride_deletion.dart';
 import 'services/ride_export.dart';
 import 'widgets/playback_timeline.dart';
 import 'widgets/ride_export_flow.dart';
-import 'widgets/ride_size_line.dart';
+import 'widgets/ride_list_model.dart';
+import 'widgets/ride_list_widgets.dart';
 import 'widgets/recordings_migration_banner.dart';
 
-/// Ride History: lists recorded rides (locked clips first) with their
-/// summary, integrity status and lock state, and opens playback on tap.
+/// Ride History ("Rides"): lists recorded rides (Locked Clips first, then
+/// All Rides by month) with their summary and integrity stamps, filters
+/// them in memory, and opens playback on tap.
 class RidesListScreen extends StatefulWidget {
   /// Creates the Ride History screen.
   const RidesListScreen({super.key});
@@ -48,6 +52,10 @@ class RidesListScreen extends StatefulWidget {
 class _RidesListScreenState extends State<RidesListScreen> {
   late Future<List<RideRecord>> _ridesFuture;
   bool _isOpeningRide = false;
+
+  /// The filter chips that are on (in memory only; reset when the screen
+  /// closes).
+  final Set<RideFilter> _filters = <RideFilter>{};
   final Set<String> _lockUpdatesInFlight = <String>{};
 
   /// Share of a running lock change's segment checks that are done, by
@@ -97,24 +105,6 @@ class _RidesListScreenState extends State<RidesListScreen> {
   /// The running ride export's progress (CameraProvider), listened to so
   /// the exported ride's row shows its ring.
   ValueListenable<RideExportProgress?>? _exportProgress;
-
-  Widget _buildStatusBadge({required String label, required Color color}) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-      decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.2),
-        borderRadius: BorderRadius.circular(12),
-      ),
-      child: Text(
-        label,
-        style: TextStyle(
-          color: color,
-          fontSize: 11,
-          fontWeight: FontWeight.w700,
-        ),
-      ),
-    );
-  }
 
   bool _hasLoadedRides = false;
 
@@ -997,23 +987,58 @@ class _RidesListScreenState extends State<RidesListScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Ride History'),
+        title: Text(
+          'Rides',
+          style: MotoFonts.condensedStyle(30, color: MotoColors.text),
+        ),
         actions: [
           if (Platform.isAndroid)
-            PopupMenuButton<String>(
-              tooltip: 'More',
-              onSelected: (_) => _importFromOlderVersion(),
-              itemBuilder: (_) => const [
-                PopupMenuItem<String>(
-                  value: 'import',
-                  child: Text('Import rides from an older version'),
+            Padding(
+              padding: const EdgeInsets.only(right: MotoSize.gap),
+              child: Tooltip(
+                message: 'Import rides from an older version',
+                child: OutlinedButton.icon(
+                  style: OutlinedButton.styleFrom(
+                    minimumSize: const Size(0, MotoSize.minTarget),
+                    backgroundColor: MotoColors.surfaceHigh,
+                    side: const BorderSide(color: MotoColors.hairlineStrong),
+                    padding: const EdgeInsets.symmetric(horizontal: 12),
+                    textStyle: MotoFonts.bodyStyle(15, weight: FontWeight.w600),
+                  ),
+                  onPressed: _importFromOlderVersion,
+                  icon: const Icon(Icons.download, size: 20),
+                  label: const Text('Import'),
                 ),
-              ],
+              ),
+            ),
+          // "Check a received export" has no checker yet: its slot stays
+          // out of the tree until kCheckReceivedExport is on.
+          if (kCheckReceivedExport)
+            const IconButton(
+              tooltip: 'Check a received export',
+              onPressed: null,
+              icon: Icon(Icons.fact_check_outlined),
             ),
         ],
       ),
       body: Column(
         children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(
+              MotoSize.gutter,
+              MotoSize.gap,
+              MotoSize.gutter,
+              0,
+            ),
+            child: RideFilterBar(
+              selected: _filters,
+              onToggle: (filter) => setState(() {
+                if (!_filters.remove(filter)) {
+                  _filters.add(filter);
+                }
+              }),
+            ),
+          ),
           if (_migration != null)
             RecordingsMigrationBanner(migration: _migration!),
           if (_legacyImport != null)
@@ -1026,13 +1051,23 @@ class _RidesListScreenState extends State<RidesListScreen> {
                 }
                 final progress = _legacyImport!.progress;
                 return Padding(
-                  padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+                  padding: const EdgeInsets.fromLTRB(
+                    MotoSize.gutter,
+                    MotoSize.gap,
+                    MotoSize.gutter,
+                    0,
+                  ),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(text),
+                      Text(
+                        text,
+                        style: MotoFonts.bodyStyle(14, color: MotoColors.dim),
+                      ),
                       const SizedBox(height: 4),
                       LinearProgressIndicator(
+                        color: MotoColors.text,
+                        backgroundColor: MotoColors.hairlineStrong,
                         value: progress == null || progress.total == 0
                             ? null
                             : progress.done / progress.total,
@@ -1067,13 +1102,11 @@ class _RidesListScreenState extends State<RidesListScreen> {
           );
         }
 
-        final lockedRides = rides.where((ride) => ride.isLocked).toList();
-        final otherRides = rides.where((ride) => !ride.isLocked).toList();
-        final items = <Object>[
-          if (lockedRides.isNotEmpty) ...['Locked Clips', ...lockedRides],
-          'All Rides',
-          ...otherRides,
-        ];
+        final items = rideListItems(
+          rides,
+          filters: _filters,
+          now: DateTime.now(),
+        );
 
         return RefreshIndicator(
           onRefresh: () async {
@@ -1082,394 +1115,188 @@ class _RidesListScreenState extends State<RidesListScreen> {
             });
             await _ridesFuture;
           },
-          // Section headers are Strings and cards are rides; only the
-          // visible cards are built.
-          child: ListView.builder(
-            padding: const EdgeInsets.all(12),
-            itemCount: items.length,
-            itemBuilder: (context, index) {
-              final item = items[index];
-              if (item is RideRecord) {
-                return Padding(
-                  padding: const EdgeInsets.only(bottom: 10),
-                  child: _buildRideCard(context, item),
-                );
-              }
-              return Padding(
-                padding: EdgeInsets.only(
-                  bottom: 8,
-                  top: item == 'All Rides' ? 6 : 0,
-                ),
-                child: Text(
-                  item as String,
-                  style: const TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.bold,
+          // Only the visible rows are built.
+          child: items.isEmpty
+              ? ListView(
+                  physics: const AlwaysScrollableScrollPhysics(),
+                  padding: const EdgeInsets.all(MotoSize.gutter),
+                  children: const [
+                    Text(
+                      'No rides match these filters.',
+                      textAlign: TextAlign.center,
+                    ),
+                  ],
+                )
+              : ListView.builder(
+                  padding: const EdgeInsets.fromLTRB(
+                    MotoSize.gutter,
+                    MotoSize.gapWide,
+                    MotoSize.gutter,
+                    MotoSize.gutter,
                   ),
+                  itemCount: items.length,
+                  itemBuilder: (context, index) {
+                    final item = items[index];
+                    return switch (item) {
+                      RideListRide(:final ride) => Padding(
+                        padding: const EdgeInsets.only(bottom: MotoSize.gap),
+                        child: _buildRideCard(context, ride),
+                      ),
+                      RideSectionHeader(:final title) => Padding(
+                        padding: EdgeInsets.only(
+                          bottom: MotoSize.gap,
+                          top: index == 0 ? 0 : MotoSize.gapWide,
+                        ),
+                        child: RideListHeader.section(title),
+                      ),
+                      RideMonthHeader(:final label) => Padding(
+                        padding: const EdgeInsets.only(
+                          bottom: MotoSize.gap,
+                          top: 4,
+                        ),
+                        child: RideListHeader.month(label),
+                      ),
+                    };
+                  },
                 ),
-              );
-            },
-          ),
         );
       },
     );
   }
 
-  List<Widget> _buildBadges(RideRecord ride) {
-    final hasTelemetry = ride.telemetryPath != null;
-    final status = ride.integrity.status;
-    final videoCheck = _videoCheckOf(ride);
-    return [
-      if (!hasTelemetry)
-        _buildStatusBadge(
-          label: 'VIDEO ONLY (RECOVERED)',
-          color: Colors.blueGrey,
-        ),
-      if (status == RideIntegrityStatus.modified)
-        _buildStatusBadge(label: 'INTEGRITY WARNING', color: Colors.redAccent)
-      // GPS from a mock-location provider: never shown as unmodified.
-      else if (ride.mockLocationDetected)
-        _buildStatusBadge(label: 'SIMULATED GPS', color: Colors.purpleAccent)
-      // The list checks only the ride data; video files are hashed when
-      // the ride is opened. Only a ride signed with this phone's own key
-      // shows as signed; a copy on another phone shows as unmodified.
-      else if (status == RideIntegrityStatus.verified &&
-          ride.integrity.signedBy == RideSignedBy.thisDevice)
-        _buildStatusBadge(
-          label: 'SIGNED ON THIS PHONE',
-          color: Colors.lightGreen,
-        )
-      else if (status == RideIntegrityStatus.verified)
-        _buildStatusBadge(label: 'DATA UNMODIFIED', color: Colors.lightGreen)
-      else if (hasTelemetry)
-        _buildStatusBadge(label: 'UNVERIFIED', color: Colors.grey),
-      // From segment hashes stored in the ride index by playback or the
-      // lock flow; nothing is hashed here.
-      if (videoCheck.failed > 0)
-        _buildStatusBadge(label: 'VIDEO CHECK FAILED', color: Colors.redAccent)
-      else if (videoCheck.isVerified)
-        _buildStatusBadge(label: 'VIDEOS VERIFIED', color: Colors.lightGreen),
-      if (ride.hasQuarantinedSegments)
-        _buildStatusBadge(
-          label: 'QUARANTINED ${ride.quarantinedSegmentPaths.length}',
-          color: Colors.deepOrangeAccent,
-        ),
-      if (ride.hasMissingSegments)
-        _buildStatusBadge(label: 'INCOMPLETE', color: Colors.amber),
-      // A checkpoint written during the ride: the app stopped before the
-      // ride was saved normally.
-      if (hasTelemetry && !ride.isSessionComplete)
-        _buildStatusBadge(label: 'RECOVERED (INCOMPLETE)', color: Colors.amber),
-      if (ride.isLocked)
-        _buildStatusBadge(label: 'LOCKED', color: Colors.orange),
-    ];
-  }
-
-  String _integrityText(RideRecord ride) {
-    switch (ride.integrity.status) {
-      case RideIntegrityStatus.verified:
-        return switch (ride.integrity.signedBy) {
-          RideSignedBy.thisDevice =>
-            'Integrity: ride data unmodified and signed by this phone\'s '
-                'MotoCam key (it shows no edit by anyone without that key; it '
-                'does not prove the footage is genuine)',
-          RideSignedBy.otherKey =>
-            'Integrity: ride data unmodified; signed by another phone or an '
-                'earlier install of MotoCam',
-          RideSignedBy.unknownSigner =>
-            'Integrity: ride data unmodified; signed, but this phone\'s key '
-                'could not be read to check by whom',
-          RideSignedBy.none =>
-            'Integrity: ride data unmodified since recording',
-        };
-      case RideIntegrityStatus.modified:
-        return ride.integrity.issues.contains('signature-removed')
-            ? 'Integrity: check failed (this phone signed this ride, but the '
-                  'signature was removed or replaced)'
-            : 'Integrity: check failed';
-      case RideIntegrityStatus.unknown:
-        if (ride.telemetryPath == null) {
-          return 'Integrity: not available';
-        }
-        return ride.isSessionComplete
-            ? 'Integrity: not available (recorded by an older version)'
-            : 'Integrity: not available (ride was not saved completely)';
-    }
-  }
-
-  String _integrityLine(RideRecord ride) {
-    final text = _integrityText(ride);
-    if (!ride.mockLocationDetected) {
-      return text;
-    }
-    return '$text. GPS came from a simulated (mock) location provider.';
-  }
-
-  Widget _buildRideCard(BuildContext context, RideRecord ride) {
-    final hasTelemetry = ride.telemetryPath != null;
-    final segmentCount = ride.segmentPaths.length;
-    final availableSegmentCount = ride.availableSegmentCount;
-    final isUpdatingLock = _lockUpdatesInFlight.contains(_lockKeyFor(ride));
+  /// The row's trailing slot: a ring while the ride is exported, saved to
+  /// or removed from the gallery, checked before unlocking or deleted;
+  /// otherwise the Ride actions menu.
+  Widget _buildTrailing(RideRecord ride) {
+    final key = _lockKeyFor(ride);
+    final isUpdatingLock = _lockUpdatesInFlight.contains(key);
     // A gallery save or removal of the ride blocks unlocking and deleting
     // it until it ends.
-    final galleryBusy = _galleryProgress.containsKey(_lockKeyFor(ride));
+    final galleryBusy = _galleryProgress.containsKey(key);
     // So does an export of the ride.
     final export = _exportProgressOf(ride);
     final exportBusy = export != null;
-    final waitTooltip = exportBusy
-        ? 'Wait for the export to finish'
-        : 'Wait for the gallery copies to finish';
-    final canToggleLockState =
-        _canChangeLockState(ride) &&
-        !isUpdatingLock &&
-        !galleryBusy &&
-        !exportBusy;
-    final badges = _buildBadges(ride);
-    final videoCoverage = _videoCoverageText(ride);
-    final isDeleting = _deletesInFlight.contains(_lockKeyFor(ride));
-    final videoLine = describeVideoCheck(_videoCheckOf(ride));
-    final galleryCopies = _galleryLinksOf(ride).length;
-    final showGalleryMenu = Platform.isAndroid;
-
-    return Card(
-      child: ListTile(
-        contentPadding: const EdgeInsets.all(12),
-        title: Text(
-          DateFormat('dd MMM yyyy, hh:mm a').format(ride.createdAt),
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
+    final busy = rideRowBusy(
+      exportBusy: exportBusy,
+      galleryBusy: galleryBusy,
+      isUpdatingLock: ride.isLocked && isUpdatingLock,
+      isDeleting: _deletesInFlight.contains(key),
+    );
+    return switch (busy) {
+      RideRowBusy.export => RideProgressRing(
+        value: export!.fraction,
+        tooltip: 'Stop export',
+        onStop: () =>
+            unawaited(context.read<CameraProvider>().cancelRideExport()),
+      ),
+      RideRowBusy.gallery => RideProgressRing(
+        value: _galleryProgress[key],
+        tooltip: 'Wait for the gallery copies to finish',
+      ),
+      RideRowBusy.lockCheck => RideProgressRing(
+        value: _lockProgress[key],
+        tooltip: 'Checking the videos before unlocking',
+      ),
+      RideRowBusy.deleting => const RideProgressRing(
+        value: null,
+        tooltip: 'Deleting the ride',
+      ),
+      RideRowBusy.none => RideActionsMenu(
+        entries: rideMenuEntries(
+          android: Platform.isAndroid,
+          isLocked: ride.isLocked,
+          canChangeLockState: _canChangeLockState(ride),
+          isUpdatingLock: isUpdatingLock,
+          galleryBusy: galleryBusy,
+          exportBusy: exportBusy,
+          galleryCopies: _galleryLinksOf(ride).length,
         ),
-        subtitle: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const SizedBox(height: 2),
-            Text(
-              ride.fileName,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: Theme.of(context).textTheme.bodySmall,
-            ),
-            if (badges.isNotEmpty) ...[
-              const SizedBox(height: 6),
-              Wrap(spacing: 6, runSpacing: 4, children: badges),
-            ],
-            const SizedBox(height: 6),
-            Text('Distance: ${ride.distanceKm.toStringAsFixed(2)} km'),
-            Text('Duration: ${_formatDuration(ride.duration)}'),
-            if (videoCoverage != null)
-              Text(
-                videoCoverage,
-                style: const TextStyle(color: Colors.blueGrey),
-              ),
-            Text('Max speed: ${ride.maxSpeedKmh.toStringAsFixed(1)} km/h'),
-            Text('Avg speed: ${ride.averageSpeedKmh.toStringAsFixed(1)} km/h'),
-            Text(
-              availableSegmentCount == segmentCount
-                  ? 'Segments: $segmentCount'
-                  : 'Segments: $availableSegmentCount of $segmentCount available',
-            ),
-            RideSizeLine(ride: ride),
-            Text('Samples: ${ride.sampleCount}'),
-            Text(_integrityLine(ride)),
-            if (videoLine != null)
-              Text(
-                videoLine,
-                style: TextStyle(
-                  color: _videoCheckOf(ride).failed > 0
-                      ? Colors.redAccent
-                      : null,
-                ),
-              ),
-            if (ride.hasQuarantinedSegments)
-              Text(
-                'Quarantined paths: ${ride.quarantinedSegmentPaths.length}',
-                style: const TextStyle(color: Colors.deepOrangeAccent),
-              ),
-            if (galleryCopies > 0)
-              Text(
-                'Gallery copies: $galleryCopies (readable by other apps)',
-                style: const TextStyle(color: Colors.blueGrey),
-              ),
-            Text(
-              hasTelemetry
-                  ? 'Telemetry: Available'
-                  : 'Telemetry: Not available',
-            ),
-          ],
-        ),
-        trailing: SizedBox(
-          // Each button takes the 48 px Material tap target. On Android the
-          // gallery menu takes the place of the play icon (tapping the card
-          // plays the ride either way).
-          width: (ride.isLocked ? 48 : 0) + 48 + (showGalleryMenu ? 48 : 24),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            mainAxisAlignment: MainAxisAlignment.end,
-            children: [
-              if (ride.isLocked && isUpdatingLock)
-                Padding(
-                  padding: const EdgeInsets.all(4),
-                  child: SizedBox(
-                    width: 20,
-                    height: 20,
-                    child: Tooltip(
-                      message: 'Checking the videos before unlocking',
-                      child: CircularProgressIndicator(
-                        strokeWidth: 2,
-                        value: _lockProgress[_lockKeyFor(ride)],
-                      ),
-                    ),
-                  ),
-                )
-              else if (ride.isLocked)
-                IconButton(
-                  tooltip: canToggleLockState
-                      ? 'Unlock clip'
-                      : galleryBusy || exportBusy
-                      ? waitTooltip
-                      : 'Integrity warning: lock state changes disabled',
-                  padding: EdgeInsets.zero,
-                  constraints: const BoxConstraints(
-                    minWidth: 28,
-                    minHeight: 28,
-                  ),
-                  iconSize: 20,
-                  onPressed: canToggleLockState
-                      ? () => _confirmAndUnlock(ride)
-                      : null,
-                  icon: const Icon(Icons.lock_open),
-                ),
-              if (isDeleting)
-                const Padding(
-                  padding: EdgeInsets.all(4),
-                  child: SizedBox(
-                    width: 20,
-                    height: 20,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  ),
-                )
-              else
-                IconButton(
-                  tooltip: galleryBusy || exportBusy
-                      ? waitTooltip
-                      : ride.isLocked && _canChangeLockState(ride)
-                      ? 'Unlock the ride to delete it'
-                      : 'Delete ride',
-                  padding: EdgeInsets.zero,
-                  constraints: const BoxConstraints(
-                    minWidth: 28,
-                    minHeight: 28,
-                  ),
-                  iconSize: 20,
-                  onPressed: galleryBusy || exportBusy
-                      ? null
-                      : () => _confirmAndDelete(ride),
-                  icon: const Icon(Icons.delete_outline),
-                ),
-              if (showGalleryMenu && exportBusy)
-                // The export's ring wins over a gallery save's: it carries
-                // the stop.
-                IconButton(
-                  tooltip: 'Stop export',
-                  padding: EdgeInsets.zero,
-                  onPressed: () => unawaited(
-                    context.read<CameraProvider>().cancelRideExport(),
-                  ),
-                  icon: SizedBox(
-                    width: 20,
-                    height: 20,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2,
-                      value: export.fraction,
-                    ),
-                  ),
-                )
-              else if (showGalleryMenu && galleryBusy)
-                Padding(
-                  padding: const EdgeInsets.all(4),
-                  child: SizedBox(
-                    width: 20,
-                    height: 20,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2,
-                      value: _galleryProgress[_lockKeyFor(ride)],
-                    ),
-                  ),
-                )
-              else if (showGalleryMenu)
-                PopupMenuButton<String>(
-                  tooltip: 'Ride actions',
-                  padding: EdgeInsets.zero,
-                  iconSize: 20,
-                  icon: const Icon(Icons.more_vert),
-                  onSelected: (value) {
-                    if (value == 'save') {
-                      unawaited(_confirmAndSaveToGallery(ride));
-                    } else if (value == 'remove') {
-                      unawaited(_confirmAndRemoveGalleryCopies(ride));
-                    } else if (value == 'export') {
-                      unawaited(
-                        _exportRide(ride, RideExportDestination.folder),
-                      );
-                    } else if (value == 'share') {
-                      unawaited(_exportRide(ride, RideExportDestination.share));
-                    }
-                  },
-                  itemBuilder: (_) => [
-                    const PopupMenuItem<String>(
-                      value: 'save',
-                      child: Text('Save to gallery'),
-                    ),
-                    if (galleryCopies > 0)
-                      const PopupMenuItem<String>(
-                        value: 'remove',
-                        child: Text('Remove gallery copies'),
-                      ),
-                    const PopupMenuItem<String>(
-                      value: 'export',
-                      child: Text('Export to folder'),
-                    ),
-                    const PopupMenuItem<String>(
-                      value: 'share',
-                      child: Text('Share'),
-                    ),
-                  ],
-                ),
-              if (!showGalleryMenu) const Icon(Icons.play_circle_outline),
-            ],
-          ),
-        ),
-        onTap: () async {
-          // Never while the ride is being unlocked or deleted.
-          final key = _lockKeyFor(ride);
-          if (_isOpeningRide ||
-              _lockUpdatesInFlight.contains(key) ||
-              _deletesInFlight.contains(key) ||
-              _refuseWhileFilesChange()) {
-            return;
+        onSelected: (action) {
+          switch (action) {
+            case RideMenuAction.saveToGallery:
+              unawaited(_confirmAndSaveToGallery(ride));
+            case RideMenuAction.removeGalleryCopies:
+              unawaited(_confirmAndRemoveGalleryCopies(ride));
+            case RideMenuAction.exportFolder:
+              unawaited(_exportRide(ride, RideExportDestination.folder));
+            case RideMenuAction.share:
+              unawaited(_exportRide(ride, RideExportDestination.share));
+            case RideMenuAction.unlock:
+              unawaited(_confirmAndUnlock(ride));
+            case RideMenuAction.delete:
+              unawaited(_confirmAndDelete(ride));
           }
-          _isOpeningRide = true;
-          _openedRide = ride;
-          // No file of the ride moves into private storage while it is
-          // open.
-          final releaseMigration = context
-              .read<CameraProvider>()
-              .holdRecordingsMigration();
-          try {
-            await Navigator.of(context).push(
-              MaterialPageRoute(builder: (_) => RidePlaybackScreen(ride: ride)),
-            );
-          } finally {
-            _isOpeningRide = false;
-            releaseMigration();
-          }
-          // Playback stored the segments it checked; show the new state.
-          // A segment still being hashed refreshes it again through
-          // _onIndexChanged when its result is stored.
-          unawaited(_refreshVideoCheck(ride));
         },
       ),
+    };
+  }
+
+  Widget _buildRideCard(BuildContext context, RideRecord ride) {
+    final now = DateTime.now();
+    final videoCheck = _videoCheckOf(ride);
+    final stamps = rideStamps(ride, videoCheck);
+    final videoLine = describeVideoCheck(videoCheck);
+    final integrity = [rideIntegrityLine(ride), ?videoLine].join('\n');
+    if (isIncompleteRideRow(ride)) {
+      final note = incompleteRideNote(ride);
+      return IncompleteRideRow(
+        dateLabel: rideDateLabel(ride.createdAt, now),
+        text: incompleteRideText(ride),
+        note: note,
+        stamps: note == null
+            ? stamps
+            : stamps
+                  .where((stamp) => stamp.kind != RideStampKind.unsigned)
+                  .toList(growable: false),
+        integrityText: integrity,
+        trailing: _buildTrailing(ride),
+        onOpen: () => unawaited(_openRide(ride)),
+      );
+    }
+    final galleryCopies = _galleryLinksOf(ride).length;
+    return RideRow(
+      dateLabel: rideDateLabel(ride.createdAt, now),
+      summary: rideSummaryText(ride, formatFileSize),
+      stamps: stamps,
+      integrityText: integrity,
+      details: [
+        ?_videoCoverageText(ride),
+        if (galleryCopies > 0)
+          'Gallery copies: $galleryCopies (readable by other apps)',
+      ],
+      trailing: _buildTrailing(ride),
+      onOpen: () => unawaited(_openRide(ride)),
     );
+  }
+
+  /// Opens [ride] for playback: never while it is being unlocked or
+  /// deleted, or while files change; holds the move into private storage
+  /// while it is open and refreshes its video check when it closes.
+  Future<void> _openRide(RideRecord ride) async {
+    final key = _lockKeyFor(ride);
+    if (_isOpeningRide ||
+        _lockUpdatesInFlight.contains(key) ||
+        _deletesInFlight.contains(key) ||
+        _refuseWhileFilesChange()) {
+      return;
+    }
+    _isOpeningRide = true;
+    _openedRide = ride;
+    // No file of the ride moves into private storage while it is open.
+    final releaseMigration = context
+        .read<CameraProvider>()
+        .holdRecordingsMigration();
+    try {
+      await Navigator.of(
+        context,
+      ).push(MaterialPageRoute(builder: (_) => RidePlaybackScreen(ride: ride)));
+    } finally {
+      _isOpeningRide = false;
+      releaseMigration();
+    }
+    // Playback stored the segments it checked; show the new state. A
+    // segment still being hashed refreshes it again through
+    // _onIndexChanged when its result is stored.
+    unawaited(_refreshVideoCheck(ride));
   }
 }
