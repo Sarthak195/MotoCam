@@ -53,6 +53,36 @@ enum RideExportClips {
 
   /// Every clip of the ride.
   all,
+
+  /// A range of whole clips ([RideExportSection]).
+  section,
+}
+
+/// A section of a ride: the clips [firstClip] to [lastClip] (inclusive,
+/// 1-based clip numbers over the ride's `segmentPaths`, missing files
+/// included).
+@immutable
+class RideExportSection {
+  /// Creates a section.
+  const RideExportSection(this.firstClip, this.lastClip);
+
+  /// The first clip number.
+  final int firstClip;
+
+  /// The last clip number.
+  final int lastClip;
+
+  @override
+  bool operator ==(Object other) =>
+      other is RideExportSection &&
+      other.firstClip == firstClip &&
+      other.lastClip == lastClip;
+
+  @override
+  int get hashCode => Object.hash(firstClip, lastClip);
+
+  @override
+  String toString() => 'RideExportSection($firstClip, $lastClip)';
 }
 
 /// Where an export goes.
@@ -86,7 +116,8 @@ final RegExp _recordedSha256 = RegExp(r'^[0-9a-f]{64}$');
 
 /// Why a clip of the ride is not in the export.
 enum RideExportOmissionReason {
-  /// The rider chose the locked and incident clips and this is neither.
+  /// Not in the rider's choice: neither locked nor an incident clip, or
+  /// outside the section.
   notSelected,
 
   /// The clip's file is no longer on the phone.
@@ -247,13 +278,15 @@ Future<RideExportSource> _readRideExportSource(
 /// The folder name of an export: `MotoCam ride <id> (<scope>)`, where
 /// `<id>` is the ride's `rideSessionId` (a legacy ride's video base name)
 /// with every character outside `[A-Za-z0-9_-]` replaced by `_`, and
-/// `<scope>` one of `locked clips`, `all clips`, `locked clips, video only`
-/// and `all clips, video only`. A re-run of the same choice gives the same
-/// name.
+/// `<scope>` one of `locked clips`, `all clips` and, for a [section] (which
+/// a section choice requires), `clips <first> to <last>`, each followed by
+/// `, video only` when the ride data is left out. A re-run of the same
+/// choice gives the same name.
 String rideExportFolderName(
   RideRecord ride, {
   required RideExportClips clips,
   required bool includeRideData,
+  RideExportSection? section,
 }) {
   final sessionId = ride.rideSessionId?.trim() ?? '';
   final String raw;
@@ -269,6 +302,8 @@ String rideExportFolderName(
   final scope = switch (clips) {
     RideExportClips.evidence => 'locked clips',
     RideExportClips.all => 'all clips',
+    RideExportClips.section =>
+      'clips ${_sectionOf(clips, section).firstClip} to ${section!.lastClip}',
   };
   final suffix = includeRideData ? '' : ', video only';
   return 'MotoCam ride $id ($scope$suffix)';
@@ -297,55 +332,85 @@ const int _incidentAfterEndMs = 1000;
 /// clip (the lead-up).
 const int _incidentLeadUpMs = 10000;
 
-/// The locked clips of [ride] plus, for each incident at `t`, the timeline
-/// entry E (sorted by start) with `E.startMs <= t`, `t` before the next
-/// entry's start (or E last) and `t <= E.endMs + 1000`, and the entry
-/// before E when `t - E.startMs < 10000`. An incident that fits no entry is
+/// Where an incident at [ms] lies: [clip] is the normalised path of its
+/// clip and [leadUp] that of the clip before it when the incident is early
+/// in its clip; [clip] is `null` when the incident lies in no clip.
+typedef _MappedIncident = ({int ms, String? clip, String? leadUp});
+
+/// Maps each incident of [ride] at `t` to the timeline entry E (sorted by
+/// start) with `E.startMs <= t`, `t` before the next entry's start (or E
+/// last) and `t <= E.endMs + 1000`, and to the entry before E when
+/// `t - E.startMs < 10000` (the lead-up). Only trusted segments
+/// (`segmentPaths`) are mapped. Empty without a timeline or incidents.
+List<_MappedIncident> _mapIncidents(RideRecord ride) {
+  final incidents = ride.incidents;
+  final timeline = <RideSegmentTimelineEntry>[...ride.segmentTimeline]
+    ..sort((a, b) => a.startMs.compareTo(b.startMs));
+  if (incidents == null || timeline.isEmpty) {
+    return const <_MappedIncident>[];
+  }
+  final trusted = <String>{
+    for (final path in ride.segmentPaths) path_utils.normalizePath(path),
+  };
+  final mapped = <_MappedIncident>[];
+  for (final incident in incidents) {
+    final t = incident.elapsedMs;
+    var index = -1;
+    for (var i = 0; i < timeline.length; i++) {
+      if (timeline[i].startMs <= t) {
+        index = i;
+      } else {
+        break;
+      }
+    }
+    final entry = index < 0 ? null : timeline[index];
+    final key = entry == null ? null : path_utils.normalizePath(entry.path);
+    if (entry == null ||
+        t > entry.endMs + _incidentAfterEndMs ||
+        !trusted.contains(key)) {
+      mapped.add((ms: t, clip: null, leadUp: null));
+      continue;
+    }
+    String? leadUp;
+    if (index > 0 && t - entry.startMs < _incidentLeadUpMs) {
+      final previous = path_utils.normalizePath(timeline[index - 1].path);
+      if (trusted.contains(previous)) {
+        leadUp = previous;
+      }
+    }
+    mapped.add((ms: t, clip: key, leadUp: leadUp));
+  }
+  return mapped;
+}
+
+/// The locked clips of [ride] plus, for each incident, its clip and its
+/// lead-up clip ([_mapIncidents]). An incident that fits no entry is
 /// listed in [RideEvidenceSelection.unmappedIncidentsMs]. Without a
 /// timeline (or incidents) only the locked clips are selected. Only trusted
 /// segments (`segmentPaths`) are ever selected.
 RideEvidenceSelection selectEvidenceClips(RideRecord ride) {
-  final trusted = <String, String>{
-    for (final path in ride.segmentPaths) path_utils.normalizePath(path): path,
+  final trusted = <String>{
+    for (final path in ride.segmentPaths) path_utils.normalizePath(path),
   };
   final selected = <String>{};
   for (final path in ride.lockedSegmentPaths) {
     final key = path_utils.normalizePath(path);
-    if (trusted.containsKey(key)) {
+    if (trusted.contains(key)) {
       selected.add(key);
     }
   }
 
   final unmapped = <int>[];
-  final incidents = ride.incidents;
-  final timeline = <RideSegmentTimelineEntry>[...ride.segmentTimeline]
-    ..sort((a, b) => a.startMs.compareTo(b.startMs));
-  if (incidents != null && timeline.isNotEmpty) {
-    for (final incident in incidents) {
-      final t = incident.elapsedMs;
-      var index = -1;
-      for (var i = 0; i < timeline.length; i++) {
-        if (timeline[i].startMs <= t) {
-          index = i;
-        } else {
-          break;
-        }
-      }
-      final entry = index < 0 ? null : timeline[index];
-      final key = entry == null ? null : path_utils.normalizePath(entry.path);
-      if (entry == null ||
-          t > entry.endMs + _incidentAfterEndMs ||
-          !trusted.containsKey(key)) {
-        unmapped.add(t);
-        continue;
-      }
-      selected.add(key!);
-      if (index > 0 && t - entry.startMs < _incidentLeadUpMs) {
-        final previous = path_utils.normalizePath(timeline[index - 1].path);
-        if (trusted.containsKey(previous)) {
-          selected.add(previous);
-        }
-      }
+  for (final incident in _mapIncidents(ride)) {
+    final clip = incident.clip;
+    if (clip == null) {
+      unmapped.add(incident.ms);
+      continue;
+    }
+    selected.add(clip);
+    final leadUp = incident.leadUp;
+    if (leadUp != null) {
+      selected.add(leadUp);
     }
   }
 
@@ -356,6 +421,78 @@ RideEvidenceSelection selectEvidenceClips(RideRecord ride) {
     ],
     unmappedIncidentsMs: List<int>.unmodifiable(unmapped),
   );
+}
+
+/// The clip number (1-based, over `segmentPaths`) of the clip that holds
+/// each incident of [ride] that lies in a clip, in incident order. Empty
+/// without a timeline.
+List<int> rideIncidentClipNumbers(RideRecord ride) {
+  final numbers = <String, int>{
+    for (var i = 0; i < ride.segmentPaths.length; i++)
+      path_utils.normalizePath(ride.segmentPaths[i]): i + 1,
+  };
+  return <int>[
+    for (final incident in _mapIncidents(ride))
+      ?numbers[incident.clip],
+  ];
+}
+
+/// The clip number (1-based) of [path] in [ride]'s `segmentPaths`, or
+/// `null` when it is not one of them.
+int? rideClipNumberOf(RideRecord ride, String path) {
+  final key = path_utils.normalizePath(path);
+  for (var i = 0; i < ride.segmentPaths.length; i++) {
+    if (path_utils.normalizePath(ride.segmentPaths[i]) == key) {
+      return i + 1;
+    }
+  }
+  return null;
+}
+
+/// The ride time [section] of [ride] covers, in ms from the ride start:
+/// from the start of its first clip to the end of its last clip in the
+/// ride's `segmentTimeline`; `null` when either clip has no timeline entry.
+({int fromMs, int toMs})? rideExportSectionSpan(
+  RideRecord ride,
+  RideExportSection section,
+) {
+  RideSegmentTimelineEntry? entryOf(int clip) {
+    if (clip < 1 || clip > ride.segmentPaths.length) {
+      return null;
+    }
+    final key = path_utils.normalizePath(ride.segmentPaths[clip - 1]);
+    for (final entry in ride.segmentTimeline) {
+      if (path_utils.normalizePath(entry.path) == key) {
+        return entry;
+      }
+    }
+    return null;
+  }
+
+  final first = entryOf(section.firstClip);
+  final last = entryOf(section.lastClip);
+  if (first == null || last == null) {
+    return null;
+  }
+  return (fromMs: first.startMs, toMs: last.endMs);
+}
+
+/// The local clock time [ms] after [ride]'s start, as `HH:mm`.
+String rideExportClockText(RideRecord ride, int ms) {
+  final time = ride.createdAt.add(Duration(milliseconds: ms));
+  String two(int value) => value.toString().padLeft(2, '0');
+  return '${two(time.hour)}:${two(time.minute)}';
+}
+
+/// The [section] a section choice requires.
+RideExportSection _sectionOf(
+  RideExportClips clips,
+  RideExportSection? section,
+) {
+  if (section == null) {
+    throw ArgumentError.value(clips, 'clips', 'a section needs its clips');
+  }
+  return section;
 }
 
 /// One file to export.
@@ -430,6 +567,7 @@ class RideExportPlan {
     required this.rideData,
     required this.notExported,
     required this.unmappedIncidentsMs,
+    this.section,
   });
 
   /// The ride as read at the start.
@@ -437,6 +575,9 @@ class RideExportPlan {
 
   /// The rider's clip choice.
   final RideExportClips clipChoice;
+
+  /// The clips of a [RideExportClips.section] choice, else `null`.
+  final RideExportSection? section;
 
   /// Whether the ride file is exported ([rideData] is set).
   final bool includeRideData;
@@ -477,30 +618,61 @@ class RideExportPlan {
 /// included only when [includeRideData] and the ride has one. A recorded
 /// hash that is not a SHA-256 ([isRecordedSha256]) is kept as absent and
 /// flagged `recordedInvalid`.
+///
+/// A [RideExportClips.section] choice requires [section], a clip range
+/// within the ride (else [ArgumentError]); clips outside it are not
+/// selected, and an incident whose clip is outside it is listed as in no
+/// kept clip. [section] is ignored for the other choices.
 Future<RideExportPlan> planRideExport(
   RideExportSource source, {
   required RideExportClips clips,
   required bool includeRideData,
+  RideExportSection? section,
   RideFileStatSource stat = statRideFile,
 }) async {
   final ride = source.ride;
   final withData = includeRideData && source.hasRideData;
   final selection = selectEvidenceClips(ride);
-  final chosen = clips == RideExportClips.all
-      ? ride.segmentPaths.toSet()
-      : selection.paths.toSet();
+  final range = clips == RideExportClips.section
+      ? _sectionOf(clips, section)
+      : null;
+  if (range != null &&
+      (range.firstClip < 1 ||
+          range.firstClip > range.lastClip ||
+          range.lastClip > ride.segmentPaths.length)) {
+    throw ArgumentError.value(range, 'section', 'not a clip range');
+  }
+  final evidence = selection.paths.toSet();
+  bool isChosen(int number, String path) => switch (clips) {
+    RideExportClips.all => true,
+    RideExportClips.evidence => evidence.contains(path),
+    RideExportClips.section =>
+      number >= range!.firstClip && number <= range.lastClip,
+  };
+  var unmappedIncidentsMs = selection.unmappedIncidentsMs;
+  if (range != null) {
+    final kept = <String>{
+      for (var i = range.firstClip - 1; i < range.lastClip; i++)
+        path_utils.normalizePath(ride.segmentPaths[i]),
+    };
+    unmappedIncidentsMs = List<int>.unmodifiable(<int>[
+      for (final incident in _mapIncidents(ride))
+        if (!kept.contains(incident.clip)) incident.ms,
+    ]);
+  }
   final locked = <String>{
     for (final path in ride.lockedSegmentPaths) path_utils.normalizePath(path),
   };
 
   final items = <RideExportItem>[];
   final omissions = <RideExportOmission>[];
-  for (final path in ride.segmentPaths) {
+  for (var index = 0; index < ride.segmentPaths.length; index++) {
+    final path = ride.segmentPaths[index];
     final name = path_utils.fileNameFromPath(path);
     final raw = ride.expectedSegmentHashes[path];
     final recorded = raw != null && isRecordedSha256(raw) ? raw : null;
     final recordedInvalid = raw != null && recorded == null;
-    if (!chosen.contains(path)) {
+    if (!isChosen(index + 1, path)) {
       omissions.add(
         RideExportOmission(
           name: name,
@@ -539,11 +711,13 @@ Future<RideExportPlan> planRideExport(
   return RideExportPlan(
     source: source,
     clipChoice: clips,
+    section: range,
     includeRideData: withData,
     folderName: rideExportFolderName(
       ride,
       clips: clips,
       includeRideData: withData,
+      section: range,
     ),
     clips: List<RideExportItem>.unmodifiable(items),
     rideData: withData && telemetryPath != null
@@ -554,7 +728,7 @@ Future<RideExportPlan> planRideExport(
           )
         : null,
     notExported: List<RideExportOmission>.unmodifiable(omissions),
-    unmappedIncidentsMs: selection.unmappedIncidentsMs,
+    unmappedIncidentsMs: unmappedIncidentsMs,
   );
 }
 

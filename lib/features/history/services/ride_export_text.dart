@@ -107,6 +107,50 @@ String _reasonValue(RideExportOmissionReason reason) => switch (reason) {
   RideExportOmissionReason.missing => 'missing',
 };
 
+/// The manifest's `section` object of [plan]'s section choice (clip
+/// numbers 1-based, `fromMs` and `toMs` from the ride start, `null`
+/// without a timeline), or `null` for the other choices.
+Map<String, Object?>? _sectionValue(RideExportPlan plan) {
+  final section = plan.section;
+  if (section == null) {
+    return null;
+  }
+  final ride = plan.source.ride;
+  final span = rideExportSectionSpan(ride, section);
+  return <String, Object?>{
+    'firstClip': section.firstClip,
+    'lastClip': section.lastClip,
+    'clipCount': ride.segmentPaths.length,
+    'fromMs': span?.fromMs,
+    'toMs': span?.toMs,
+  };
+}
+
+/// The README's `Clips:` value of [plan], for a section for example
+/// `clips 3 to 5 of 6 (ride time 14:05 to 14:21)`.
+String _clipsText(RideExportPlan plan) {
+  final section = plan.section;
+  switch (plan.clipChoice) {
+    case RideExportClips.evidence:
+      return 'locked and incident clips';
+    case RideExportClips.all:
+      return 'all clips';
+    case RideExportClips.section:
+      if (section == null) {
+        return 'a section';
+      }
+      final ride = plan.source.ride;
+      final span = rideExportSectionSpan(ride, section);
+      final clips =
+          'clips ${section.firstClip} to ${section.lastClip} of '
+          '${ride.segmentPaths.length}';
+      return span == null
+          ? clips
+          : '$clips (ride time ${rideExportClockText(ride, span.fromMs)} to '
+                '${rideExportClockText(ride, span.toMs)})';
+  }
+}
+
 /// manifest.json (format 1) of an export of [plan] whose [clips] and
 /// [rideData] were exported (for a share: hashed) at [exportedAt]. The
 /// `integrity` block is `null` when the ride data is not included, except
@@ -156,7 +200,12 @@ Map<String, Object?> buildExportManifest(
     'destination': destination == RideExportDestination.folder
         ? 'folder'
         : 'share',
-    'clips': plan.clipChoice == RideExportClips.evidence ? 'evidence' : 'all',
+    'clips': switch (plan.clipChoice) {
+      RideExportClips.evidence => 'evidence',
+      RideExportClips.all => 'all',
+      RideExportClips.section => 'section',
+    },
+    'section': _sectionValue(plan),
     'rideDataIncluded': plan.includeRideData,
     'sha256Of': destination == RideExportDestination.folder ? 'copy' : 'source',
     'integrity': integrity,
@@ -222,9 +271,7 @@ String buildExportReadme(
   line('Ride: ${_field(ride.rideSessionId ?? ride.fileName)}');
   line('Exported: ${_exportedAtText(exportedAt)} (UTC)');
   line('Local time: ${_localTime(exportedAt)}');
-  line(
-    'Clips: ${plan.clipChoice == RideExportClips.evidence ? 'locked and incident clips' : 'all clips'}',
-  );
+  line('Clips: ${_clipsText(plan)}');
   line(
     'Ride data: ${plan.includeRideData ? 'included (${_field(rideData?.name ?? plan.rideData?.name ?? '')})' : 'not included (video only)'}',
   );
