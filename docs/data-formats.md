@@ -774,7 +774,7 @@ Sections in order (underlined with `-`), after a title block. Every name the REA
 
 ### Checking an export (verification chain)
 
-Every step is required; a step that fails says what is wrong, not that the ride is false.
+Every step is required; a step that fails says what is wrong, not that the ride is false. For a ride with ride data in state `none` (no integrity block), only step 1 applies and the README says so: `Only step 1 applies: this ride has no integrity data, so steps 2 and 3 (payloadHash and signature) do not apply.` The README sentences for an unreliable video-only export are `The phone's integrity check of this ride failed when exported, so the recorded hashes listed below cannot be relied on.` (state `failed`) and `This ride has no integrity data, so the recorded hashes listed below cannot be relied on.` (state `none`).
 
 1. **Clip hashes.** Hash each clip (`sha256sum FILE` on Linux or macOS, `certutil -hashfile FILE SHA256` on Windows). It must equal the `sha256` listed in `manifest.json` and the README, **and** the value in the ride data's `integrity.segmentHashes` whose key ends in that file name (the keys are the recording phone's private paths, so match by file name). A clip whose `recorded` is `differs` fails this comparison, and one whose `recorded` is `none` has nothing to compare with: it cannot be tied to the ride data. In a version 1 envelope `segmentHashes` is not covered by the payload hash (see [What is hashed](#what-is-hashed)), so step 1 means less there.
 2. **Payload hash.** Recompute `payloadHash` from the ride data and compare it with the stored `integrity.payloadHash`:

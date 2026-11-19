@@ -294,7 +294,7 @@ While recording, the HISTORY button reads MINIMISE, and both it and system back 
 | Path | Contents |
 |---|---|
 | `lib/` | All Dart source, split into `core/` and `features/` (see [Module map](#module-map)) |
-| `test/` | Unit and widget tests under `test/core/` and `test/features/`, grouped by `lib/` area, plus `widget_test.dart` (app smoke test), the ride-file fixtures in `test/fixtures/ride_files/` and shared test helpers in `test/support/` (a P-256 key standing in for the phone's signing key): 696 tests in 52 files |
+| `test/` | Unit and widget tests under `test/core/` and `test/features/`, grouped by `lib/` area, plus `widget_test.dart` (app smoke test), the ride-file fixtures in `test/fixtures/ride_files/` and shared test helpers in `test/support/` (a P-256 key standing in for the phone's signing key): 700 tests in 52 files |
 | `android/` | Gradle project (`app/build.gradle.kts`), manifest, Kotlin `MainActivity` and `BackgroundRecordingService`, resources (themes, the monochrome notification icon, backup and data-extraction rules), ProGuard rules and `key.properties.template` |
 | `scripts/` | `release-security-precheck.ps1` (used by CI) and `generate-keystore.ps1` |
 | `release-notes/` | Per-release notes, `v0.1.8.md` through `v0.1.13.md` |
