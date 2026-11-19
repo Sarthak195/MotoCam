@@ -1656,8 +1656,9 @@ class CameraProvider extends ChangeNotifier {
         return false;
       }
 
+      // A controller lost meanwhile fails in the fallback below, as before.
       final rideController = _controller;
-      if (rideController == null ||
+      if (rideController != null &&
           !await lockCaptureForRide(
             rideController,
             _rideCaptureOrientation,
