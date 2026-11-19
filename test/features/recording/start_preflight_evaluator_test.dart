@@ -119,11 +119,11 @@ void main() {
       );
       expect(
         row(checks, 'Location Services')!.detail,
-        'Turn ON location services in system settings',
+        'Location is off. Turn it on to start recording',
       );
       expect(
         row(checks, 'Camera Ready')!.detail,
-        'Camera initialization failed, retry from Recording screen',
+        'Camera initialization failed, retry',
       );
       expect(
         row(checks, 'Media Write Access')!.detail,
@@ -206,14 +206,15 @@ void main() {
       expect(row(checks, 'Battery Optimization Exemption'), isNull);
     });
 
-    test('a missing motion sensor adds a non-blocking warning', () {
+    test('a missing motion sensor adds a warning that does not open it', () {
       final checks = StartPreflightEvaluator.evaluate(
         inputs(incidentDetectionAvailable: false),
       );
       final check = row(checks, 'Incident Detection')!;
       expect(check.status, StartPreflightStatus.warning);
       expect(check.isBlocking, isFalse);
-      expect(check.opensSheet, isTrue);
+      expect(check.opensSheet, isFalse);
+      expect(startPreflightNeedsSheet(checks), isFalse);
       expect(
         row(StartPreflightEvaluator.evaluate(inputs()), 'Incident Detection'),
         isNull,
@@ -243,6 +244,13 @@ void main() {
       expect(low.status, StartPreflightStatus.warning);
       expect(low.detail, '14% (low for long rides)');
       expect(low.isBlocking, isFalse);
+      expect(low.opensSheet, isFalse);
+      expect(
+        startPreflightNeedsSheet(
+          StartPreflightEvaluator.evaluate(inputs(batteryLevelPercent: 14)),
+        ),
+        isFalse,
+      );
     });
 
     test('temperature row: unknown, fine, below the boundary and hot', () {
@@ -267,7 +275,16 @@ void main() {
       )!;
       expect(hot.status, StartPreflightStatus.warning);
       expect(hot.detail, '43.0 C (high temperature)');
+      expect(hot.measurement, '43.0 C');
       expect(hot.isBlocking, isFalse);
+      expect(hot.opensSheet, isFalse);
+      expect(hot.group, StartPreflightGroup.heat);
+      expect(
+        startPreflightNeedsSheet(
+          StartPreflightEvaluator.evaluate(inputs(batteryTemperatureC: 45)),
+        ),
+        isFalse,
+      );
     });
 
     test('optional rows come last in display order', () {
@@ -283,6 +300,166 @@ void main() {
         'Battery Level',
         'Device Temperature',
       ]);
+    });
+  });
+
+  group('StartPreflightEvaluator groups and fixes', () {
+    test('each check has its group and fix', () {
+      final checks = StartPreflightEvaluator.evaluate(
+        inputs(
+          incidentDetectionAvailable: false,
+          batteryLevelPercent: 50,
+          batteryTemperatureC: 30,
+        ),
+      );
+      final expected = <String, (StartPreflightGroup, StartPreflightFix?)>{
+        'Camera Permission': (
+          StartPreflightGroup.permissions,
+          StartPreflightFix.appSettings,
+        ),
+        'Microphone Permission': (
+          StartPreflightGroup.permissions,
+          StartPreflightFix.appSettings,
+        ),
+        'Location Permission': (
+          StartPreflightGroup.permissions,
+          StartPreflightFix.appSettings,
+        ),
+        'Location Services': (
+          StartPreflightGroup.gps,
+          StartPreflightFix.locationServices,
+        ),
+        'Camera Ready': (
+          StartPreflightGroup.camera,
+          StartPreflightFix.retryCamera,
+        ),
+        'Media Write Access': (StartPreflightGroup.storage, null),
+        'Foreground Notification': (
+          StartPreflightGroup.notifications,
+          StartPreflightFix.appSettings,
+        ),
+        'Battery Optimization Exemption': (
+          StartPreflightGroup.battery,
+          StartPreflightFix.batteryExemption,
+        ),
+        'Incident Detection': (StartPreflightGroup.crashDetection, null),
+        'Battery Level': (StartPreflightGroup.battery, null),
+        'Device Temperature': (StartPreflightGroup.heat, null),
+      };
+      expect(checks.map((c) => c.title).toSet(), expected.keys.toSet());
+      for (final check in checks) {
+        final (group, fix) = expected[check.title]!;
+        expect(check.group, group, reason: check.title);
+        expect(check.fix, fix, reason: check.title);
+      }
+    });
+
+    test('only fixable or blocking items open the sheet by themselves', () {
+      final unfixable = StartPreflightEvaluator.evaluate(
+        inputs(
+          incidentDetectionAvailable: false,
+          batteryLevelPercent: 5,
+          batteryTemperatureC: 48,
+        ),
+      );
+      expect(startPreflightNeedsSheet(unfixable), isFalse);
+      final gpsOff = StartPreflightEvaluator.evaluate(
+        inputs(locationServicesEnabled: false),
+      );
+      expect(startPreflightNeedsSheet(gpsOff), isTrue);
+      expect(StartPreflightEvaluator.hasBlockingIssue(gpsOff), isTrue);
+    });
+
+    test('all OK: one OK row per group, heat apart as the chip', () {
+      final layout = StartPreflightEvaluator.layout(
+        StartPreflightEvaluator.evaluate(
+          inputs(batteryLevelPercent: 80, batteryTemperatureC: 31),
+        ),
+      );
+      expect(layout.rows.map((r) => r.title), [
+        'Permissions',
+        'Camera',
+        'Storage',
+        'GPS',
+        'Battery',
+        'Notification',
+      ]);
+      expect(
+        layout.rows.every((r) => r.status == StartPreflightStatus.ok),
+        isTrue,
+      );
+      expect(layout.rows.first.detail, 'Camera, microphone, location');
+      expect(
+        layout.rows.firstWhere((r) => r.title == 'Battery').detail,
+        'Exempt from battery saver, 80%',
+      );
+      expect(layout.heat?.title, 'Device Temperature');
+      expect(
+        layout.rows.any((r) => r.group == StartPreflightGroup.heat),
+        isFalse,
+      );
+    });
+
+    test('a group with open checks lists each open check with its fix', () {
+      final layout = StartPreflightEvaluator.layout(
+        StartPreflightEvaluator.evaluate(
+          inputs(
+            cameraPermissionGranted: false,
+            locationPermissionGranted: false,
+            locationServicesEnabled: false,
+            ignoresBatteryOptimization: false,
+            batteryLevelPercent: 10,
+            incidentDetectionAvailable: false,
+          ),
+        ),
+      );
+      expect(layout.rows.map((r) => r.title), [
+        'Permissions',
+        'Permissions',
+        'Camera',
+        'Storage',
+        'GPS',
+        'Battery',
+        'Battery',
+        'Notification',
+        'Crash detection',
+      ]);
+      final permissions = layout.rows.where((r) => r.title == 'Permissions');
+      expect(permissions.map((r) => r.detail), [
+        'Camera permission is required',
+        'Required for speed, distance, and route telemetry',
+      ]);
+      expect(permissions.every((r) => r.isBlocking), isTrue);
+      expect(
+        permissions.every((r) => r.fix == StartPreflightFix.appSettings),
+        isTrue,
+      );
+      final gps = layout.rows.firstWhere((r) => r.title == 'GPS');
+      expect(gps.status, StartPreflightStatus.failed);
+      expect(gps.isBlocking, isTrue);
+      expect(gps.fix, StartPreflightFix.locationServices);
+      final battery = layout.rows.where((r) => r.title == 'Battery').toList();
+      expect(battery[0].fix, StartPreflightFix.batteryExemption);
+      expect(battery[0].isBlocking, isFalse);
+      expect(battery[1].detail, '10% (low for long rides)');
+      expect(battery[1].fix, isNull);
+      final crash = layout.rows.last;
+      expect(crash.status, StartPreflightStatus.warning);
+      expect(crash.fix, isNull);
+      expect(layout.heat, isNull);
+    });
+
+    test('checks without a group are listed under their own title', () {
+      final layout = StartPreflightEvaluator.layout(const [
+        StartPreflightCheck(
+          title: 'Something',
+          detail: 'Off',
+          status: StartPreflightStatus.warning,
+          isBlocking: false,
+        ),
+      ]);
+      expect(layout.rows.single.title, 'Something');
+      expect(layout.rows.single.group, StartPreflightGroup.other);
     });
   });
 }

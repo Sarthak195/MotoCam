@@ -1,7 +1,8 @@
 // lib/features/recording/start_preflight_evaluator.dart
 //
 // Pure evaluation of the START checklist. The screen gathers the platform
-// status into [StartPreflightInputs]; this file only decides each row.
+// status into [StartPreflightInputs]; this file only decides each row and
+// how the rows are grouped on the checklist page.
 
 import 'widgets/start_preflight_sheet.dart';
 
@@ -70,6 +71,51 @@ class StartPreflightInputs {
   final double? batteryTemperatureC;
 }
 
+/// One row of the checklist page: a group (Permissions, Storage, GPS...)
+/// that is either all OK, or one of its checks that is not OK.
+class StartPreflightRow {
+  /// Creates a row.
+  const StartPreflightRow({
+    required this.group,
+    required this.title,
+    required this.detail,
+    required this.status,
+    required this.isBlocking,
+    this.fix,
+  });
+
+  /// The group this row stands for.
+  final StartPreflightGroup group;
+
+  /// Group name shown as the row title, for example "Permissions".
+  final String title;
+
+  /// What is wrong, or the OK summary of the whole group.
+  final String detail;
+
+  /// The row's state: OK only when every check of the group is OK.
+  final StartPreflightStatus status;
+
+  /// Whether this row is a failed blocking check (START stays disabled).
+  final bool isBlocking;
+
+  /// What the row's Fix button does; null when nothing can be fixed here.
+  final StartPreflightFix? fix;
+}
+
+/// The checklist page's content: the rows in display order and the phone
+/// temperature, which is shown as a chip and not as a row.
+class StartPreflightLayout {
+  /// Creates a layout.
+  const StartPreflightLayout({required this.rows, this.heat});
+
+  /// Rows in display order.
+  final List<StartPreflightRow> rows;
+
+  /// The phone temperature check, or null when the temperature is unknown.
+  final StartPreflightCheck? heat;
+}
+
 /// Decides the rows of the START checklist from [StartPreflightInputs].
 class StartPreflightEvaluator {
   const StartPreflightEvaluator._();
@@ -81,17 +127,34 @@ class StartPreflightEvaluator {
   /// warns.
   static const double hotBatteryCelsius = 43.0;
 
+  /// Display order of the groups on the checklist page. The phone
+  /// temperature is not a row (it is the heat chip).
+  static const List<StartPreflightGroup> groupOrder = [
+    StartPreflightGroup.permissions,
+    StartPreflightGroup.camera,
+    StartPreflightGroup.storage,
+    StartPreflightGroup.gps,
+    StartPreflightGroup.battery,
+    StartPreflightGroup.notifications,
+    StartPreflightGroup.crashDetection,
+    StartPreflightGroup.other,
+  ];
+
   /// Returns the checklist rows in display order.
   ///
   /// The permission, location services, camera and storage rows are blocking
   /// when they fail. The rest only warn. The battery-exemption row stops
   /// opening the sheet by itself once its one-time offer was made
   /// ([StartPreflightInputs.batteryExemptionOffered]) and the app is still
-  /// not exempt.
+  /// not exempt. Incident detection, battery level and phone temperature
+  /// never open the sheet by themselves: the rider cannot fix them before
+  /// START, so they are only shown when the sheet opens for another check.
   static List<StartPreflightCheck> evaluate(StartPreflightInputs inputs) {
     final checks = <StartPreflightCheck>[
       _blocking(
         title: 'Camera Permission',
+        group: StartPreflightGroup.permissions,
+        fix: StartPreflightFix.appSettings,
         passed: inputs.cameraPermissionGranted,
         okDetail: 'Granted',
         failDetail: 'Camera permission is required',
@@ -99,30 +162,39 @@ class StartPreflightEvaluator {
       if (inputs.audioEnabled)
         _blocking(
           title: 'Microphone Permission',
+          group: StartPreflightGroup.permissions,
+          fix: StartPreflightFix.appSettings,
           passed: inputs.microphonePermissionGranted,
           okDetail: 'Granted',
           failDetail: 'Microphone is required for audio',
         ),
       _blocking(
         title: 'Location Permission',
+        group: StartPreflightGroup.permissions,
+        fix: StartPreflightFix.appSettings,
         passed: inputs.locationPermissionGranted,
         okDetail: 'Granted',
         failDetail: 'Required for speed, distance, and route telemetry',
       ),
       _blocking(
         title: 'Location Services',
+        group: StartPreflightGroup.gps,
+        fix: StartPreflightFix.locationServices,
         passed: inputs.locationServicesEnabled,
-        okDetail: 'Enabled',
-        failDetail: 'Turn ON location services in system settings',
+        okDetail: 'Location is on',
+        failDetail: 'Location is off. Turn it on to start recording',
       ),
       _blocking(
         title: 'Camera Ready',
+        group: StartPreflightGroup.camera,
+        fix: StartPreflightFix.retryCamera,
         passed: inputs.cameraReady,
         okDetail: 'Preview and encoder are initialized',
-        failDetail: 'Camera initialization failed, retry from Recording screen',
+        failDetail: 'Camera initialization failed, retry',
       ),
       _blocking(
         title: 'Media Write Access',
+        group: StartPreflightGroup.storage,
         passed: inputs.recordingStorageWritable,
         okDetail: 'App recording storage is writable',
         failDetail: 'Unable to write to app recording storage',
@@ -133,6 +205,8 @@ class StartPreflightEvaluator {
       checks.add(
         _advisory(
           title: 'Foreground Notification',
+          group: StartPreflightGroup.notifications,
+          fix: StartPreflightFix.appSettings,
           passed: inputs.notificationsGranted,
           okDetail: 'Allowed',
           warnDetail:
@@ -147,9 +221,11 @@ class StartPreflightEvaluator {
       checks.add(
         _advisory(
           title: 'Battery Optimization Exemption',
+          group: StartPreflightGroup.battery,
+          fix: StartPreflightFix.batteryExemption,
           passed: inputs.ignoresBatteryOptimization,
-          okDetail: 'Enabled',
-          warnDetail: 'Recommended for stable screen-off recording',
+          okDetail: 'Exempt from battery saver',
+          warnDetail: 'Battery saver may stop recording',
           opensSheet: !offerDeclined,
         ),
       );
@@ -164,6 +240,8 @@ class StartPreflightEvaluator {
               'use LOCK.',
           status: StartPreflightStatus.warning,
           isBlocking: false,
+          opensSheet: false,
+          group: StartPreflightGroup.crashDetection,
         ),
       );
     }
@@ -177,6 +255,8 @@ class StartPreflightEvaluator {
           detail: '$batteryLevel%${low ? ' (low for long rides)' : ''}',
           status: low ? StartPreflightStatus.warning : StartPreflightStatus.ok,
           isBlocking: false,
+          opensSheet: false,
+          group: StartPreflightGroup.battery,
         ),
       );
     }
@@ -192,6 +272,9 @@ class StartPreflightEvaluator {
               '${hot ? ' (high temperature)' : ''}',
           status: hot ? StartPreflightStatus.warning : StartPreflightStatus.ok,
           isBlocking: false,
+          opensSheet: false,
+          group: StartPreflightGroup.heat,
+          measurement: '${batteryTemp.toStringAsFixed(1)} C',
         ),
       );
     }
@@ -207,25 +290,136 @@ class StartPreflightEvaluator {
     );
   }
 
+  /// Name of [group] as the checklist shows it.
+  static String groupTitle(StartPreflightGroup group) {
+    switch (group) {
+      case StartPreflightGroup.permissions:
+        return 'Permissions';
+      case StartPreflightGroup.camera:
+        return 'Camera';
+      case StartPreflightGroup.storage:
+        return 'Storage';
+      case StartPreflightGroup.gps:
+        return 'GPS';
+      case StartPreflightGroup.battery:
+        return 'Battery';
+      case StartPreflightGroup.notifications:
+        return 'Notification';
+      case StartPreflightGroup.crashDetection:
+        return 'Crash detection';
+      case StartPreflightGroup.heat:
+        return 'Phone temperature';
+      case StartPreflightGroup.other:
+        return 'Other';
+    }
+  }
+
+  /// Groups [checks] into the rows of the checklist page.
+  ///
+  /// A group whose checks are all OK becomes one OK row with a summary
+  /// ("Camera, microphone, location" for the permissions). A group with a
+  /// check that is not OK becomes one row per such check, carrying that
+  /// check's detail, blocking flag and fix; its OK checks are not repeated.
+  /// The phone temperature is returned apart, for the heat chip.
+  static StartPreflightLayout layout(List<StartPreflightCheck> checks) {
+    StartPreflightCheck? heat;
+    final byGroup = <StartPreflightGroup, List<StartPreflightCheck>>{};
+    for (final check in checks) {
+      if (check.group == StartPreflightGroup.heat) {
+        heat = check;
+        continue;
+      }
+      byGroup.putIfAbsent(check.group, () => []).add(check);
+    }
+
+    final rows = <StartPreflightRow>[];
+    for (final group in groupOrder) {
+      final members = byGroup[group];
+      if (members == null || members.isEmpty) {
+        continue;
+      }
+      final open = members
+          .where((check) => check.status != StartPreflightStatus.ok)
+          .toList();
+      if (open.isEmpty) {
+        rows.add(
+          StartPreflightRow(
+            group: group,
+            title: group == StartPreflightGroup.other
+                ? members.map((check) => check.title).join(', ')
+                : groupTitle(group),
+            detail: _okSummary(group, members),
+            status: StartPreflightStatus.ok,
+            isBlocking: false,
+          ),
+        );
+        continue;
+      }
+      for (final check in open) {
+        rows.add(
+          StartPreflightRow(
+            group: group,
+            title: group == StartPreflightGroup.other
+                ? check.title
+                : groupTitle(group),
+            detail: check.detail,
+            status: check.status,
+            isBlocking:
+                check.isBlocking && check.status == StartPreflightStatus.failed,
+            fix: check.fix,
+          ),
+        );
+      }
+    }
+    return StartPreflightLayout(rows: rows, heat: heat);
+  }
+
+  static String _okSummary(
+    StartPreflightGroup group,
+    List<StartPreflightCheck> members,
+  ) {
+    if (group == StartPreflightGroup.permissions) {
+      final names = [
+        for (final check in members)
+          switch (check.title) {
+            'Camera Permission' => 'camera',
+            'Microphone Permission' => 'microphone',
+            'Location Permission' => 'location',
+            _ => check.title.toLowerCase(),
+          },
+      ].join(', ');
+      return names.isEmpty
+          ? names
+          : '${names[0].toUpperCase()}${names.substring(1)}';
+    }
+    return members.map((check) => check.detail).join(', ');
+  }
+
   static StartPreflightCheck _blocking({
     required String title,
+    required StartPreflightGroup group,
     required bool passed,
     required String okDetail,
     required String failDetail,
+    StartPreflightFix? fix,
   }) {
     return StartPreflightCheck(
       title: title,
       detail: passed ? okDetail : failDetail,
       status: passed ? StartPreflightStatus.ok : StartPreflightStatus.failed,
       isBlocking: true,
+      group: group,
+      fix: fix,
     );
   }
 
   static StartPreflightCheck _advisory({
     required String title,
+    required StartPreflightGroup group,
     required bool passed,
     required String okDetail,
     required String warnDetail,
+    StartPreflightFix? fix,
     bool opensSheet = true,
   }) {
     return StartPreflightCheck(
@@ -234,6 +428,8 @@ class StartPreflightEvaluator {
       status: passed ? StartPreflightStatus.ok : StartPreflightStatus.warning,
       isBlocking: false,
       opensSheet: opensSheet,
+      group: group,
+      fix: fix,
     );
   }
 }
