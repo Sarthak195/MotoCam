@@ -18,6 +18,62 @@ const Color _menuFill = Color(0xFF232723);
 const Color _menuOutline = Color(0xFF454A44);
 const Color _deleteColor = Color(0xFFFF7A62);
 
+/// The actions of the Rides top bar: "Import" (Android: the import from
+/// an older version, with that full name as its tooltip; there is no
+/// restore yet, so the board's "or restore" is not shown) and the "Check a
+/// received export" slot, left out of the tree while
+/// [kCheckReceivedExport] is off.
+class RideListTopBarActions extends StatelessWidget {
+  /// Creates the actions.
+  const RideListTopBarActions({
+    super.key,
+    required this.android,
+    required this.onImport,
+  });
+
+  /// Whether the import is offered (Android only).
+  final bool android;
+
+  /// Starts the import from an older version.
+  final VoidCallback onImport;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (android)
+          Padding(
+            padding: const EdgeInsets.only(right: MotoSize.gap),
+            child: Tooltip(
+              message: 'Import rides from an older version',
+              child: OutlinedButton.icon(
+                style: OutlinedButton.styleFrom(
+                  minimumSize: const Size(0, MotoSize.minTarget),
+                  backgroundColor: MotoColors.surfaceHigh,
+                  side: const BorderSide(color: MotoColors.hairlineStrong),
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                  textStyle: MotoFonts.bodyStyle(15, weight: FontWeight.w600),
+                ),
+                onPressed: onImport,
+                icon: const Icon(Icons.download, size: 20),
+                label: const Text('Import'),
+              ),
+            ),
+          ),
+        // No checker exists yet: the slot stays out of the tree until the
+        // flag is on.
+        if (kCheckReceivedExport)
+          const IconButton(
+            tooltip: 'Check a received export',
+            onPressed: null,
+            icon: Icon(Icons.fact_check_outlined),
+          ),
+      ],
+    );
+  }
+}
+
 /// The three in-memory filter chips (Locked, Incidents, Recovered).
 class RideFilterBar extends StatelessWidget {
   /// Creates the bar.
@@ -408,10 +464,14 @@ class IncompleteRideRow extends StatelessWidget {
     required this.integrityText,
     required this.trailing,
     required this.onOpen,
+    this.details = const <String>[],
   });
 
   /// "13 Nov, 13:21".
   final String dateLabel;
+
+  /// Short notes kept from the old card (video kept, gallery copies).
+  final List<String> details;
 
   /// "Recording ended without Stop at about 14:02. 41 minutes saved."
   final String text;
@@ -528,6 +588,14 @@ class IncompleteRideRow extends StatelessWidget {
                   child: RideStampsView(stamps: stamps),
                 ),
               ],
+              for (final line in details)
+                Padding(
+                  padding: const EdgeInsets.only(top: 4, right: 8),
+                  child: Text(
+                    line,
+                    style: MotoFonts.bodyStyle(13, color: MotoColors.dim),
+                  ),
+                ),
               const SizedBox(height: MotoSize.gapWide),
               Row(
                 children: [

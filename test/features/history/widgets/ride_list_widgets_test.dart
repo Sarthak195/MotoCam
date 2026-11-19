@@ -70,6 +70,7 @@ void main() {
         note: incompleteRideNote(ride),
         stamps: stamps.where((s) => s.kind != RideStampKind.unsigned).toList(),
         integrityText: rideIntegrityLine(ride),
+        details: const <String>['Video: 00:30:00 of 00:41:00 kept'],
         trailing: menu,
         onOpen: onOpen ?? () {},
       );
@@ -119,13 +120,7 @@ void main() {
                 'Rides',
                 style: MotoFonts.condensedStyle(30, color: MotoColors.text),
               ),
-              actions: [
-                OutlinedButton.icon(
-                  onPressed: () {},
-                  icon: const Icon(Icons.download, size: 20),
-                  label: const Text('Import'),
-                ),
-              ],
+              actions: [RideListTopBarActions(android: true, onImport: () {})],
             ),
             body: Column(
               children: [
@@ -247,6 +242,8 @@ void main() {
       ),
       findsOneWidget,
     );
+    // The video kept line is not lost on the amber row.
+    expect(find.text('Video: 00:30:00 of 00:41:00 kept'), findsOneWidget);
     // The note says it, so no Unsigned stamp repeats it.
     expect(find.text('Unsigned'), findsNothing);
     expect(find.text('Keep'), findsNothing);
@@ -267,6 +264,43 @@ void main() {
     expect(border.color, MotoColors.amber);
     await tester.tap(find.text('Open'));
     expect(opened, 1);
+  });
+
+  testWidgets('the top bar offers Import (Android) with its full name, and '
+      'no Check slot', (tester) async {
+    var imports = 0;
+    Future<void> pumpBar(bool android) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: buildAppTheme(),
+          home: Scaffold(
+            appBar: AppBar(
+              title: const Text('Rides'),
+              actions: [
+                RideListTopBarActions(
+                  android: android,
+                  onImport: () => imports++,
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+
+    await pumpBar(true);
+    expect(find.text('Import'), findsOneWidget);
+    expect(
+      find.byTooltip('Import rides from an older version'),
+      findsOneWidget,
+    );
+    expect(find.textContaining('restore'), findsNothing);
+    expect(find.byTooltip('Check a received export'), findsNothing);
+    await tester.tap(find.text('Import'));
+    expect(imports, 1);
+
+    await pumpBar(false);
+    expect(find.text('Import'), findsNothing);
   });
 
   testWidgets('a filter chip toggles and reports its state', (tester) async {

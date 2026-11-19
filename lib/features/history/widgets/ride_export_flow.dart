@@ -142,10 +142,7 @@ Future<void> runRideExportFlow(
             ? camera.rideExportBlockedReason ??
                   'Could not export the ride on this phone.'
             : rideExportSummary(result),
-        success:
-            result != null &&
-            result.outcome == RideExportOutcome.done &&
-            result.sourceDiffers == 0,
+        success: rideExportSummaryIsClean(result),
       ),
     );
   } finally {
@@ -153,8 +150,19 @@ Future<void> runRideExportFlow(
   }
 }
 
+/// Whether an export's summary gets the check mark: a folder export that
+/// finished with every clip matching its recorded hash. A share never
+/// does, because MotoCam cannot check what the receiving app got; nor does
+/// a run that stopped, failed, could not start (`null`) or found clips
+/// that differ.
+bool rideExportSummaryIsClean(RideExportResult? result) =>
+    result != null &&
+    result.outcome == RideExportOutcome.done &&
+    result.destination == RideExportDestination.folder &&
+    result.sourceDiffers == 0;
+
 /// The closing summary of an export, shown for 8 s: a check mark when
-/// every file was exported and matched its recorded hash ([success]),
+/// the export is clean ([success], see [rideExportSummaryIsClean]),
 /// otherwise an amber mark, then the summary [text] (every outcome:
 /// done, paused, cancelled, failed, share, clips that differ). "Open
 /// folder" waits behind [kOpenExportFolder] and is not in the tree.

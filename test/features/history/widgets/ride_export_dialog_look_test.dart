@@ -209,6 +209,49 @@ void main() {
     }
   }
 
+  test('only a folder export with every clip matching gets the check '
+      'mark', () {
+    RideExportResult result(
+      RideExportOutcome outcome, {
+      RideExportDestination destination = RideExportDestination.folder,
+      bool differs = false,
+    }) => RideExportResult(
+      outcome: outcome,
+      destination: destination,
+      folderName: 'MotoCam ride x',
+      clips: <RideExportFileEntry>[
+        RideExportFileEntry(
+          name: 'a.mp4',
+          bytes: 1,
+          sha256: 'a' * 64,
+          recordedSha256: differs ? 'b' * 64 : 'a' * 64,
+        ),
+      ],
+    );
+    expect(rideExportSummaryIsClean(result(RideExportOutcome.done)), true);
+    expect(
+      rideExportSummaryIsClean(
+        result(
+          RideExportOutcome.done,
+          destination: RideExportDestination.share,
+        ),
+      ),
+      false,
+    );
+    expect(
+      rideExportSummaryIsClean(result(RideExportOutcome.done, differs: true)),
+      false,
+    );
+    for (final outcome in <RideExportOutcome>[
+      RideExportOutcome.paused,
+      RideExportOutcome.cancelled,
+      RideExportOutcome.failed,
+    ]) {
+      expect(rideExportSummaryIsClean(result(outcome)), false);
+    }
+    expect(rideExportSummaryIsClean(null), false);
+  });
+
   group('the closing summary', () {
     Future<void> show(WidgetTester tester, SnackBar bar) async {
       await tester.pumpWidget(

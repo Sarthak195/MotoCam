@@ -9,7 +9,6 @@ import 'package:provider/provider.dart';
 
 import 'package:permission_handler/permission_handler.dart';
 
-import '../../core/build_flags.dart';
 import '../../core/providers/app_settings_provider.dart';
 import '../../core/services/app_permission_service.dart';
 import '../../core/services/device_status_service.dart';
@@ -992,33 +991,10 @@ class _RidesListScreenState extends State<RidesListScreen> {
           style: MotoFonts.condensedStyle(30, color: MotoColors.text),
         ),
         actions: [
-          if (Platform.isAndroid)
-            Padding(
-              padding: const EdgeInsets.only(right: MotoSize.gap),
-              child: Tooltip(
-                message: 'Import rides from an older version',
-                child: OutlinedButton.icon(
-                  style: OutlinedButton.styleFrom(
-                    minimumSize: const Size(0, MotoSize.minTarget),
-                    backgroundColor: MotoColors.surfaceHigh,
-                    side: const BorderSide(color: MotoColors.hairlineStrong),
-                    padding: const EdgeInsets.symmetric(horizontal: 12),
-                    textStyle: MotoFonts.bodyStyle(15, weight: FontWeight.w600),
-                  ),
-                  onPressed: _importFromOlderVersion,
-                  icon: const Icon(Icons.download, size: 20),
-                  label: const Text('Import'),
-                ),
-              ),
-            ),
-          // "Check a received export" has no checker yet: its slot stays
-          // out of the tree until kCheckReceivedExport is on.
-          if (kCheckReceivedExport)
-            const IconButton(
-              tooltip: 'Check a received export',
-              onPressed: null,
-              icon: Icon(Icons.fact_check_outlined),
-            ),
+          RideListTopBarActions(
+            android: Platform.isAndroid,
+            onImport: _importFromOlderVersion,
+          ),
         ],
       ),
       body: Column(
@@ -1237,6 +1213,12 @@ class _RidesListScreenState extends State<RidesListScreen> {
     final stamps = rideStamps(ride, videoCheck);
     final videoLine = describeVideoCheck(videoCheck);
     final integrity = [rideIntegrityLine(ride), ?videoLine].join('\n');
+    final galleryCopies = _galleryLinksOf(ride).length;
+    final details = <String>[
+      ?_videoCoverageText(ride),
+      if (galleryCopies > 0)
+        'Gallery copies: $galleryCopies (readable by other apps)',
+    ];
     if (isIncompleteRideRow(ride)) {
       final note = incompleteRideNote(ride);
       return IncompleteRideRow(
@@ -1249,21 +1231,17 @@ class _RidesListScreenState extends State<RidesListScreen> {
                   .where((stamp) => stamp.kind != RideStampKind.unsigned)
                   .toList(growable: false),
         integrityText: integrity,
+        details: details,
         trailing: _buildTrailing(ride),
         onOpen: () => unawaited(_openRide(ride)),
       );
     }
-    final galleryCopies = _galleryLinksOf(ride).length;
     return RideRow(
       dateLabel: rideDateLabel(ride.createdAt, now),
       summary: rideSummaryText(ride, formatFileSize),
       stamps: stamps,
       integrityText: integrity,
-      details: [
-        ?_videoCoverageText(ride),
-        if (galleryCopies > 0)
-          'Gallery copies: $galleryCopies (readable by other apps)',
-      ],
+      details: details,
       trailing: _buildTrailing(ride),
       onOpen: () => unawaited(_openRide(ride)),
     );
