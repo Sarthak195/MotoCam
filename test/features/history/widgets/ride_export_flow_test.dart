@@ -189,6 +189,272 @@ void main() {
     expect(find.text(_keepOpen), findsOneWidget);
   });
 
+  group('a section', () {
+    const sectionTitle = 'A section of the ride';
+    const wholeRideData =
+        'The ride data covers the whole ride, including the route outside '
+        'this section.';
+
+    /// A ride of [segments] (in /r/) with a timeline of one-minute clips
+    /// from 14:00 when [timed], [locked] clips and [incidents].
+    RideRecord makeRide(
+      List<String> segments, {
+      bool timed = false,
+      List<String> locked = const <String>[],
+      List<int>? incidents,
+    }) => RideRecord(
+      videoPath: '/r/${segments.last}',
+      segmentPaths: <String>[for (final s in segments) '/r/$s'],
+      lockedSegmentPaths: <String>[for (final s in locked) '/r/$s'],
+      createdAt: DateTime(2026, 11, 19, 14),
+      telemetryPath: '/r/ride_y.telemetry.json',
+      rideSessionId: 'y',
+      isSessionComplete: true,
+      distanceKm: 0,
+      maxSpeedKmh: 0,
+      averageSpeedKmh: 0,
+      segmentTimeline: <RideSegmentTimelineEntry>[
+        if (timed)
+          for (var i = 0; i < segments.length; i++)
+            RideSegmentTimelineEntry(
+              path: '/r/${segments[i]}',
+              startMs: i * 60000,
+              endMs: i * 60000 + 59800,
+            ),
+      ],
+      samples: const [],
+      integrity: const RideIntegrityReport.unknown(),
+      quarantinedSegmentPaths: const <String>[],
+      incidents: incidents == null
+          ? null
+          : <RideIncident>[
+              for (final t in incidents) RideIncident(elapsedMs: t),
+            ],
+    );
+
+    RideExportPlan allOf(RideRecord record, List<RideExportItem> clips) =>
+        RideExportPlan(
+          source: RideExportSource(ride: record),
+          clipChoice: RideExportClips.all,
+          includeRideData: true,
+          folderName: 'MotoCam ride y (all clips)',
+          clips: clips,
+          rideData: null,
+          notExported: const <RideExportOmission>[],
+          unmappedIncidentsMs: const <int>[],
+        );
+
+    Future<RideExportChoice? Function()> openSection(
+      WidgetTester tester, {
+      RideExportPlan? allPlan,
+      RideExportSection? initialSection,
+    }) async {
+      RideExportChoice? popped;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Builder(
+            builder: (context) => TextButton(
+              onPressed: () async {
+                popped = await showDialog<RideExportChoice>(
+                  context: context,
+                  builder: (_) => RideExportDialog(
+                    destination: RideExportDestination.folder,
+                    evidence: evidence,
+                    all: allPlan ?? all,
+                    hasRideData: true,
+                    initialSection: initialSection,
+                  ),
+                );
+              },
+              child: const Text('open'),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('open'));
+      await tester.pumpAndSettle();
+      return () => popped;
+    }
+
+    Future<void> pickSection(WidgetTester tester) async {
+      await tester.tap(find.text(sectionTitle));
+      await tester.pumpAndSettle();
+    }
+
+    Future<void> slide(WidgetTester tester, double first, double last) async {
+      tester.widget<RangeSlider>(find.byType(RangeSlider)).onChanged!(
+        RangeValues(first, last),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    Future<void> export(WidgetTester tester) async {
+      await tester.tap(find.text('Export'));
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('it starts as the whole ride, with its count and size, and '
+        'says the ride data covers the whole ride', (tester) async {
+      final result = await openSection(tester);
+
+      expect(find.byType(RangeSlider), findsNothing);
+      await pickSection(tester);
+      final slider = tester.widget<RangeSlider>(find.byType(RangeSlider));
+      expect(slider.values, const RangeValues(1, 3));
+      expect(slider.min, 1);
+      expect(slider.max, 3);
+      expect(slider.divisions, 2);
+      expect(
+        find.text('Clips 1 to 3 of 3, 3 clips, ${formatFileSize(6000000)}'),
+        findsOneWidget,
+      );
+      expect(find.text(wholeRideData), findsOneWidget);
+
+      await tester.tap(find.text('Include ride data'));
+      await tester.pumpAndSettle();
+      expect(find.text(wholeRideData), findsNothing);
+
+      await export(tester);
+      expect(result()?.clips, RideExportClips.section);
+      expect(result()?.section, const RideExportSection(1, 3));
+      expect(result()?.includeRideData, isFalse);
+    });
+
+    testWidgets('moving the handles updates the label and the choice', (
+      tester,
+    ) async {
+      final result = await openSection(tester);
+      await pickSection(tester);
+
+      await slide(tester, 2, 3);
+      expect(
+        find.text('Clips 2 to 3 of 3, 2 clips, ${formatFileSize(5000000)}'),
+        findsOneWidget,
+      );
+      await slide(tester, 2, 2);
+      expect(
+        find.text('Clip 2 of 3, 1 clip, ${formatFileSize(2000000)}'),
+        findsOneWidget,
+      );
+      await export(tester);
+      expect(result()?.section, const RideExportSection(2, 2));
+    });
+
+    testWidgets('from Playback it starts at the clip under the playhead', (
+      tester,
+    ) async {
+      final result = await openSection(
+        tester,
+        initialSection: const RideExportSection(3, 3),
+      );
+      await pickSection(tester);
+
+      expect(
+        tester.widget<RangeSlider>(find.byType(RangeSlider)).values,
+        const RangeValues(3, 3),
+      );
+      expect(
+        find.text('Clip 3 of 3, 1 clip, ${formatFileSize(3000000)}'),
+        findsOneWidget,
+      );
+      await export(tester);
+      expect(result()?.section, const RideExportSection(3, 3));
+    });
+
+    testWidgets('a start outside the ride falls back to the whole ride', (
+      tester,
+    ) async {
+      await openSection(tester, initialSection: const RideExportSection(2, 7));
+      await pickSection(tester);
+      expect(
+        tester.widget<RangeSlider>(find.byType(RangeSlider)).values,
+        const RangeValues(1, 3),
+      );
+    });
+
+    testWidgets('a missing clip counts for neither the count nor the size', (
+      tester,
+    ) async {
+      await openSection(
+        tester,
+        allPlan: allOf(ride, <RideExportItem>[
+          clip('a.mp4', 1000000),
+          clip('c.mp4', 3000000),
+        ]),
+      );
+      await pickSection(tester);
+      expect(
+        find.text('Clips 1 to 3 of 3, 2 clips, ${formatFileSize(4000000)}'),
+        findsOneWidget,
+      );
+      await slide(tester, 2, 2);
+      expect(find.text('Clip 2 of 3, 0 clips, 0 B'), findsOneWidget);
+    });
+
+    testWidgets('with a timeline it shows ride times and lock and incident '
+        'marks', (tester) async {
+      final record = makeRide(
+        <String>['a.mp4', 'b.mp4', 'c.mp4'],
+        timed: true,
+        locked: <String>['b.mp4'],
+        incidents: <int>[150000],
+      );
+      await openSection(
+        tester,
+        allPlan: allOf(record, <RideExportItem>[
+          clip('a.mp4', 1000000),
+          clip('b.mp4', 2000000),
+          clip('c.mp4', 3000000),
+        ]),
+      );
+      await pickSection(tester);
+
+      expect(
+        find.text(
+          'Clips 1 to 3 of 3 (14:00 to 14:02), 3 clips, '
+          '${formatFileSize(6000000)}',
+        ),
+        findsOneWidget,
+      );
+      expect(find.bySemanticsLabel('Locked clip 2'), findsOneWidget);
+      expect(find.bySemanticsLabel('Incident in clip 3'), findsOneWidget);
+      await slide(tester, 2, 3);
+      expect(
+        find.text(
+          'Clips 2 to 3 of 3 (14:01 to 14:02), 2 clips, '
+          '${formatFileSize(5000000)}',
+        ),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('without a timeline it shows no marks', (tester) async {
+      final record = makeRide(
+        <String>['a.mp4', 'b.mp4'],
+        locked: <String>['b.mp4'],
+        incidents: <int>[1000],
+      );
+      await openSection(
+        tester,
+        allPlan: allOf(record, <RideExportItem>[clip('a.mp4', 1000000)]),
+      );
+      await pickSection(tester);
+      expect(find.byIcon(Icons.lock), findsNothing);
+      expect(find.byIcon(Icons.warning_amber), findsNothing);
+    });
+
+    testWidgets('a ride of one clip has no section option', (tester) async {
+      await openSection(
+        tester,
+        allPlan: allOf(makeRide(<String>['a.mp4']), <RideExportItem>[
+          clip('a.mp4', 1000000),
+        ]),
+      );
+      expect(find.text(sectionTitle), findsNothing);
+      expect(find.byType(RadioListTile<RideExportClips>), findsNWidgets(2));
+    });
+  });
+
   testWidgets('cancel pops nothing', (tester) async {
     final result = await open(tester);
 
