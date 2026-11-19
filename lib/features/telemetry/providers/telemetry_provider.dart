@@ -411,6 +411,9 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
       return;
     }
     _startTracking();
+    // The location-service flag may have changed while paused (the rider
+    // switched Location off in Settings); show it without waiting for a fix.
+    _forceNotifyUi();
   }
 
   LocationSettings _buildLocationSettings({Duration? timeLimit}) {

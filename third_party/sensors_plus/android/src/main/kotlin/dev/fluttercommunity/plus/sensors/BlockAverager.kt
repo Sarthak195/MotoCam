@@ -10,7 +10,9 @@ package dev.fluttercommunity.plus.sensors
  * the period: the output rate equals 1 / period on average. A sample closes
  * the block when it lands within half a source interval (at most half a
  * period) of the block's end; it is part of the block it closes. The output
- * carries the closing sample's timestamp.
+ * carries the closing sample's timestamp. A closing sample more than half a
+ * period late (a gap in the source) restarts the schedule from itself, so no
+ * output follows the previous one by less than about half a period.
  *
  * Not thread-safe: call [add] from one thread only.
  */
@@ -52,8 +54,10 @@ internal class BlockAverager(private val periodNs: Long) {
         sum.fill(0.0)
         count = 0
         blockEndNs += periodNs
-        if (timestampNs >= blockEndNs) {
-            // A gap of more than a period: resync instead of bursting.
+        if (timestampNs >= blockEndNs - periodNs / 2) {
+            // The closing sample came more than half a period late (a gap in
+            // the source): restart the schedule, so the next block is a full
+            // period long instead of a short catch-up block.
             blockEndNs = timestampNs + periodNs
         }
         return Sample(mean, timestampNs)

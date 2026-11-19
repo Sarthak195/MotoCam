@@ -69,6 +69,24 @@ class BlockAveragerTest {
     }
 
     @Test
+    fun shortGapsGiveNoShortCatchUpBlock() {
+        // Gaps of about 1 to 2 periods used to end in a block of one sample
+        // about 10 ms after the previous output.
+        val all = source(101.0, 2.0)
+        for (missing in 4..14) {
+            for (offset in 0..6) {
+                val from = 30 + offset
+                val kept = all.filterIndexed { i, _ -> i < from || i >= from + missing }
+                val out = run(BlockAverager(uiPeriodNs), kept)
+                out.zipWithNext().forEach { (a, b) ->
+                    val gapMs = (b.timestampNs - a.timestampNs) / 1e6
+                    assertTrue("missing $missing offset $offset: $gapMs ms", gapMs >= 25.0)
+                }
+            }
+        }
+    }
+
+    @Test
     fun clockGoingBackDoesNotStallOutput() {
         val first = source(100.0, 1.0, startNs = 20_000_000_000L)
         val second = source(100.0, 1.0, startNs = 5_000_000_000L)

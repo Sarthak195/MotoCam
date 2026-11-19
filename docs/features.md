@@ -300,7 +300,7 @@ The gear icon opens [recording_settings_sheet.dart](../lib/features/recording/wi
 | Segment length | 5 min | 5 s to 10 min |
 | Loop buffer size | 24 segments | 6, 12, 18, 24, 36, 48 (unlocked segments kept per ride) |
 | Storage budget for all rides | Off | Off, 4, 8, 16, 32, 64 GB ("When recordings exceed it, the oldest unlocked rides are deleted while you record. Locked rides are never deleted."). Takes effect at the next START |
-| Speed UI refresh | 100 ms | 100, 200, 300, 500 ms (throttles GPS- and accelerometer-driven UI updates) |
+| Speed UI refresh | 100 ms | 100, 200, 300, 500 ms (throttles GPS-driven UI updates; an update inside the interval is shown when it ends) |
 | Incident sensitivity | Medium | Low (fewer auto-locks), Medium, High (more auto-locks) |
 | Record audio | on | on/off ("Disable for lower CPU and storage usage") |
 | Copy locked clips to gallery (Android only) | off | on/off |
