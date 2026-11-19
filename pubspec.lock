@@ -674,10 +674,9 @@ packages:
   sensors_plus:
     dependency: "direct main"
     description:
-      name: sensors_plus
-      sha256: "50a01f66846bff68de947bd5df225c3627c923c467f758867f3916350be059ac"
-      url: "https://pub.dev"
-    source: hosted
+      path: "third_party/sensors_plus"
+      relative: true
+    source: path
     version: "7.1.1"
   sensors_plus_platform_interface:
     dependency: transitive

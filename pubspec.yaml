@@ -56,9 +56,13 @@ dev_dependencies:
 # camera_android_camerax 0.7.2 is vendored with MotoCam patches (segment rolls
 # keep the video stream bound; the preview surface is released before the engine
 # detaches). See third_party/camera_android_camerax/MOTOCAM_PATCHES.md.
+# sensors_plus 7.1.1 is vendored so slow sensor streams are averaged off the
+# main thread. See third_party/sensors_plus/MOTOCAM_PATCHES.md.
 dependency_overrides:
   camera_android_camerax:
     path: third_party/camera_android_camerax
+  sensors_plus:
+    path: third_party/sensors_plus
 
 flutter:
   uses-material-design: true

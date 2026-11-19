@@ -3,6 +3,9 @@ package dev.fluttercommunity.plus.sensors
 import android.content.Context
 import android.hardware.Sensor
 import android.hardware.SensorManager
+import android.os.Handler
+import android.os.HandlerThread
+import android.os.Process
 import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.embedding.engine.plugins.FlutterPlugin.FlutterPluginBinding
 import io.flutter.plugin.common.BinaryMessenger
@@ -24,6 +27,11 @@ class SensorsPlugin : FlutterPlugin {
     private lateinit var gyroscopeStreamHandler: StreamHandlerImpl
     private lateinit var magnetometerStreamHandler: StreamHandlerImpl
     private lateinit var barometerStreamHandler: StreamHandlerImpl
+
+    // MotoCam patch: thread for the averaging listeners (see
+    // StreamHandlerImpl), started on first use and quit on detach.
+    private var sensorThread: HandlerThread? = null
+    private var sensorHandler: Handler? = null
 
     override fun onAttachedToEngine(binding: FlutterPluginBinding) {
         setupMethodChannel(binding.binaryMessenger)
@@ -65,35 +73,40 @@ class SensorsPlugin : FlutterPlugin {
         accelerometerChannel = EventChannel(messenger, ACCELEROMETER_CHANNEL_NAME)
         accelerometerStreamHandler = StreamHandlerImpl(
             sensorsManager,
-            Sensor.TYPE_ACCELEROMETER
+            Sensor.TYPE_ACCELEROMETER,
+            ::sensorThreadHandler
         )
         accelerometerChannel.setStreamHandler(accelerometerStreamHandler)
 
         userAccelChannel = EventChannel(messenger, USER_ACCELEROMETER_CHANNEL_NAME)
         userAccelStreamHandler = StreamHandlerImpl(
             sensorsManager,
-            Sensor.TYPE_LINEAR_ACCELERATION
+            Sensor.TYPE_LINEAR_ACCELERATION,
+            ::sensorThreadHandler
         )
         userAccelChannel.setStreamHandler(userAccelStreamHandler)
 
         gyroscopeChannel = EventChannel(messenger, GYROSCOPE_CHANNEL_NAME)
         gyroscopeStreamHandler = StreamHandlerImpl(
             sensorsManager,
-            Sensor.TYPE_GYROSCOPE
+            Sensor.TYPE_GYROSCOPE,
+            ::sensorThreadHandler
         )
         gyroscopeChannel.setStreamHandler(gyroscopeStreamHandler)
 
         magnetometerChannel = EventChannel(messenger, MAGNETOMETER_CHANNEL_NAME)
         magnetometerStreamHandler = StreamHandlerImpl(
             sensorsManager,
-            Sensor.TYPE_MAGNETIC_FIELD
+            Sensor.TYPE_MAGNETIC_FIELD,
+            ::sensorThreadHandler
         )
         magnetometerChannel.setStreamHandler(magnetometerStreamHandler)
 
         barometerChannel = EventChannel(messenger, BAROMETER_CHANNEL_NAME)
         barometerStreamHandler = StreamHandlerImpl(
             sensorsManager,
-            Sensor.TYPE_PRESSURE
+            Sensor.TYPE_PRESSURE,
+            ::sensorThreadHandler
         )
         barometerChannel.setStreamHandler(barometerStreamHandler)
     }
@@ -110,6 +123,18 @@ class SensorsPlugin : FlutterPlugin {
         gyroscopeStreamHandler.onCancel(null)
         magnetometerStreamHandler.onCancel(null)
         barometerStreamHandler.onCancel(null)
+
+        sensorThread?.quitSafely()
+        sensorThread = null
+        sensorHandler = null
+    }
+
+    private fun sensorThreadHandler(): Handler {
+        sensorHandler?.let { return it }
+        val thread = HandlerThread("SensorsPlus", Process.THREAD_PRIORITY_DISPLAY)
+        thread.start()
+        sensorThread = thread
+        return Handler(thread.looper).also { sensorHandler = it }
     }
 
     companion object {

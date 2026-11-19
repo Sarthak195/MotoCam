@@ -66,4 +66,6 @@ android {
 dependencies {
     val kotlinVersion = "2.2.0"
     implementation("org.jetbrains.kotlin:kotlin-stdlib:$kotlinVersion")
+    // MotoCam patch: JVM tests for BlockAverager.
+    testImplementation("junit:junit:4.13.2")
 }

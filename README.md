@@ -208,7 +208,7 @@ Versions are the ones resolved in `pubspec.lock`, and the toolchain the maintain
 | State management | `provider` | 6.1.5+1 |
 | Camera | `camera` | 0.12.0+2 |
 | Location | `geolocator` | 14.1.2 |
-| Accelerometer | `sensors_plus` | 7.1.1 |
+| Accelerometer | `sensors_plus` (vendored in `third_party/sensors_plus` with one Android patch) | 7.1.1 |
 | File locations | `path_provider` | 2.1.6 |
 | Permissions | `permission_handler` | 12.0.3 |
 | Date formatting | `intl` | 0.20.3 |
