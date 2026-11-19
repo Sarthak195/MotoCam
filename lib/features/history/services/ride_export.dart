@@ -432,8 +432,7 @@ List<int> rideIncidentClipNumbers(RideRecord ride) {
       path_utils.normalizePath(ride.segmentPaths[i]): i + 1,
   };
   return <int>[
-    for (final incident in _mapIncidents(ride))
-      ?numbers[incident.clip],
+    for (final incident in _mapIncidents(ride)) ?numbers[incident.clip],
   ];
 }
 
