@@ -75,7 +75,17 @@ enum RideExportRecorded {
 
   /// No hash was recorded for this clip.
   none,
+
+  /// The recorded value is not a SHA-256 (64 lowercase hex characters), so
+  /// it is not compared and never printed.
+  invalid,
 }
+
+/// Whether [value] is a SHA-256 as MotoCam records it: exactly 64
+/// lowercase hex characters.
+bool isRecordedSha256(String value) => _recordedSha256.hasMatch(value);
+
+final RegExp _recordedSha256 = RegExp(r'^[0-9a-f]{64}$');
 
 /// Why a clip of the ride is not in the export.
 enum RideExportOmissionReason {
@@ -360,6 +370,7 @@ class RideExportItem {
     required this.name,
     required this.bytes,
     this.recordedSha256,
+    this.recordedInvalid = false,
     this.locked = false,
   });
 
@@ -372,8 +383,12 @@ class RideExportItem {
   /// Size when planned.
   final int bytes;
 
-  /// The hash recorded when the ride was saved (clips only), or `null`.
+  /// The hash recorded when the ride was saved (clips only), or `null`
+  /// (also when the recorded value is not a SHA-256).
   final String? recordedSha256;
+
+  /// Whether a value was recorded that is not a SHA-256.
+  final bool recordedInvalid;
 
   /// Whether the clip is locked.
   final bool locked;
@@ -387,6 +402,7 @@ class RideExportOmission {
     required this.name,
     required this.reason,
     this.recordedSha256,
+    this.recordedInvalid = false,
   });
 
   /// The clip's file name.
@@ -395,8 +411,12 @@ class RideExportOmission {
   /// Why it is not exported.
   final RideExportOmissionReason reason;
 
-  /// The hash recorded when the ride was saved, or `null`.
+  /// The hash recorded when the ride was saved, or `null` (also when the
+  /// recorded value is not a SHA-256).
   final String? recordedSha256;
+
+  /// Whether a value was recorded that is not a SHA-256.
+  final bool recordedInvalid;
 }
 
 /// What an export copies, in order: [clips], then [rideData], then the
@@ -457,7 +477,9 @@ class RideExportPlan {
 /// Plans the export of [source] with the rider's [clips] choice. Clips are
 /// the ride's trusted segments; a clip whose file is gone ([stat] gives
 /// `null`) is listed as missing and never copied. The ride file is
-/// included only when [includeRideData] and the ride has one.
+/// included only when [includeRideData] and the ride has one. A recorded
+/// hash that is not a SHA-256 ([isRecordedSha256]) is kept as absent and
+/// flagged `recordedInvalid`.
 Future<RideExportPlan> planRideExport(
   RideExportSource source, {
   required RideExportClips clips,
@@ -478,13 +500,16 @@ Future<RideExportPlan> planRideExport(
   final omissions = <RideExportOmission>[];
   for (final path in ride.segmentPaths) {
     final name = path_utils.fileNameFromPath(path);
-    final recorded = ride.expectedSegmentHashes[path];
+    final raw = ride.expectedSegmentHashes[path];
+    final recorded = raw != null && isRecordedSha256(raw) ? raw : null;
+    final recordedInvalid = raw != null && recorded == null;
     if (!chosen.contains(path)) {
       omissions.add(
         RideExportOmission(
           name: name,
           reason: RideExportOmissionReason.notSelected,
           recordedSha256: recorded,
+          recordedInvalid: recordedInvalid,
         ),
       );
       continue;
@@ -496,6 +521,7 @@ Future<RideExportPlan> planRideExport(
           name: name,
           reason: RideExportOmissionReason.missing,
           recordedSha256: recorded,
+          recordedInvalid: recordedInvalid,
         ),
       );
       continue;
@@ -506,6 +532,7 @@ Future<RideExportPlan> planRideExport(
         name: name,
         bytes: stamp.size,
         recordedSha256: recorded,
+        recordedInvalid: recordedInvalid,
         locked: locked.contains(path_utils.normalizePath(path)),
       ),
     );
@@ -543,6 +570,7 @@ class RideExportFileEntry {
     required this.bytes,
     required this.sha256,
     this.recordedSha256,
+    this.recordedInvalid = false,
     this.locked = false,
   });
 
@@ -556,14 +584,21 @@ class RideExportFileEntry {
   /// for a share.
   final String sha256;
 
-  /// The hash recorded when the ride was saved (clips only), or `null`.
+  /// The hash recorded when the ride was saved (clips only), or `null`
+  /// (also when the recorded value is not a SHA-256).
   final String? recordedSha256;
+
+  /// Whether a value was recorded that is not a SHA-256.
+  final bool recordedInvalid;
 
   /// Whether the clip is locked.
   final bool locked;
 
   /// How the exported bytes compare with [recordedSha256].
   RideExportRecorded get recorded {
+    if (recordedInvalid) {
+      return RideExportRecorded.invalid;
+    }
     final recorded = recordedSha256;
     if (recorded == null) {
       return RideExportRecorded.none;
@@ -761,12 +796,19 @@ class RideExporter {
   RideExportOutcome get _stoppedOutcome =>
       _cancelRequested ? RideExportOutcome.cancelled : RideExportOutcome.paused;
 
-  /// Runs [call] after a stop check, cancelling it natively when the run
-  /// must stop. Throws [_Stopped] then.
-  Future<T> _native<T>(Future<T> Function() call) async {
+  /// Throws [_Stopped] when the run must stop. Called right before each
+  /// native call: native resets its cancel flag when a call starts, so a
+  /// cancel sent before that call would be lost.
+  void _checkStop() {
     if (_mustStop) {
       throw const _Stopped();
     }
+  }
+
+  /// Runs [call] after a stop check, cancelling it natively when the run
+  /// must stop. Throws [_Stopped] then.
+  Future<T> _native<T>(Future<T> Function() call) async {
+    _checkStop();
     var stopping = false;
     final poll = Timer.periodic(pollInterval, (_) {
       if (!stopping && _mustStop) {
@@ -801,9 +843,7 @@ class RideExporter {
     Directory? staging;
     String? current = plan.folderName;
     try {
-      if (_mustStop) {
-        throw const _Stopped();
-      }
+      _checkStop();
       final folderUri = await native.prepareFolder(
         treeUri: treeUri,
         name: plan.folderName,
@@ -826,6 +866,7 @@ class RideExporter {
               bytes: copied.bytes,
               sha256: copied.copySha256,
               recordedSha256: item.recordedSha256,
+              recordedInvalid: item.recordedInvalid,
               locked: item.locked,
             ),
           );
@@ -846,15 +887,16 @@ class RideExporter {
       if (data != null) {
         current = data.name;
         final copied = await _native(
-          () => integrity_utils.runExclusiveForPath(
-            data.sourcePath,
-            () => native.exportFile(
+          () => integrity_utils.runExclusiveForPath(data.sourcePath, () {
+            // The lock may have waited; a stop sent meanwhile counts.
+            _checkStop();
+            return native.exportFile(
               folderUri: folderUri,
               sourcePath: data.sourcePath,
               name: data.name,
               mimeType: rideExportMimeTypeFor(data.name),
-            ),
-          ),
+            );
+          }),
         );
         if (copied.sourceSha256 != plan.source.rideDataSha256) {
           run.fail('RIDE_DATA_CHANGED', data.name);
@@ -940,6 +982,7 @@ class RideExporter {
             bytes: hashed.bytes,
             sha256: hashed.sha256,
             recordedSha256: item.recordedSha256,
+            recordedInvalid: item.recordedInvalid,
             locked: item.locked,
           ),
         );
@@ -949,10 +992,11 @@ class RideExporter {
       if (data != null) {
         current = data.name;
         final hashed = await _native(
-          () => integrity_utils.runExclusiveForPath(
-            data.sourcePath,
-            () => native.hashFile(data.sourcePath),
-          ),
+          () => integrity_utils.runExclusiveForPath(data.sourcePath, () {
+            // The lock may have waited; a stop sent meanwhile counts.
+            _checkStop();
+            return native.hashFile(data.sourcePath);
+          }),
         );
         if (hashed.sha256 != plan.source.rideDataSha256) {
           run.fail('RIDE_DATA_CHANGED', data.name);
@@ -978,9 +1022,7 @@ class RideExporter {
       for (final path in paths.skip(paths.length - 2)) {
         run.counted(await File(path).length());
       }
-      if (_mustStop) {
-        throw const _Stopped();
-      }
+      _checkStop();
       final opened = await native.shareFiles(
         paths: paths,
         mimeTypes: <String>[

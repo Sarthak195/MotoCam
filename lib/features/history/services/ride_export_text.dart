@@ -23,6 +23,9 @@ const int rideExportManifestFormatVersion = 1;
 /// Longest issue string written into the text files.
 const int _maxIssueLength = 80;
 
+/// Longest file name or recorded hash written into the README.
+const int _maxFieldLength = 120;
+
 /// Column the README is wrapped at.
 const int _wrapColumn = 72;
 
@@ -64,8 +67,27 @@ String sanitizeExportIssue(String issue) {
       : text;
 }
 
-String _oneLine(String text) =>
-    text.replaceAll(RegExp(r'[\x00-\x1F\x7F-\x9F\u2028\u2029]'), '');
+/// [text] without control characters, line or paragraph separators and
+/// bidirectional embedding, override and isolate controls.
+String _oneLine(String text) => text.replaceAll(
+  RegExp(r'[\x00-\x1F\x7F-\x9F\u2028\u2029\u202A-\u202E\u2066-\u2069]'),
+  '',
+);
+
+/// A file name or recorded hash for the README: [_oneLine], at most
+/// [_maxFieldLength] characters.
+String _field(String text) {
+  final runes = _oneLine(text).runes;
+  return String.fromCharCodes(
+    runes.length > _maxFieldLength ? runes.take(_maxFieldLength) : runes,
+  );
+}
+
+/// [time] in UTC as ISO 8601 with milliseconds (microseconds truncated).
+String _exportedAtText(DateTime time) => DateTime.fromMillisecondsSinceEpoch(
+  time.millisecondsSinceEpoch,
+  isUtc: true,
+).toIso8601String();
 
 String _signedByValue(RideSignedBy signedBy) => switch (signedBy) {
   RideSignedBy.thisDevice => 'exportingPhone',
@@ -78,6 +100,7 @@ String _recordedValue(RideExportRecorded recorded) => switch (recorded) {
   RideExportRecorded.match => 'match',
   RideExportRecorded.differs => 'differs',
   RideExportRecorded.none => 'none',
+  RideExportRecorded.invalid => 'invalid',
 };
 
 String _reasonValue(RideExportOmissionReason reason) => switch (reason) {
@@ -87,9 +110,10 @@ String _reasonValue(RideExportOmissionReason reason) => switch (reason) {
 
 /// manifest.json (format 1) of an export of [plan] whose [clips] and
 /// [rideData] were exported (for a share: hashed) at [exportedAt]. The
-/// `integrity` block is `null` when the ride data is not included; its
-/// `signed`, `alg`, `keyId` and `publicKey` fields are written only in the
-/// `signed` state.
+/// `integrity` block is `null` when the ride data is not included, except
+/// that a video-only export in the `failed` or `none` state writes only
+/// that `state`; its `signed`, `alg`, `keyId` and `publicKey` fields are
+/// written only in the `signed` state.
 Map<String, Object?> buildExportManifest(
   RideExportPlan plan, {
   required List<RideExportFileEntry> clips,
@@ -119,12 +143,17 @@ Map<String, Object?> buildExportManifest(
         for (final issue in ride.integrity.issues) sanitizeExportIssue(issue),
       ],
     };
+  } else {
+    final state = rideExportIntegrityState(source);
+    if (state == 'failed' || state == 'none') {
+      integrity = <String, Object?>{'state': state};
+    }
   }
   return <String, Object?>{
     'format': rideExportManifestFormat,
     'formatVersion': rideExportManifestFormatVersion,
     'rideSessionId': ride.rideSessionId,
-    'exportedAt': exportedAt.toUtc().toIso8601String(),
+    'exportedAt': _exportedAtText(exportedAt),
     'destination': destination == RideExportDestination.folder
         ? 'folder'
         : 'share',
@@ -157,6 +186,7 @@ Map<String, Object?> buildExportManifest(
           'name': omission.name,
           if (omission.recordedSha256 != null)
             'recordedSha256': omission.recordedSha256,
+          if (omission.recordedInvalid) 'recorded': 'invalid',
           'reason': _reasonValue(omission.reason),
         },
     ],
@@ -191,14 +221,14 @@ String buildExportReadme(
   line('MotoCam ride export');
   line('===================');
   line();
-  line('Ride: ${_oneLine(ride.rideSessionId ?? ride.fileName)}');
-  line('Exported: ${exportedAt.toUtc().toIso8601String()} (UTC)');
+  line('Ride: ${_field(ride.rideSessionId ?? ride.fileName)}');
+  line('Exported: ${_exportedAtText(exportedAt)} (UTC)');
   line('Local time: ${_localTime(exportedAt)}');
   line(
     'Clips: ${plan.clipChoice == RideExportClips.evidence ? 'locked and incident clips' : 'all clips'}',
   );
   line(
-    'Ride data: ${plan.includeRideData ? 'included (${rideData?.name ?? plan.rideData?.name})' : 'not included (video only)'}',
+    'Ride data: ${plan.includeRideData ? 'included (${_field(rideData?.name ?? plan.rideData?.name ?? '')})' : 'not included (video only)'}',
   );
   line(
     folder
@@ -218,6 +248,17 @@ String buildExportReadme(
           : 'No integrity data (older ride format or a video-only '
                 'recovery).',
     );
+    if (state == 'failed') {
+      para(
+        'The phone\'s integrity check of this ride failed when exported, so '
+        'the recorded hashes listed below cannot be relied on.',
+      );
+    } else if (state == 'none') {
+      para(
+        'This ride has no integrity data, so the recorded hashes listed '
+        'below cannot be relied on.',
+      );
+    }
   } else {
     switch (state) {
       case 'signed':
@@ -279,9 +320,13 @@ String buildExportReadme(
       .where((c) => c.recorded == RideExportRecorded.differs)
       .length;
   final none = clips.where((c) => c.recorded == RideExportRecorded.none).length;
+  final invalid = clips
+      .where((c) => c.recorded == RideExportRecorded.invalid)
+      .length;
   para(
     '$matched of ${clips.length} exported clips match their recorded hash; '
-    '$differ differ; $none have none.',
+    '$differ differ; $none have none'
+    '${invalid > 0 ? '; $invalid have an invalid one' : ''}.',
   );
 
   final publicKey = ride.integrity.signature?.signerPublicKey;
@@ -324,20 +369,25 @@ String buildExportReadme(
               'the copy the receiving app made.',
   );
   for (final clip in clips) {
-    line('${clip.name} (clip${clip.locked ? ', locked' : ''})');
+    line('${_field(clip.name)} (clip${clip.locked ? ', locked' : ''})');
     line('  ${clip.bytes} bytes');
     line('  SHA-256: ${clip.sha256}');
     switch (clip.recorded) {
       case RideExportRecorded.match:
         line('  Recorded hash: matches');
       case RideExportRecorded.differs:
-        line('  Recorded hash: DIFFERS, recorded ${clip.recordedSha256}');
+        line(
+          '  Recorded hash: DIFFERS, recorded '
+          '${_field(clip.recordedSha256 ?? '')}',
+        );
       case RideExportRecorded.none:
         line('  Recorded hash: none');
+      case RideExportRecorded.invalid:
+        line('  Recorded hash: invalid');
     }
   }
   if (rideData != null) {
-    line('${rideData.name} (ride data, copied byte for byte)');
+    line('${_field(rideData.name)} (ride data, copied byte for byte)');
     line('  ${rideData.bytes} bytes');
     line('  SHA-256: ${rideData.sha256}');
   }
@@ -347,14 +397,17 @@ String buildExportReadme(
     heading('Not exported');
     for (final omission in plan.notExported) {
       final recorded = omission.recordedSha256;
+      final name = _field(omission.name);
       switch (omission.reason) {
         case RideExportOmissionReason.notSelected:
-          line('${omission.name}: not selected');
+          line('$name: not selected');
         case RideExportOmissionReason.missing:
-          line('${omission.name}: missing on the phone');
+          line('$name: missing on the phone');
       }
       if (recorded != null) {
-        line('  Recorded SHA-256: $recorded');
+        line('  Recorded SHA-256: ${_field(recorded)}');
+      } else if (omission.recordedInvalid) {
+        line('  Recorded SHA-256: invalid');
       }
     }
     for (final ms in plan.unmappedIncidentsMs) {
@@ -371,7 +424,12 @@ String buildExportReadme(
 
   heading('How to check');
   if (plan.includeRideData) {
-    para('Every step is required.');
+    para(
+      state == 'none'
+          ? 'Only step 1 applies: this ride has no integrity data, so steps '
+                '2 and 3 (payloadHash and signature) do not apply.'
+          : 'Every step is required.',
+    );
     para(
       '1. Hash each clip. It must equal the SHA-256 listed above and the '
       'integrity.segmentHashes value in the ride data whose key ends in '

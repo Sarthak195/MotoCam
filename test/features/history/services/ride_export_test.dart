@@ -878,6 +878,44 @@ void main() {
       ]);
       expect(rideExportSummary(result), startsWith('Export stopped.'));
     });
+
+    test('a cancel made before the run starts is not lost', () async {
+      final telemetry = await writeRide('r12', <File>[clip('a.mp4', 'aaaa')]);
+      final p = await plan(telemetry, 'r12');
+      final native = _FakeNative(tree);
+      final run = exporter(native);
+      await run.cancel();
+      final result = await run.exportToFolder(p, treeUri: tree.path);
+      expect(result.outcome, RideExportOutcome.cancelled);
+      expect(native.calls, <String>['cancel']);
+    });
+
+    test('a cancel while the ride file lock waits is not lost', () async {
+      final telemetry = await writeRide('r13', <File>[clip('a.mp4', 'aaaa')]);
+      final p = await plan(telemetry, 'r13');
+      final native = _FakeNative(tree);
+      final run = exporter(native);
+      // Someone else holds the ride file, so the ride-data step waits.
+      final release = Completer<void>();
+      final held = runExclusiveForPath(
+        p.rideData!.sourcePath,
+        () => release.future,
+      );
+      final running = run.exportToFolder(p, treeUri: tree.path);
+      while (!native.calls.contains('export:a.mp4')) {
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 30));
+      await run.cancel();
+      release.complete();
+      await held;
+      final result = await running;
+      expect(result.outcome, RideExportOutcome.cancelled);
+      // Native resets its cancel flag when a call starts, so the stop must
+      // be checked before the ride file is sent at all.
+      expect(native.calls, isNot(contains('export:${p.rideData!.name}')));
+      expect(namesIn(exportFolder(p)), <String>['a.mp4']);
+    });
   });
 
   group('manifest and README', () {
@@ -1114,6 +1152,37 @@ void main() {
           '0 of 1 exported clips match their recorded hash; 0 differ; 1 have none.',
         ),
       );
+      expect(read.readme, isNot(contains('Every step is required.')));
+      expect(
+        _flat(read.readme),
+        contains(
+          'Only step 1 applies: this ride has no integrity data, so steps 2 '
+          'and 3 (payloadHash and signature) do not apply.',
+        ),
+      );
+    });
+
+    test('a video-only export of a failed ride names only the state', () async {
+      final telemetry = await writeRide('s8', <File>[
+        clip('a.mp4', 'aaaa'),
+      ], seal: _Seal.v3);
+      final json =
+          jsonDecode(telemetry.readAsStringSync()) as Map<String, dynamic>;
+      json['distanceKm'] = 99.0;
+      telemetry.writeAsStringSync(jsonEncode(json));
+      final read = await exportAndRead(
+        await plan(telemetry, 's8', includeRideData: false),
+      );
+      expect(read.manifest['integrity'], <String, Object?>{'state': 'failed'});
+      expect(
+        _flat(read.readme),
+        contains(
+          'The phone\'s integrity check of this ride failed when exported, '
+          'so the recorded hashes listed below cannot be relied on.',
+        ),
+      );
+      expect(read.readme, isNot(contains(phone.publicKeyBase64)));
+      expect(jsonEncode(read.manifest), isNot(contains(phone.keyId)));
     });
 
     test('an incomplete ride and simulated GPS add their sentences', () async {
@@ -1206,7 +1275,14 @@ void main() {
       expect(p.includeRideData, isFalse);
       expect(p.folderName, 'MotoCam ride REC_9 (all clips, video only)');
       final read = await exportAndRead(p);
-      expect(read.manifest['integrity'], isNull);
+      expect(read.manifest['integrity'], <String, Object?>{'state': 'none'});
+      expect(
+        _flat(read.readme),
+        contains(
+          'This ride has no integrity data, so the recorded hashes listed '
+          'below cannot be relied on.',
+        ),
+      );
       expect(
         _flat(read.readme),
         contains(
@@ -1229,6 +1305,91 @@ void main() {
         sanitizeExportIssue('quarantined-segment-paths:2'),
         'quarantined-segment-paths:2',
       );
+    });
+
+    test('names and recorded hashes cannot inject README lines', () async {
+      final kept = '${rides.path}${_sep}a\nINJECTED: kept\u202E.mp4';
+      final gone = '${rides.path}${_sep}b\r\nINJECTED: gone.mp4';
+      final ride = RideRecord(
+        videoPath: gone,
+        segmentPaths: <String>[kept, gone],
+        lockedSegmentPaths: const <String>[],
+        createdAt: DateTime.utc(2026, 11, 19, 10),
+        telemetryPath: null,
+        rideSessionId: 'r\nINJECTED: id${'x' * 300}',
+        isSessionComplete: true,
+        distanceKm: 0,
+        maxSpeedKmh: 0,
+        averageSpeedKmh: 0,
+        segmentTimeline: const <RideSegmentTimelineEntry>[],
+        samples: const [],
+        integrity: const RideIntegrityReport.verified(),
+        quarantinedSegmentPaths: const <String>[],
+        expectedSegmentHashes: <String, String>{
+          kept: 'junk\nINJECTED: Recorded hash: matches',
+          gone: 'A' * 64,
+        },
+      );
+      final p = await planRideExport(
+        RideExportSource(ride: ride, envelopeVersion: 2),
+        clips: RideExportClips.all,
+        includeRideData: true,
+        stat: (path) async => path == kept
+            ? const RideFileStamp(size: 4, modifiedUs: 0, changedUs: 0)
+            : null,
+      );
+      expect(p.clips.single.recordedSha256, isNull);
+      expect(p.clips.single.recordedInvalid, isTrue);
+      expect(p.notExported.single.recordedSha256, isNull);
+      expect(p.notExported.single.recordedInvalid, isTrue);
+      final clips = <RideExportFileEntry>[
+        for (final item in p.clips)
+          RideExportFileEntry(
+            name: item.name,
+            bytes: item.bytes,
+            sha256: 'b' * 64,
+            recordedSha256: item.recordedSha256,
+            recordedInvalid: item.recordedInvalid,
+          ),
+      ];
+      final at = DateTime.utc(2026, 11, 19, 13, 5, 0, 123, 456);
+      final readme = buildExportReadme(
+        p,
+        clips: clips,
+        rideData: null,
+        destination: RideExportDestination.folder,
+        exportedAt: at,
+      );
+      final lines = readme.split('\n');
+      for (final line in lines) {
+        expect(line, isNot(startsWith('INJECTED')));
+        expect(line, isNot(contains('\r')));
+      }
+      expect(readme, isNot(contains('\u202E')));
+      expect(readme, isNot(contains('junk')));
+      expect(readme, isNot(contains('A' * 64)));
+      expect(readme, contains('  Recorded hash: invalid'));
+      expect(readme, contains('  Recorded SHA-256: invalid'));
+      expect(readme, contains('have an invalid one'));
+      final rideLine = lines.firstWhere((l) => l.startsWith('Ride: '));
+      expect(rideLine.length, 'Ride: '.length + 120);
+      expect(readme, contains('Exported: 2026-11-19T13:05:00.123Z (UTC)'));
+
+      final manifest = buildExportManifest(
+        p,
+        clips: clips,
+        rideData: null,
+        destination: RideExportDestination.folder,
+        exportedAt: at,
+      );
+      expect(manifest['exportedAt'], '2026-11-19T13:05:00.123Z');
+      final file = (manifest['files'] as List).single as Map<String, Object?>;
+      expect(file['recordedSha256'], isNull);
+      expect(file['recorded'], 'invalid');
+      final omitted =
+          (manifest['notExported'] as List).single as Map<String, Object?>;
+      expect(omitted.containsKey('recordedSha256'), isFalse);
+      expect(omitted['recorded'], 'invalid');
     });
   });
 
