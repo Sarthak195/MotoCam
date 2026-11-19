@@ -53,7 +53,12 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
     DateTime Function()? clock,
     bool? crashDebugLogEnabled,
     Future<Directory> Function()? crashDebugDirectory,
-  }) : _crashDebugLogEnabled =
+    Stream<AccelerometerEvent> Function(Duration samplingPeriod)?
+    idleGravitySource,
+  }) : _idleGravitySource =
+           idleGravitySource ??
+           ((period) => accelerometerEventStream(samplingPeriod: period)),
+       _crashDebugLogEnabled =
            crashDebugLogEnabled ??
            (kDebugMode && !Platform.environment.containsKey('FLUTTER_TEST')),
        _crashDebugDirectory =
@@ -70,6 +75,8 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
   final DateTime Function() _clock;
   final bool _crashDebugLogEnabled;
   final Future<Directory> Function() _crashDebugDirectory;
+  final Stream<AccelerometerEvent> Function(Duration samplingPeriod)
+  _idleGravitySource;
   CrashDebugLog? _crashDebugLog;
   Future<void> _crashDebugLogClosed = Future<void>.value();
 
@@ -115,6 +122,18 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
 
   StreamSubscription<dynamic>? _accelerometerSubscription;
   StreamSubscription<AccelerometerEvent>? _orientationSubscription;
+  // Gravity for listeners outside the provider (the landscape orientation
+  // pin). While tracking runs, the provider's own raw accelerometer feeds
+  // it; otherwise an idle subscription at the orientation stream's rate
+  // does, and only while someone listens.
+  late final StreamController<({double x, double y, double z, DateTime at})>
+  _gravityController =
+      StreamController<({double x, double y, double z, DateTime at})>.broadcast(
+        onListen: _syncIdleGravitySubscription,
+        onCancel: _syncIdleGravitySubscription,
+      );
+  StreamSubscription<AccelerometerEvent>? _idleGravitySubscription;
+  bool _isDisposed = false;
   StreamSubscription<Position>? _positionSubscription;
   StreamSubscription<ServiceStatus>? _serviceStatusSubscription;
   Timer? _sampleTimer;
@@ -339,6 +358,8 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
     }
     _startAccelerometerTracking();
     _startLocationTracking();
+    // The tracking streams feed gravitySamples from now on.
+    _syncIdleGravitySubscription();
   }
 
   void _stopTracking() {
@@ -359,6 +380,49 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
     _crashDetector.reset(clearSignals: true);
     _lastSensorSampleAt = null;
     _lastSensorSampleWallAt = null;
+    _syncIdleGravitySubscription();
+  }
+
+  /// Raw accelerometer samples (gravity included, m/s², Android device
+  /// frame, the sensor's own timestamps) for a listener outside the
+  /// provider: the landscape orientation pin of the recording screen.
+  ///
+  /// sensors_plus keeps one native stream per sensor, and every call that
+  /// opens it re-sends its sampling period to all listeners, so outside
+  /// code must not open the raw accelerometer itself (it would change the
+  /// tip-over stream's rate, or the 20 ms jolt stream's in the fallback).
+  /// While tracking runs these samples come from the provider's own raw
+  /// stream (about 15 Hz, or 50 Hz in the fallback); otherwise, and only
+  /// while something listens, from an idle subscription at the orientation
+  /// stream's 15 Hz.
+  Stream<({double x, double y, double z, DateTime at})> get gravitySamples =>
+      _gravityController.stream;
+
+  void _forwardGravity(double x, double y, double z, DateTime at) {
+    if (_gravityController.hasListener) {
+      _gravityController.add((x: x, y: y, z: z, at: at));
+    }
+  }
+
+  void _syncIdleGravitySubscription() {
+    final wanted =
+        !_isDisposed && _gravityController.hasListener && !_isTrackingStarted;
+    if (wanted && _idleGravitySubscription == null) {
+      _idleGravitySubscription = _idleGravitySource(_orientationSamplingPeriod)
+          .listen(
+            (AccelerometerEvent event) {
+              _forwardGravity(event.x, event.y, event.z, event.timestamp);
+            },
+            onError: (Object error) {
+              debugPrint('Telemetry: idle gravity stream unavailable: $error');
+              unawaited(_idleGravitySubscription?.cancel());
+              _idleGravitySubscription = null;
+            },
+          );
+    } else if (!wanted && _idleGravitySubscription != null) {
+      unawaited(_idleGravitySubscription!.cancel());
+      _idleGravitySubscription = null;
+    }
   }
 
   /// Pauses tracking when the app leaves the foreground with no active ride,
@@ -852,12 +916,9 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   void _onOrientationSample(double x, double y, double z, {DateTime? at}) {
-    final confirmed = _crashDetector.addGravitySample(
-      x,
-      y,
-      z,
-      at ?? DateTime.now(),
-    );
+    final sampleAt = at ?? DateTime.now();
+    _forwardGravity(x, y, z, sampleAt);
+    final confirmed = _crashDetector.addGravitySample(x, y, z, sampleAt);
     if (confirmed != null) {
       _detectCrash(confirmed);
     }
@@ -1670,7 +1731,11 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
     _sampleTimer?.cancel();
     _checkpointTimer?.cancel();
     _trailingUiNotify?.cancel();
+    _isDisposed = true;
     _stopTracking();
+    unawaited(_idleGravitySubscription?.cancel());
+    _idleGravitySubscription = null;
+    unawaited(_gravityController.close());
     _endCrashDebugLog();
     if (_isObservingLifecycle) {
       WidgetsBinding.instance.removeObserver(this);
