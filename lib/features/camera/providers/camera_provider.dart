@@ -220,6 +220,16 @@ class CameraProvider extends ChangeNotifier {
   int _consecutiveRollStopFailures = 0;
   bool _isDisposed = false;
 
+  // Landscape recording (lib/features/recording/ride_orientation.dart).
+  // Idle controllers lock their capture to the orientation the recording
+  // screen pins the UI to; a ride locks to the orientation it was started
+  // in, on every controller it uses, until it stops. With the build switch
+  // off both stay portraitUp.
+  DeviceOrientation _idleCaptureOrientation = DeviceOrientation.portraitUp;
+  DeviceOrientation _rideCaptureOrientation = DeviceOrientation.portraitUp;
+  // Set when a controller of a landscape ride could not lock its capture.
+  bool _captureLockFailed = false;
+
   // Set for the whole of a ride export run (one at a time, app-wide).
   bool _isRideExportRunning = false;
 
@@ -303,6 +313,22 @@ class CameraProvider extends ChangeNotifier {
   /// until [stopRecording] is called, so the session's segments, locks and
   /// timeline can still be saved. Cleared by the next [startRecording].
   String? get lastRecordingError => _lastRecordingError;
+
+  /// The capture orientation of the current ride, or of the last one after
+  /// it stopped (portraitUp before the first ride, and always while the
+  /// landscape build switch is off). Set by [startRecording].
+  DeviceOrientation get rideCaptureOrientation => _rideCaptureOrientation;
+
+  /// The orientation idle controllers lock their capture to (see
+  /// [setIdleCaptureOrientation]).
+  DeviceOrientation get idleCaptureOrientation => _idleCaptureOrientation;
+
+  /// Rider-facing reason START refuses a ride whose capture could not be
+  /// locked to its orientation.
+  static const String captureOrientationLockFailedMessage =
+      'The camera could not be set to record in this orientation, so the '
+      'video would be sideways. Hold the phone upright (portrait) and try '
+      'again, or restart MotoCam.';
 
   /// Rider-facing result of the last gallery export of locked clips (see
   /// [autoExportLockedClipsToGallery]), e.g. how many clips were copied or
@@ -803,6 +829,7 @@ class CameraProvider extends ChangeNotifier {
           camera: selectedCamera,
           preset: candidatePreset,
           fps: candidateFps,
+          captureOrientation: _idleCaptureOrientation,
         );
         if (firstAttempt != null) {
           initializedController = firstAttempt;
@@ -820,6 +847,7 @@ class CameraProvider extends ChangeNotifier {
             camera: selectedCamera,
             preset: candidatePreset,
             fps: fallbackFps,
+            captureOrientation: _idleCaptureOrientation,
           );
           if (fallbackAttempt != null) {
             initializedController = fallbackAttempt;
@@ -1059,10 +1087,17 @@ class CameraProvider extends ChangeNotifier {
   // initialization, if any (see cameraInitFailureForCameraExceptionCode).
   CameraInitFailure? _controllerPermissionFailure;
 
+  /// Creates and initializes a controller and locks its capture to
+  /// [captureOrientation]. A failed lock is only logged, unless
+  /// [lockRequired] (a landscape ride): then the controller is disposed,
+  /// [_captureLockFailed] is set and `null` is returned, because recording
+  /// on would tag the video with the wrong rotation.
   Future<CameraController?> _tryInitializeController({
     required CameraDescription camera,
     required ResolutionPreset preset,
     required int fps,
+    required DeviceOrientation captureOrientation,
+    bool lockRequired = false,
   }) async {
     final controller = CameraController(
       camera,
@@ -1075,8 +1110,21 @@ class CameraProvider extends ChangeNotifier {
     try {
       await controller.initialize();
       try {
-        await controller.lockCaptureOrientation(DeviceOrientation.portraitUp);
+        await controller.lockCaptureOrientation(captureOrientation);
       } catch (lockError) {
+        if (lockRequired) {
+          _logError(
+            'Capture orientation lock to ${captureOrientation.name} failed: '
+            '$lockError',
+          );
+          _captureLockFailed = true;
+          try {
+            await controller.dispose();
+          } catch (_) {
+            // Best-effort dispose of a controller that cannot be used.
+          }
+          return null;
+        }
         _log('Capture orientation lock skipped on this device: $lockError');
       }
       return controller;
@@ -1546,7 +1594,16 @@ class CameraProvider extends ChangeNotifier {
   /// starting or stopping, or when the camera is not initialized. Otherwise
   /// clears the previous session's segments, locks and timeline and returns
   /// whether recording started.
-  Future<bool> startRecording() async {
+  ///
+  /// The ride is recorded in [captureOrientation] (portraitDown counts as
+  /// portraitUp): the capture is locked to it before the first segment and
+  /// on any controller the START fallback creates, and it stays for every
+  /// segment until [stopRecording]. A landscape ride whose lock fails is
+  /// refused with [captureOrientationLockFailedMessage]; a portrait ride
+  /// keeps the tolerant path (a failed lock is only logged).
+  Future<bool> startRecording({
+    DeviceOrientation captureOrientation = DeviceOrientation.portraitUp,
+  }) async {
     if (isRecording || _isStartingRecording || _isStoppingRecording) {
       _log('Start ignored: a recording session is active or in transition');
       return false;
@@ -1573,6 +1630,11 @@ class CameraProvider extends ChangeNotifier {
       _currentSegmentStartMs = 0;
       _currentVideoPath = null;
       _lastRecordingError = null;
+      _captureLockFailed = false;
+      _rideCaptureOrientation =
+          captureOrientation == DeviceOrientation.portraitDown
+          ? DeviceOrientation.portraitUp
+          : captureOrientation;
       _consecutiveRollStopFailures = 0;
       _recordingStartTime = null;
       _elapsedTime = Duration.zero;
@@ -1594,8 +1656,23 @@ class CameraProvider extends ChangeNotifier {
         return false;
       }
 
+      final rideController = _controller;
+      if (rideController == null ||
+          !await lockCaptureForRide(
+            rideController,
+            _rideCaptureOrientation,
+            log: _log,
+          )) {
+        _lastRecordingError = captureOrientationLockFailedMessage;
+        _state = RecordingState.idle;
+        return false;
+      }
+
       final started = await _startVideoRecordingWithFallback();
       if (!started) {
+        if (_captureLockFailed) {
+          _lastRecordingError = captureOrientationLockFailedMessage;
+        }
         _state = RecordingState.idle;
         _recordingStartTime = null;
         _elapsedTime = Duration.zero;
@@ -1688,8 +1765,14 @@ class CameraProvider extends ChangeNotifier {
         camera: activeCamera,
         preset: candidatePreset,
         fps: candidateFps,
+        captureOrientation: _rideCaptureOrientation,
+        lockRequired: _isLandscapeCapture(_rideCaptureOrientation),
       );
       if (candidateController == null) {
+        if (_captureLockFailed) {
+          // Not a preset problem: the ride cannot keep its orientation.
+          return false;
+        }
         _markResolutionUnsupported(activeCamera.name, candidatePreset);
         continue;
       }
@@ -1719,6 +1802,74 @@ class CameraProvider extends ChangeNotifier {
     }
 
     return false;
+  }
+
+  static bool _isLandscapeCapture(DeviceOrientation orientation) =>
+      orientation == DeviceOrientation.landscapeLeft ||
+      orientation == DeviceOrientation.landscapeRight;
+
+  /// Locks [controller]'s capture to a ride's [orientation] before its first
+  /// segment. Returns `false` when the ride must not start: a landscape
+  /// lock failed, or a portrait lock failed on a controller still locked to
+  /// another orientation (either would record a wrong rotation tag).
+  ///
+  /// A controller already locked to [orientation] is left alone (no extra
+  /// call). A portrait ride on a controller whose init lock failed keeps
+  /// the tolerant path: nothing is retried and the ride starts.
+  @visibleForTesting
+  static Future<bool> lockCaptureForRide(
+    CameraController controller,
+    DeviceOrientation orientation, {
+    void Function(String message)? log,
+  }) async {
+    final locked = controller.value.lockedCaptureOrientation;
+    if (locked == orientation) {
+      return true;
+    }
+    if (orientation == DeviceOrientation.portraitUp && locked == null) {
+      return true;
+    }
+    try {
+      await controller.lockCaptureOrientation(orientation);
+      return true;
+    } catch (e) {
+      log?.call('Capture orientation lock to ${orientation.name} failed: $e');
+      return false;
+    }
+  }
+
+  /// Locks the idle camera's capture to [orientation], the orientation the
+  /// recording screen pins the UI to while idle (landscape recording only),
+  /// so the preview matches the screen; later idle initializations lock to
+  /// it too. Ignored while a ride starts, records or stops (the ride keeps
+  /// its START orientation) and for portraitDown. A failed lock is logged
+  /// only: START locks again and refuses a ride it cannot lock.
+  Future<void> setIdleCaptureOrientation(DeviceOrientation orientation) async {
+    if (orientation == DeviceOrientation.portraitDown ||
+        isRecording ||
+        _isStartingRecording ||
+        _isStoppingRecording) {
+      return;
+    }
+    _idleCaptureOrientation = orientation;
+    while (_initInFlight != null) {
+      await _initInFlight;
+    }
+    final controller = _controller;
+    if (_idleCaptureOrientation != orientation ||
+        isRecording ||
+        _isStartingRecording ||
+        _isStoppingRecording ||
+        !_isInitialized ||
+        controller == null ||
+        controller.value.lockedCaptureOrientation == orientation) {
+      return;
+    }
+    try {
+      await controller.lockCaptureOrientation(orientation);
+    } catch (e) {
+      _log('Idle capture orientation lock to ${orientation.name} failed: $e');
+    }
   }
 
   Future<void> _detachAndDisposeController() async {
