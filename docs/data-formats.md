@@ -227,6 +227,7 @@ This object is built by `RecordingScreen._recordingSettingsSnapshot` in [recordi
 | `appliedBitrateMbps` | int: the bitrate the camera was configured with, the encoder's target (`CameraProvider.appliedVideoBitrateMbps`); `null` in rides recorded on Android before the camera plugin applied it (third_party/camera_android_camerax/MOTOCAM_PATCHES.md patch 4, 2026-11-11) |
 | `appliedAudioEnabled` | bool |
 | `appliedCameraName` | string |
+| `appliedCaptureOrientation` | string, optional: `portraitUp`, `landscapeLeft` or `landscapeRight` (`DeviceOrientation.name`), the capture orientation the ride was locked to at START (`CameraProvider.rideCaptureOrientation`). Written for every ride recorded with the landscape build switch on (`kLandscapeRecording`, see [recording-pipeline.md](recording-pipeline.md#camera-initialization)), never otherwise; a missing key means `portraitUp`. Like every key it is covered by the payload hash; readers ignore it, and no schema bump was needed. Added 2026-11-19 (landscape engine branch) |
 
 ### Example (illustrative)
 

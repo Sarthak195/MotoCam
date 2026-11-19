@@ -34,7 +34,7 @@ Current limitations of the recording pipeline:
 
 [recording-pipeline.md](recording-pipeline.md) describes each of them.
 
-The UI is locked to portrait and always dark (Material 3, seeded from blue). There is no localization; `intl` is used only for `DateFormat` in the rides list.
+The UI is locked to portrait and always dark (Material 3, seeded from blue). The lock is no longer absolute: a build switch, `kLandscapeRecording` (`--dart-define=MOTOCAM_LANDSCAPE=true`, off by default, bench builds only until the UI redesign ships landscape layouts), lets the recording screen pin the UI to the orientation the phone is held in while idle and record each ride in the orientation it was started in; see [recording-pipeline.md](recording-pipeline.md#camera-initialization). With the switch off nothing changes: UI and capture stay portraitUp. There is no localization; `intl` is used only for `DateFormat` in the rides list.
 
 There is no backend, account system, analytics or crash reporting. The only network traffic is the route map's OpenStreetMap tile requests (`MapSourceConfig.tileUrlTemplate`). The map is built only while it is expanded on the playback screen, and only after a one-time consent; the expanded state is remembered between rides. Recordings, telemetry and settings stay on the device.
 
@@ -44,7 +44,7 @@ There is no backend, account system, analytics or crash reporting. The only netw
 
 | File | Responsibility |
 |---|---|
-| [main.dart](../lib/main.dart) | Entry point: error hooks for every build mode, a no-op `debugPrint` in release builds, the portrait lock, the root `MultiProvider` and the `MaterialApp`, whose home is `RecordingScreen` |
+| [main.dart](../lib/main.dart) | Entry point: error hooks for every build mode, a no-op `debugPrint` in release builds, the portrait lock (the starting pin; with the landscape switch on the recording screen re-pins it), the root `MultiProvider` and the `MaterialApp`, whose home is `RecordingScreen` |
 | [core/providers/app_settings_provider.dart](../lib/core/providers/app_settings_provider.dart) | `AppSettingsProvider`: rider settings stored in `SharedPreferences` (including the opt-in gallery export), plus quality presets, option lists, label helpers and the incident threshold and debounce derived from the sensitivity setting. See [settings.md](settings.md) |
 | [core/services/app_permission_service.dart](../lib/core/services/app_permission_service.dart) | `AppPermissionService.ensureRequiredPermissions(audioEnabled, galleryExportEnabled)`: requests the permissions and returns a `PermissionAuditResult` that separates required items from recommended ones and lists permanently denied required ones. It reports the battery-optimization exemption status but never requests it. Also holds the shared `isPermissionGranted` predicate |
 | [core/services/background_recording_service.dart](../lib/core/services/background_recording_service.dart) | Singleton bridge to the Android foreground service: start (returns whether the service started), update, stop, the battery-optimization exemption status and request, the offer-once flag and the `events` stream (`stopRequested`). Android only |
@@ -294,7 +294,7 @@ While recording, the HISTORY button reads MINIMISE, and both it and system back 
 | Path | Contents |
 |---|---|
 | `lib/` | All Dart source, split into `core/` and `features/` (see [Module map](#module-map)) |
-| `test/` | Unit and widget tests under `test/core/` and `test/features/`, grouped by `lib/` area, plus `widget_test.dart` (app smoke test), the ride-file fixtures in `test/fixtures/ride_files/` and shared test helpers in `test/support/` (a P-256 key standing in for the phone's signing key): 700 tests in 52 files |
+| `test/` | Unit and widget tests under `test/core/` and `test/features/`, grouped by `lib/` area, plus `widget_test.dart` (app smoke test), the ride-file fixtures in `test/fixtures/ride_files/` and shared test helpers in `test/support/` (a P-256 key standing in for the phone's signing key): 770 tests in 57 files |
 | `android/` | Gradle project (`app/build.gradle.kts`), manifest, Kotlin `MainActivity` and `BackgroundRecordingService`, resources (themes, the monochrome notification icon, backup and data-extraction rules), ProGuard rules and `key.properties.template` |
 | `scripts/` | `release-security-precheck.ps1` (used by CI) and `generate-keystore.ps1` |
 | `release-notes/` | Per-release notes, `v0.1.8.md` through `v0.1.13.md` |

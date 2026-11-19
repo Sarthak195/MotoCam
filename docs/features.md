@@ -21,7 +21,7 @@ This guide describes what a rider can do in MotoCam and what the code does behin
 
 ## Recording
 
-The home screen is [recording_screen.dart](../lib/features/recording/recording_screen.dart) (`RecordingScreen`). It coordinates [CameraProvider](../lib/features/camera/providers/camera_provider.dart), [TelemetryProvider](../lib/features/telemetry/providers/telemetry_provider.dart) and the native bridges. Pure helpers (button colours, the lock notice text, the stall and checkpoint trackers) are in [recording_screen_logic.dart](../lib/features/recording/recording_screen_logic.dart). The app is portrait-only. See [recording-pipeline.md](recording-pipeline.md) for the full pipeline.
+The home screen is [recording_screen.dart](../lib/features/recording/recording_screen.dart) (`RecordingScreen`). It coordinates [CameraProvider](../lib/features/camera/providers/camera_provider.dart), [TelemetryProvider](../lib/features/telemetry/providers/telemetry_provider.dart) and the native bridges. Pure helpers (button colours, the lock notice text, the stall and checkpoint trackers) are in [recording_screen_logic.dart](../lib/features/recording/recording_screen_logic.dart). The app is portrait-only unless built with the landscape recording switch (bench builds, see [recording-pipeline.md](recording-pipeline.md#camera-initialization)). See [recording-pipeline.md](recording-pipeline.md) for the full pipeline.
 
 ### Camera unavailable
 
