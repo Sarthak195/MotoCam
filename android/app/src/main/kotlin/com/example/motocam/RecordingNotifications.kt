@@ -12,9 +12,14 @@ import androidx.core.app.NotificationCompat
  * Lock screen privacy: the recording notification is VISIBILITY_PRIVATE and
  * carries a public version. On a secure lock screen the system shows only the
  * public version, which has generic text (no place, speed, clip count or any
- * other ride detail) and the same Stop action. Stop is a plain service
- * PendingIntent that does not require an unlock (owner decision N3 is open;
- * this keeps today's behaviour). There is no LOCK action: that feature is off.
+ * other ride detail). The same Stop action is attached to the public version,
+ * but whether Stop shows on a redacted lock screen is unverified: SystemUI
+ * renders the public version as a collapsed view, which likely has no action
+ * buttons, so the rider may have to unlock to reach Stop. Stop itself is a
+ * plain service PendingIntent with no unlock requirement (owner decision N3 is
+ * open; a phone check with hide-sensitive on and off must come first). There
+ * is no LOCK action: that feature is off, and a future one must be gated on
+ * BuildConfig.NOTIFICATION_LOCK (false), the native twin of kNotificationLock.
  */
 object RecordingNotifications {
     const val RECORDING_TITLE = "Recording"

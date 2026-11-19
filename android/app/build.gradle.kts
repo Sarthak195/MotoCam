@@ -96,12 +96,19 @@ android {
         jvmTarget = "17"
     }
 
+    buildFeatures {
+        buildConfig = true
+    }
+
     defaultConfig {
         applicationId = "com.example.motocam"
         minSdk = flutter.minSdkVersion
         targetSdk = 36
         versionCode = flutterVersionCode
         versionName = flutterVersionName
+        // Native twin of kNotificationLock in lib/core/build_flags.dart: a
+        // future LOCK action on the recording notification is gated on it.
+        buildConfigField("boolean", "NOTIFICATION_LOCK", "false")
     }
 
     signingConfigs {

@@ -25,7 +25,7 @@ const bool kLockTone = false;
 const bool kOrientationChip = false;
 
 /// A LOCK action on the recording notification (Kotlin has a matching
-/// BuildConfig boolean).
+/// BuildConfig.NOTIFICATION_LOCK, set in android/app/build.gradle.kts).
 const bool kNotificationLock = false;
 
 /// A trip report after STOP.
