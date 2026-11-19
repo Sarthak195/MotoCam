@@ -2896,6 +2896,9 @@ class _RecordingScreenState extends State<RecordingScreen>
     _telemetryProvider?.removeListener(_onTelemetryChanged);
     _cameraProvider?.removeListener(_onCameraChanged);
     WidgetsBinding.instance.removeObserver(this);
+    if (widget.landscapeRecording) {
+      _orientationPinner.dispose();
+    }
     _blackoutExitHoldTimer?.cancel();
     _inAppNoticeTimer?.cancel();
     unawaited(_recordingTimerSubscription?.cancel());
