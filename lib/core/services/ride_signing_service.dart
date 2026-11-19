@@ -24,7 +24,7 @@ class RideSigningKey {
 /// Dart side of the `com.example.motocam/integrity` channel: this phone's
 /// Android Keystore key that signs ride envelopes (see `RideSigner.kt`).
 ///
-/// Every call returns `null` instead of failing: on iOS and in tests
+/// Every call returns `null` instead of failing: in tests
 /// (`MissingPluginException`), on a `PlatformException`, on a malformed
 /// reply and after [timeout]. Use it on the UI isolate only.
 class RideSigningService {

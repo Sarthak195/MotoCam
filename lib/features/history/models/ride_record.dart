@@ -57,7 +57,7 @@ enum RideLockChangeResult {
 ///
 /// Segment paths are resolved against the directory that holds the
 /// telemetry file: a declared absolute path that no longer exists (for
-/// example after the iOS data-container path changed) is replaced by the
+/// example after the rides moved to private storage) is replaced by the
 /// same file name in that directory when such a file exists. Only that
 /// directory is trusted; declared paths outside it are quarantined.
 class RideRecord {

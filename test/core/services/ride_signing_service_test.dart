@@ -52,7 +52,7 @@ void main() {
       });
     });
 
-    test('returns null without the plugin (iOS, tests)', () async {
+    test('returns null without the plugin (tests)', () async {
       final service = RideSigningService();
       expect(await service.getSigningKey(), isNull);
       expect(await service.signPayloadHash(payloadHash), isNull);

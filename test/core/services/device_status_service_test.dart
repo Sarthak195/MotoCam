@@ -81,7 +81,7 @@ void main() {
     });
 
     test('returns empty off Android without calling the channel', () async {
-      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      debugDefaultTargetPlatformOverride = TargetPlatform.linux;
       var called = false;
       messenger().setMockMethodCallHandler(_channel, (call) async {
         called = true;

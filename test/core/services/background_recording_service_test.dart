@@ -78,7 +78,7 @@ void main() {
     });
 
     test('is never offered off Android', () async {
-      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      debugDefaultTargetPlatformOverride = TargetPlatform.linux;
       expect(await service.shouldOfferBatteryOptimizationExemption(), isFalse);
       expect(calls, isEmpty);
     });
@@ -137,7 +137,7 @@ void main() {
     });
 
     test('setKeepScreenOn is a no-op off Android', () async {
-      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      debugDefaultTargetPlatformOverride = TargetPlatform.linux;
       await service.setKeepScreenOn(enabled: true);
       expect(calls, isEmpty);
     });
@@ -159,7 +159,7 @@ void main() {
     });
 
     test('releaseCameraHold is a no-op off Android', () async {
-      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      debugDefaultTargetPlatformOverride = TargetPlatform.linux;
       await service.releaseCameraHold();
       expect(calls, isEmpty);
     });

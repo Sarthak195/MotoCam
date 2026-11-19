@@ -157,7 +157,7 @@ See [playback-and-history.md](playback-and-history.md) for the route map and [pl
 
 ## Persistence scope
 
-On Android, settings are device-local. The manifest sets `android:allowBackup="false"`, and both `backup_rules.xml` (full-backup content) and `data_extraction_rules.xml` (its cloud-backup and device-transfer sections) exclude domain `root`, path `.`, domain `file`, path `.` (the recordings, the migration journal and the ride index) and domain `external`, path `.` (the legacy recordings root), so settings reset after reinstall or migration. This exclusion is Android-only; iOS has no equivalent configuration.
+On Android, settings are device-local. The manifest sets `android:allowBackup="false"`, and both `backup_rules.xml` (full-backup content) and `data_extraction_rules.xml` (its cloud-backup and device-transfer sections) exclude domain `root`, path `.`, domain `file`, path `.` (the recordings, the migration journal and the ride index) and domain `external`, path `.` (the legacy recordings root), so settings reset after reinstall or migration.
 
 ## How to add a new setting
 

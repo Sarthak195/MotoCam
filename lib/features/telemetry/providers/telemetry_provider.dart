@@ -431,15 +431,6 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
         timeLimit: timeLimit,
       );
     }
-    if (Platform.isIOS) {
-      return AppleSettings(
-        accuracy: LocationAccuracy.bestForNavigation,
-        distanceFilter: 0,
-        activityType: ActivityType.automotiveNavigation,
-        pauseLocationUpdatesAutomatically: false,
-        timeLimit: timeLimit,
-      );
-    }
     return LocationSettings(
       accuracy: LocationAccuracy.high,
       distanceFilter: 0,
@@ -767,7 +758,7 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
       latitude: position.latitude,
       longitude: position.longitude,
       speed: _filteredSpeedKmh,
-      // iOS reports -1 when the course is invalid; keep the last course.
+      // A negative or non-finite heading means no course; keep the last one.
       bearing: heading.isFinite && heading >= 0 ? heading % 360 : null,
       timestamp: now,
       distanceKm: _rideDistanceKm,
@@ -790,7 +781,7 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
   // filter's slow rise (32 percent per fix) under-reads while accelerating.
   // A fix whose speed cannot be trusted gets the filtered value instead, so
   // its worst case is the filter's delay, never a false stop: a speed that
-  // is not finite, negative (unavailable on iOS) or implausibly high, and
+  // is not finite, negative (unavailable) or implausibly high, and
   // 0 with no speed accuracy (Android maps a fix without speed to 0).
   static double _crashDetectorSpeedKmh(
     Position position,
@@ -874,8 +865,8 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
 
   void _onLinearAccelerationStreamError(Object error) {
     debugPrint('Telemetry: linear acceleration stream error: $error');
-    // Android reports a missing sensor as NO_SENSOR; iOS reports a failed
-    // device-motion source as UNAVAILABLE.
+    // Android reports a missing sensor as NO_SENSOR; UNAVAILABLE is treated
+    // the same.
     if (!_isUsingGravityFallback &&
         error is PlatformException &&
         (error.code == 'NO_SENSOR' || error.code == 'UNAVAILABLE')) {

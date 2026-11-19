@@ -51,8 +51,8 @@ enum GalleryCopyStatus {
 /// `com.example.motocam/gallery`: checking that they still exist and
 /// removing them.
 ///
-/// Every method answers with a per-URI result and never throws: on iOS (no
-/// handler) or after a channel error every URI is reported as
+/// Every method answers with a per-URI result and never throws: without the
+/// native handler (tests) or after a channel error every URI is reported as
 /// [GalleryCopyStatus.failed], and [existingUris] returns `null`.
 class GalleryCopies {
   GalleryCopies._();

@@ -292,7 +292,7 @@ class CameraProvider extends ChangeNotifier {
   LegacyRideImportController get legacyRideImport => _legacyRideImport;
 
   /// Why [importLegacyRides] would refuse to start now, as a rider-facing
-  /// sentence, or `null` when it may start: it never runs on iOS, while a
+  /// sentence, or `null` when it may start: it never runs off Android, while a
   /// recording starts, runs or stops, while rides are moved into private
   /// storage, while the storage budget deletes rides, or while another
   /// import runs.
@@ -463,7 +463,7 @@ class CameraProvider extends ChangeNotifier {
   /// Maps a resolution in lines (480, 720, 1080, 2160) to a camera preset.
   ///
   /// 480 maps to [ResolutionPreset.medium] (~480p); [ResolutionPreset.low]
-  /// is ~240p on Android and 352x288 on iOS.
+  /// is ~240p on Android.
   static ResolutionPreset presetForResolution(int resolution) {
     if (resolution <= 480) {
       return ResolutionPreset.medium;
@@ -1086,12 +1086,8 @@ class CameraProvider extends ChangeNotifier {
   // Android: the app's private files directory (filesDir), on the same
   // mount as the camera plugin's cache directory, so a finished segment is
   // renamed into place.
-  Future<Directory?> _resolveRecordingsBaseDirectory() async {
-    if (Platform.isIOS) {
-      return getApplicationDocumentsDirectory();
-    }
-    return getApplicationSupportDirectory();
-  }
+  Future<Directory?> _resolveRecordingsBaseDirectory() =>
+      getApplicationSupportDirectory();
 
   // Keeps private loop footage out of the media index on Android versions
   // whose scanner does not skip Android/data.
@@ -1395,7 +1391,7 @@ class CameraProvider extends ChangeNotifier {
 
   /// Free bytes on the volume holding the recordings directory, or `null`
   /// when the directory is not set up yet or the platform does not report
-  /// it (the native `getAvailableStorageBytes` method is missing, as on iOS,
+  /// it (the native `getAvailableStorageBytes` method is missing, as in tests,
   /// or fails).
   Future<int?> availableStorageBytes() async {
     final directoryPath = _recordingsDirectory;

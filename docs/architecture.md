@@ -25,13 +25,11 @@ MotoCam is a Flutter motorcycle dashcam. One home screen coordinates three app-w
 | Platform | Status |
 |---|---|
 | Android | Primary target. All seven native method channels are implemented in Kotlin. They provide the recording foreground service, Picture-in-Picture (PiP), battery and thermal status, free-space queries, gallery export, checking and removing gallery copies, the ride signing key and Storage Access Framework access to the old public recordings folder. |
-| iOS | There are no native channel handlers. On iOS the Dart services that wrap Android channels are gated off or return defaults, so the foreground service, notification Stop, PiP, device status, gallery export and ride signing are unavailable, and recording needs the app in the foreground with the screen on. The iOS project state is covered in [platform-integration.md](platform-integration.md). |
 | Other | Not targeted; the repository has no web or desktop platform folders. A few generic branches exist: `CameraProvider` uses the application support directory, `TelemetryProvider` plain `LocationSettings`, and `path_utils` lower-cases paths on Windows. |
 
 Current limitations of the recording pipeline:
 
 - On Android, the camera plugin binds CameraX to `MainActivity`'s lifecycle. While a recording's foreground service runs, `MainActivity` holds the lifecycle it exposes at STARTED, so recording is designed to continue with the screen off or the app in the background; this has not yet been confirmed on a device. The keep-screen-on setting (on by default) is the fallback. Swiping the app away from Recents still ends the recording. See [platform-integration.md](platform-integration.md#camera-lifecycle-hold).
-- On iOS nothing disables the idle timer while recording, so Auto-Lock interrupts the capture.
 - Each segment roll stops and restarts the camera recording, which loses about 0.2 s of footage at every segment boundary (measured on the test phone on 2026-11-11 with 5 s segments and the preview on; about 1 s before rolls kept CameraX's video stream bound, third_party/camera_android_camerax/MOTOCAM_PATCHES.md patch 1). On the first real ride (2026-11-13: 3 min segments, Blackout on, unplugged) rolls lost about 0.9 s between files plus up to about 1.4 s of short gaps early in the next clip, and the camera reopened at every roll. On the bench with 3 min segments at 2160p60 and the preview on, each roll also lost about 4 to 8 s in two or three holes during the next 15 s: the camera plugin forwarded every CameraX recording Status event to Dart and kept it until the roll, and releasing about 8,000 of them flooded the main thread, where CameraX's MediaCodec callbacks also run. Since third_party/camera_android_camerax/MOTOCAM_PATCHES.md patch 5 (Status events are not forwarded) a check run (2026-11-17, one debug-build run, two rolls) had no hole over 0.25 s after either roll and about 0.45 to 0.6 s between the files. Rolls in Blackout, with the screen locked and on a real ride have not been re-measured since.
 
 [recording-pipeline.md](recording-pipeline.md) describes each of them.
@@ -146,7 +144,7 @@ Notes:
 | `GalleryCopies` | `gallery` | Not gated; Ride History offers it only on Android. Errors report `failed` | `galleryItemsExist`, `deleteGalleryItems`, `requestDeleteGalleryItems` | none |
 | `AppPermissionService` | none (uses `permission_handler`) | Android-only extras: notifications, legacy storage (gallery export on, Android 9 and lower), the battery-exemption status | n/a | n/a |
 
-Every Kotlin handler is registered in `MainActivity.configureFlutterEngine` (the `integrity`, `legacy_recordings` and `gallery` ones through their own classes). Channel contracts, manifest permissions, the foreground service and the iOS project state are covered in [platform-integration.md](platform-integration.md).
+Every Kotlin handler is registered in `MainActivity.configureFlutterEngine` (the `integrity`, `legacy_recordings` and `gallery` ones through their own classes). Channel contracts, manifest permissions, and the foreground service are covered in [platform-integration.md](platform-integration.md).
 
 ## App startup sequence
 
@@ -212,7 +210,7 @@ sequenceDiagram
     RS->>B: stopForegroundRecording (Android, after the save)
 ```
 
-- Each finished segment is moved (or, when the rename fails, copied) from the camera plugin's temporary file into the recordings directory. On Android that is `<application support>/MotoCam Recordings` (the private `filesDir`, on the same mount as the plugin's cache, so the move is a rename), which also holds a `.nomedia` marker; on iOS it is `<app documents>/MotoCam Recordings`. The directory is resolved once per process. When it is unavailable nothing is written elsewhere and recording cannot start. On Android, the legacy roots (app-specific external storage, the root until this build, and the documents and cache folders earlier builds fell back to) are still scanned until `RecordingsMigrator` has moved their rides into the recordings directory; see [recording-pipeline.md](recording-pipeline.md#legacy-roots-and-migration).
+- Each finished segment is moved (or, when the rename fails, copied) from the camera plugin's temporary file into the recordings directory. On Android that is `<application support>/MotoCam Recordings` (the private `filesDir`, on the same mount as the plugin's cache, so the move is a rename), which also holds a `.nomedia` marker. The directory is resolved once per process. When it is unavailable nothing is written elsewhere and recording cannot start. On Android, the legacy roots (app-specific external storage, the root until this build, and the documents and cache folders earlier builds fell back to) are still scanned until `RecordingsMigrator` has moved their rides into the recordings directory; see [recording-pipeline.md](recording-pipeline.md#legacy-roots-and-migration).
 - `startRecording` refuses to start when the platform reports less free space than one more segment needs, and the same check runs before every segment roll.
 - The ride session starts only after `CameraProvider.startRecording` succeeds, with the camera's start time as its zero point. Checkpoints and the final save write the same file, so one ride session produces at most one telemetry file. When stop resolves no video path, `_stopRecordingFlow` calls `TelemetryProvider.cancelRideSession` and no final file is written; a checkpoint written earlier stays on disk.
 - When `startForegroundRecording` returns `false` or throws, recording continues and a SnackBar warns that background protection is unavailable.
@@ -295,11 +293,10 @@ While recording, the HISTORY button reads MINIMISE, and both it and system back 
 | `lib/` | All Dart source, split into `core/` and `features/` (see [Module map](#module-map)) |
 | `test/` | Unit and widget tests under `test/core/` and `test/features/`, grouped by `lib/` area, plus `widget_test.dart` (app smoke test), the ride-file fixtures in `test/fixtures/ride_files/` and shared test helpers in `test/support/` (a P-256 key standing in for the phone's signing key): 640 tests in 48 files |
 | `android/` | Gradle project (`app/build.gradle.kts`), manifest, Kotlin `MainActivity` and `BackgroundRecordingService`, resources (themes, the monochrome notification icon, backup and data-extraction rules), ProGuard rules and `key.properties.template` |
-| `ios/` | Xcode Runner project: template `AppDelegate`/`SceneDelegate`, `Info.plist` with usage strings, and a `Podfile` that enables the `permission_handler` camera, microphone and when-in-use location code. No native channel code |
 | `scripts/` | `release-security-precheck.ps1` (used by CI) and `generate-keystore.ps1` |
 | `release-notes/` | Per-release notes, `v0.1.8.md` through `v0.1.13.md` |
 | `docs/` | This documentation set; start at [README.md](README.md). `docs/audits/` holds the project scan report |
-| `.github/` | `workflows/ci.yml` (on pushes to `main` and on pull requests: dependencies from the lockfile, analyze, the security precheck, tests with coverage, a debug APK build and a format check, plus an iOS simulator build) and `dependabot.yml` |
+| `.github/` | `workflows/ci.yml` (on pushes to `main` and on pull requests: dependencies from the lockfile, analyze, the security precheck, tests with coverage, a debug APK build and a format check) and `dependabot.yml` |
 | `.gitattributes` | Line-ending policy: LF for text files, CRLF for `.bat` and `.cmd` |
 
 Build, test and tooling details are in [development.md](development.md). Signing, versioning and tags are in [release.md](release.md).

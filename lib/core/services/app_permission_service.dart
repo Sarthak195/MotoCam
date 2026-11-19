@@ -66,7 +66,7 @@ class AppPermissionService {
   static const int scopedStorageSdkInt = 29;
 
   /// The app-wide "permission is usable" predicate: granted, or limited
-  /// (iOS partial access).
+  /// (partial access).
   static bool isPermissionGranted(PermissionStatus status) {
     return status.isGranted || status.isLimited;
   }

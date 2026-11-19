@@ -236,8 +236,8 @@ void main() {
     },
   );
 
-  test('skips the Android-only checks on iOS', () async {
-    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+  test('skips the Android-only checks off Android', () async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.linux;
     platform.grantAll(requiredPermissions);
     platform.ignoringBatteryOptimizations = false;
     platform.sdkInt = 28;

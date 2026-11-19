@@ -23,8 +23,8 @@ class TelemetryData {
 
   /// GPS course over ground in degrees (0–360).
   ///
-  /// The provider keeps the previous course when the platform reports none
-  /// (iOS reports `-1`), but files written by older versions or by other tools
+  /// The provider keeps the previous course when the platform reports none,
+  /// but files written by older versions or by other tools
   /// may contain negative values, which mean "unavailable".
   final double bearing;
 

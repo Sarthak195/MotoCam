@@ -25,7 +25,6 @@ This document describes every file MotoCam writes: where it goes, how it is name
 | Platform | Base directory (path_provider) | Recordings directory |
 |---|---|---|
 | Android | `getApplicationSupportDirectory()`, which is `Context.getFilesDir()` (internal app storage, typically `/data/user/0/com.example.motocam/files`: private on every API level, not reachable over USB or by file managers, and on the same mount as the camera plugin's cache directory) | `<base>/MotoCam Recordings` |
-| iOS | `getApplicationDocumentsDirectory()` | `<base>/MotoCam Recordings` |
 | Any other platform | `getApplicationSupportDirectory()` | `<base>/MotoCam Recordings` |
 
 There is no fallback root for writing. If the base directory is `null` or any step throws, `_setupRecordingsDirectory` returns `false` and camera initialization stops (the camera stays uninitialized). The directory is created recursively if it does not exist. The app requests no runtime storage permission for it, and app-specific storage needs none. The manifest's storage entries are covered in [platform-integration.md](platform-integration.md).
@@ -76,8 +75,6 @@ Either way the call returns the copy's content URI, which the store keeps so tha
 
 **Android backup.** The manifest sets `allowBackup="false"`. Both `backup_rules.xml` and `data_extraction_rules.xml` (cloud backup and device transfer) exclude `domain="root" path="."`, `domain="file" path="."` and `domain="external" path="."`. The `file` domain is `getFilesDir`, which holds the recordings and ride telemetry, the migration journal, the ride index and the gallery-link store; the `external` domain is `getExternalFilesDir`, the legacy root. See [platform-integration.md](platform-integration.md).
 
-**iOS** uses the same file formats. Paths in the JSON are absolute paths inside the app container. When the container path changes, the reader relocates segment paths by file name (see [Path scope and quarantine](#path-scope-and-quarantine)). iOS has no public export. The recordings directory is inside Documents, and the app sets no backup exclusion on it, so iOS device and iCloud backups include it.
-
 ## Directory layout and file naming
 
 All rides share one flat recordings directory. Nothing groups files by ride: the telemetry JSON lists which segments belong to which ride.
@@ -87,7 +84,6 @@ All rides share one flat recordings directory. Nothing groups files by ride: the
 ├── .nomedia                                   Android only, empty marker
 ├── REC1234567890123456789.mp4                 segment (Android CameraX name)
 ├── REC1234567890123456789_1.mp4               same name already taken -> _<n> suffix
-├── REC_6F1C...-UUID.mp4                       segment (iOS camera_avfoundation name)
 ├── ride_1792483200000_0a1b2c3d1e5f6a7b.telemetry.json      one per recorded ride
 ├── ride_1792483200000_0a1b2c3d1e5f6a7b.telemetry.json.<pid>-<µs>-<n>.tmp   only while a write is in progress
 └── .__motocam_write_probe.tmp                 only during the start preflight's write check
@@ -95,7 +91,7 @@ All rides share one flat recordings directory. Nothing groups files by ride: the
 
 | Item | Pattern | Produced by |
 |---|---|---|
-| Segment file | The camera plugin's own file name, kept unchanged. Android CameraX records to `<app cache>/REC<digits>.mp4` (via `File.createTempFile("REC", ".mp4")`). iOS records to `<tmp>/camera/videos/REC_<UUID>.mp4`. | Camera plugin, then `CameraProvider._persistSegmentToRecordingsDirectory` |
+| Segment file | The camera plugin's own file name, kept unchanged. Android CameraX records to `<app cache>/REC<digits>.mp4` (via `File.createTempFile("REC", ".mp4")`). | Camera plugin, then `CameraProvider._persistSegmentToRecordingsDirectory` |
 | Name collision | `<base>_1<ext>`, `<base>_2<ext>`, ... (the first name not already present) | `CameraProvider._buildUniqueSegmentPath` |
 | Blank plugin file name | `segment_<epoch ms>.mp4` | `CameraProvider._buildUniqueSegmentPath` |
 | Telemetry file | `ride_<rideSessionId>.telemetry.json`, with every character outside `[a-zA-Z0-9_-]` replaced by `_` | `rideTelemetryPathFor` in the ride-file codec |
@@ -337,14 +333,14 @@ If the app is killed during a ride, the last checkpoint stays on disk. The ride 
 
 The envelope code is in [ride_integrity.dart](../lib/core/ride_file/ride_integrity.dart) and the signature code in [ride_signature.dart](../lib/core/ride_file/ride_signature.dart), both part of the ride-file codec; the generic hashing helpers (`hashJsonCanonical`, `hashFileSha256`) stay in [integrity_utils.dart](../lib/core/utils/integrity_utils.dart). The envelope is built by `buildIntegrityEnvelope`, which the codec's `sealRidePayload` (checkpoints) and `sealAndSignRidePayload` (final save) run in `Isolate.run`. `resealIntegrityEnvelope` updates it when the lock state changes (through `applyLockState`), and `checkRideIntegrity` checks it.
 
-The SHA-256 hashes alone are a checksum: they show that the ride data and segments are unmodified since recording, or detect accidental corruption, but anyone who can rewrite the files can also recompute them. A version 3 envelope adds an ECDSA signature by a non-exportable Android Keystore key of the recording phone. It shows that the files were not changed by anyone without this app's key on that phone. It does not prove the footage is genuine: a rooted phone or a modified app can sign anything. Only the recording phone and install can tell that it signed a ride (see [Who signed a ride](#who-signed-a-ride)); on any other phone, or after a reinstall, a signed ride shows only as unmodified. iOS rides are not signed. Once a segment's hash is stored in the [ride index](#ride-index-cache), a later change to the segment is detected only when it also changes the file's size, modification time or change time; a change that keeps all three (silent storage corruption, for example) is found only by 'Check videos again', which re-reads every segment.
+The SHA-256 hashes alone are a checksum: they show that the ride data and segments are unmodified since recording, or detect accidental corruption, but anyone who can rewrite the files can also recompute them. A version 3 envelope adds an ECDSA signature by a non-exportable Android Keystore key of the recording phone. It shows that the files were not changed by anyone without this app's key on that phone. It does not prove the footage is genuine: a rooted phone or a modified app can sign anything. Only the recording phone and install can tell that it signed a ride (see [Who signed a ride](#who-signed-a-ride)); on any other phone, or after a reinstall, a signed ride shows only as unmodified. Once a segment's hash is stored in the [ride index](#ride-index-cache), a later change to the segment is detected only when it also changes the file's size, modification time or change time; a change that keeps all three (silent storage corruption, for example) is found only by 'Check videos again', which re-reads every segment.
 
 ### Envelope fields
 
 | Field | Type | Written value | Read |
 |---|---|---|---|
 | `algo` | string | `"sha256"` (`integrityAlgorithmSha256`) | Trimmed and lower-cased; must equal `sha256` |
-| `envelopeVersion` | int | `3` (`signedIntegrityEnvelopeVersion`) for a signed final save; `2` (`boundIntegrityEnvelopeVersion`) for checkpoints, iOS, a final save that could not be signed, and a lock change on a ride not signed by this phone | Absent: version 1 (legacy). Present but not a number, or outside 1 to 3 (`maxIntegrityEnvelopeVersion`, the one constant for the highest accepted version): an issue. Selects how `payloadHash` is computed and whether `signature` is read. |
+| `envelopeVersion` | int | `3` (`signedIntegrityEnvelopeVersion`) for a signed final save; `2` (`boundIntegrityEnvelopeVersion`) for checkpoints, a final save that could not be signed, and a lock change on a ride not signed by this phone | Absent: version 1 (legacy). Present but not a number, or outside 1 to 3 (`maxIntegrityEnvelopeVersion`, the one constant for the highest accepted version): an issue. Selects how `payloadHash` is computed and whether `signature` is read. |
 | `segmentCount` | int | Number of entries in the written `segmentPaths` | Never; kept unchanged by `setLockState` |
 | `hashedSegmentCount` | int | Number of entries in `segmentHashes` | Never |
 | `segmentHashes` | object `{path: hex}` | SHA-256 of each segment file, keyed by the exact path string from `segmentPaths`. A segment that could not be read is left out. | Non-object is treated as `{}`; keys trimmed; values trimmed and lower-cased; empty keys or values skipped. For each segment the reader looks up its declared path, then its resolved path, then its plain file name. |
@@ -366,7 +362,7 @@ The SHA-256 hashes alone are a checksum: they show that the ride data and segmen
 - **What is signed:** the UTF-8 bytes of the envelope's `payloadHash` string (64 lowercase hex characters). `payloadHash` covers the whole ride JSON and every envelope field except itself and `signature`, so the signature binds the ride data, `segmentHashes` (and so every segment file), the counts and `generatedAt`.
 - **Who signs:** the phone's key under the Android Keystore alias `motocam_ride_signing_v1`, through the `com.example.motocam/integrity` channel (see [platform-integration.md](platform-integration.md#comexamplemotocamintegrity)).
 - **The key identifies the install:** every ride signed by one install carries the same `publicKey` (and `keyId`), so anyone holding several ride JSON files can tell they were recorded by the same install, even with the location data removed. A reinstall creates a new key. The key is kept because offline verification needs it.
-- **Writing** (`sealAndSignRidePayload`, final save only): one background isolate builds both a version 2 envelope and a version 3 envelope without its signature; the UI isolate asks the phone to sign the version 3 `payloadHash` (5 s channel timeout, 6 s overall); a background isolate checks the answer with the verifier below; the file is written once. If signing is unavailable (iOS, tests), fails, times out or returns a signature that does not verify, the version 2 envelope is written, exactly as before version 3 existed. Signing never makes a save fail.
+- **Writing** (`sealAndSignRidePayload`, final save only): one background isolate builds both a version 2 envelope and a version 3 envelope without its signature; the UI isolate asks the phone to sign the version 3 `payloadHash` (5 s channel timeout, 6 s overall); a background isolate checks the answer with the verifier below; the file is written once. If signing is unavailable (tests), fails, times out or returns a signature that does not verify, the version 2 envelope is written, exactly as before version 3 existed. Signing never makes a save fail.
 - **Verification** (`verifyRideSignature`, pure Dart with pointycastle, so it runs in the history isolate): `alg` must be `ES256`; `publicKey` and `sig` must be canonical base64 (re-encoding gives the same string) of at most 256 characters; the key must be the exact P-256 SubjectPublicKeyInfo prefix followed by an uncompressed point whose coordinates are below the field prime and on the curve; the signature must be strict DER (short-form lengths, minimal positive integers, nothing trailing); `keyId` must match the key; and the ECDSA check must pass over the stored `payloadHash`. Both low-S and high-S signatures are accepted, because the Android Keystore does not normalise S; r and s outside 1 to n-1 fail. Malformed input is an issue, never an exception.
 
 ### What is hashed
@@ -454,7 +450,7 @@ The verdict depends on the phone that reads the ride, so it is derived on every 
 | `none` | No signature, or one that failed its check | As before signatures existed |
 | `thisDevice` | A valid signature whose public key bytes equal this phone's key byte for byte (keyIds are never compared) | "SIGNED ON THIS PHONE" (when the status is `verified` and the GPS was not simulated) |
 | `otherKey` | A valid signature by a key known to differ: another phone, or this phone before a reinstall | "DATA UNMODIFIED", with "signed by another phone or an earlier install" in the card line |
-| `unknownSigner` | A valid signature while this phone's key could not be read (iOS, a Keystore error) | "DATA UNMODIFIED", with "signed, but this phone's key could not be read" in the card line. Never `thisDevice` and never `otherKey` |
+| `unknownSigner` | A valid signature while this phone's key could not be read (a Keystore error) | "DATA UNMODIFIED", with "signed, but this phone's key could not be read" in the card line. Never `thisDevice` and never `otherKey` |
 
 The `unknownSigner` value is a fourth state beyond none, this phone and another key: it keeps "validly signed, signer unknown" apart from "unsigned".
 
@@ -481,7 +477,7 @@ Any other exception returns `failed`. The app only ever calls `changeLockState(f
   - A copy of a ride on another phone, or on this phone after a reinstall: it can be stripped to version 2 (or re-signed with any key) unnoticed, since no registry entry exists there. Such phones show a signed ride only as "DATA UNMODIFIED".
   - On the recording install, changing `rideSessionId`, renaming the telemetry file and renaming every segment file together: that amounts to deleting the signed ride and making up an unsigned one, and the app does not report registered rides whose files are gone.
   - An older genuine version of a ride signed on this phone (for example the file from before an unlock) written back over the current one: its signature is valid and its id is registered, so it loads as signed on this phone, and the lock state silently returns to the old one. The registry stores no version of a ride.
-  - On a phone that cannot sign (iOS), a ride signed elsewhere shows `unknownSigner`, and its lock state cannot be changed there: re-signing is attempted and fails, so the change is refused (`signingFailed`).
+  - On a phone that cannot sign, a ride signed elsewhere shows `unknownSigner`, and its lock state cannot be changed there: re-signing is attempted and fails, so the change is refused (`signingFailed`).
   - Anything signed on a rooted phone or by a modified app: the signature proves that the app's key on that phone signed the data, not that the footage is genuine.
   - Removing the envelope and also setting `sessionComplete` to `false` or `schemaVersion` below 3 gives `unknown` ("UNVERIFIED").
   - In a version 1 envelope, `segmentHashes` is outside the payload hash, so it can be rewritten to match changed segment files.
@@ -500,7 +496,7 @@ Declared path resolution (`resolveDeclaredRidePath`, called by `resolveRideSegme
 - A plain file name (no separator) is resolved inside the telemetry file's directory.
 - An existing path inside the telemetry file's directory is kept.
 - A path directly inside the legacy public folder (`legacyPublicRecordingsDirectory`), read from any other directory, always maps to the same name inside the telemetry file's directory, whether that file or the original exists or not. An [imported](#import-from-the-old-public-folder) v0.1.11/v0.1.12 ride therefore reads the same (segments, missing list, locks, status) whether or not its originals are still in the public folder, and a clip that was already gone counts as missing, not quarantined. Nothing in the public folder is read. A path in a subdirectory of it is not covered.
-- Otherwise, when the same file name exists inside the telemetry file's directory, that sibling is used, even when the declared path also exists elsewhere. This keeps rides working after the data directory moved (for example when the iOS container path changed) and after a ride was moved or copied byte for byte to another root while its source copy still exists (during the [migration](#legacy-roots-and-their-migration)).
+- Otherwise, when the same file name exists inside the telemetry file's directory, that sibling is used, even when the declared path also exists elsewhere. This keeps rides working after the data directory moved and after a ride was moved or copied byte for byte to another root while its source copy still exists (during the [migration](#legacy-roots-and-their-migration)).
 - A path outside the directory, with no sibling, whose parent directory has the same name as the telemetry file's directory (for example both are `MotoCam Recordings`) is mapped to that missing sibling, whether a file exists at the declared path or not: a segment that was already gone before a move stays missing rather than quarantined. Nothing outside the directory is read or even checked for existence, so a file someone places at a moved ride's old path (for example in the old app-specific external folder) cannot turn the ride's missing segment into a quarantined one and its status into failed.
 - Anything else is kept as declared, so an existing path outside the directory with no sibling, or a missing one in a differently named directory, is quarantined below.
 
@@ -609,7 +605,7 @@ The reader handles every generation through the same code, so older files load w
 | 76974c1, 2026-04-05 | `ride_<id>.telemetry.json` | adds `rideSessionId`, `sessionComplete`, `storagePolicy` (`"public-folder-only"`), `storageDirectory`, `recordingSettings` |
 | cd39097, 2026-07-07 | `ride_<id>.telemetry.json` | `storagePolicy` becomes `"hybrid-private-primary"`; adds `publicExportRelativePath` and `integrity` (version 1 envelope) |
 | schema 3 before signing | `ride_<id>.telemetry.json` | `schemaVersion: 3`; sealed checkpoints with `sessionComplete: false`; timestamps in UTC with `Z`; adds `mockLocationDetected`, `incidents`, sample `hasFix` and `fixAgeMs`; version 2 envelope (`envelopeVersion: 2`, bound payload hash); `appliedBitrateMbps` is `null` on Android; non-finite numbers written as `null` |
-| current code | `ride_<id>.telemetry.json` | Final saves on Android carry a version 3 envelope with `signature`; checkpoints, iOS saves and saves that could not be signed stay version 2; `appliedBitrateMbps` is an int on Android too (camera plugin patch 4, 2026-11-11) |
+| current code | `ride_<id>.telemetry.json` | Final saves on Android carry a version 3 envelope with `signature`; checkpoints and saves that could not be signed stay version 2; `appliedBitrateMbps` is an int on Android too (camera plugin patch 4, 2026-11-11) |
 
 Consequences:
 

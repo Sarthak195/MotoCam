@@ -23,9 +23,9 @@ Every document describes the code as it is today, including behaviour that may n
 | [playback-and-history.md](playback-and-history.md) | Ride discovery and loading, the rides list and its actions, integrity verification on open, the multi-segment playback engine, effective timeline synthesis, missing segments and the seekbar track, telemetry sync, the route map (`RouteMapView`, `StaticMapViewer`, `MapSourceConfig`) and what each ride action does on disk | Anyone changing `RidesListScreen`, `RidePlaybackScreen`, `RideRecord`, the playback timeline or the map widgets |
 | [data-formats.md](data-formats.md) | Every file the app writes: storage locations, directory layout and naming, the file inventory, the ride telemetry JSON schema, checkpoints and the final save, the integrity envelope, its verification procedure and its limits, path scope and quarantine, the atomic-write procedure and backward compatibility | Anyone reading or writing ride files, changing the JSON or envelope, or building test fixtures |
 | [settings.md](settings.md) | `AppSettingsProvider`: every setting with its SharedPreferences key, default and normalization, where each setting takes effect, the settings sheet and save flow, legacy keys and migration, other persisted preferences, and how to add a new setting | Anyone adding or changing a setting |
-| [platform-integration.md](platform-integration.md) | The seven Android method channels and their contracts (including the ride signing key, the old-folder access and the gallery copies), the foreground service, PiP, the battery-optimization exemption, media scanning, gallery export and the removal of gallery copies, battery and thermal status, the Android manifest permission matrix, the runtime permission flow, the current state of the iOS project, and how to add a new method channel | Anyone touching Kotlin, the manifest, permissions, a method channel or the iOS project |
+| [platform-integration.md](platform-integration.md) | The seven Android method channels and their contracts (including the ride signing key, the old-folder access and the gallery copies), the foreground service, PiP, the battery-optimization exemption, media scanning, gallery export and the removal of gallery copies, battery and thermal status, the Android manifest permission matrix, the runtime permission flow, and how to add a new method channel | Anyone touching Kotlin, the manifest, permissions, or a method channel |
 | [development.md](development.md) | Toolchain prerequisites with verified versions, setup, running on a device, project conventions, static analysis, formatting, testing, CI, debugging tips (logs, exercising features in a short session, pulling recordings, inspecting SharedPreferences), troubleshooting and the contribution workflow | New contributors, first. Anyone setting up a machine or debugging the build |
-| [release.md](release.md) | The release checklist, versioning as practised (pubspec versus tags), signing of published APKs, Android signing setup and the release-build guard, the keystore script, the application ID, the release security precheck, building and checksumming artifacts, tagging and publishing, the release-notes template, a changelog index and iOS release status | The maintainer cutting a release; anyone changing Gradle signing, the precheck or CI |
+| [release.md](release.md) | The release checklist, versioning as practised (pubspec versus tags), signing of published APKs, Android signing setup and the release-build guard, the keystore script, the application ID, the release security precheck, building and checksumming artifacts, tagging and publishing, the release-notes template, and a changelog index | The maintainer cutting a release; anyone changing Gradle signing, the precheck or CI |
 
 Related files outside this folder:
 
@@ -52,7 +52,7 @@ For a developer new to the project:
 6. [playback-and-history.md](playback-and-history.md): the read side of a ride.
 7. [data-formats.md](data-formats.md): the ride file format both sides depend on.
 8. [settings.md](settings.md): the persisted settings.
-9. [platform-integration.md](platform-integration.md): native Android code, permissions and iOS.
+9. [platform-integration.md](platform-integration.md): native Android code and permissions.
 10. [release.md](release.md): only when you need to sign or publish a build.
 
 Steps 4 to 9 are reference material. Read the one that matches the area you are about to change.
@@ -67,7 +67,7 @@ The existing documents follow these rules. Keep to them when editing or adding a
 - **Verify before writing.** Every concrete fact (a default, a threshold, a key name, a version, a path, a command) should come from the source, `pubspec.lock`, the build files or a command you ran. When a fact depends on a toolchain version, name the version.
 - **Use mermaid for flows.** Sequences and decision flows are drawn as fenced `mermaid` blocks (`flowchart` or `sequenceDiagram`), which GitHub renders. Every document except development.md and this index has at least one. Keep labels short and use the real symbol names.
 - **Tables for reference data.** Settings, permissions, channels, thresholds, files and commands go in tables, so that a reader can scan them and a reviewer can check each row.
-- **Platform scope.** Say whether a behaviour is Android-only. Native behaviour is Android-only unless a section says otherwise, because iOS has no native channel handlers.
+- **Platform scope.** MotoCam targets Android only (iOS was removed from scope on 2026-11-19 and the `ios/` folder deleted; it can be restored from git history).
 - **Structure.** Each document starts with a level-1 title and a short paragraph saying what it covers, then a Contents list for longer documents, and ends with a Related documents section where it fits.
 - **Plain text.** No emojis and no badges.
 
@@ -94,7 +94,6 @@ Update documentation in the same pull request as the code change. Use this table
 | CI workflow (`.github/workflows/ci.yml`), lint rules or formatting policy | [development.md](development.md) (static analysis, formatting, CI), [release.md](release.md) if the precheck invocation changes |
 | Tests added or removed | [development.md](development.md#testing), the test counts in [architecture.md](architecture.md#repository-layout) and the [root README](../README.md) (project structure and development commands), plus the test coverage section of [telemetry.md](telemetry.md#test-coverage) for telemetry tests |
 | Version bump, new tag or new release notes | [release.md](release.md) (versioning, tags table and changelog index), the release-notes range in this index and in [architecture.md](architecture.md#repository-layout), and the [root README](../README.md) (project structure and release notes) |
-| iOS project change (Info.plist, Podfile, Swift) | [platform-integration.md](platform-integration.md#ios-current-state), [release.md](release.md#ios-release-status), [features.md](features.md#platform-availability), platform support in the [root README](../README.md) |
 | New user-facing feature | [features.md](features.md), the deep-dive document for its area, key features in the [root README](../README.md) |
 | New document in `docs/` | This index (document table, reading order, maintenance table) and the documentation table in the [root README](../README.md) |
 | License chosen and LICENSE file added | License section of the [root README](../README.md), [development.md](development.md#contribution-workflow) |

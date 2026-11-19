@@ -61,24 +61,3 @@ jobs:
       # build results.
       - name: Check formatting
         run: dart format --output=none --set-exit-if-changed lib test
-
-  ios:
-    runs-on: macos-latest
-    timeout-minutes: 45
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Set up Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          channel: stable
-          flutter-version: ${{ env.FLUTTER_VERSION }}
-          cache: true
-
-      - name: Install dependencies
-        run: flutter pub get --enforce-lockfile
-
-      - name: Build iOS simulator app
-        run: flutter build ios --simulator --no-codesign

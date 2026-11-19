@@ -1,6 +1,6 @@
 # Release process
 
-How MotoCam versions, signs, checks, builds, tags and documents a release today, including the places where past practice has been inconsistent. Releases are Android APKs built on a maintainer machine. CI builds a debug APK and an unsigned iOS simulator app on every run but publishes nothing, and no iOS build has ever been released.
+How MotoCam versions, signs, checks, builds, tags and documents a release today, including the places where past practice has been inconsistent. Releases are Android APKs built on a maintainer machine. CI builds a debug APK on every run but publishes nothing.
 
 ## Contents
 
@@ -15,7 +15,6 @@ How MotoCam versions, signs, checks, builds, tags and documents a release today,
 - [Tagging and publishing](#tagging-and-publishing)
 - [Writing release notes](#writing-release-notes)
 - [Changelog index](#changelog-index)
-- [iOS release status](#ios-release-status)
 
 For toolchain installation, CI and day-to-day commands see [development.md](development.md). For the manifest, permissions and method channels see [platform-integration.md](platform-integration.md).
 
@@ -52,7 +51,6 @@ A Google Play upload needs a different applicationId first; see [Application ID]
 | Flutter tool | Writes `flutter.versionName` and `flutter.versionCode` into `android/local.properties` (git-ignored, machine-local) on each build | Flutter tooling |
 | Gradle | `flutterVersionCode` / `flutterVersionName` read those keys and feed `defaultConfig.versionCode` / `versionName`. If a key is missing, they fall back to `1` and `"1.0"` | [android/app/build.gradle.kts](../android/app/build.gradle.kts) |
 | Result (Android) | versionName `1.0.1`, versionCode `13` | |
-| Result (iOS) | [Info.plist](../ios/Runner/Info.plist) sets `CFBundleShortVersionString` to `$(FLUTTER_BUILD_NAME)` and `CFBundleVersion` to `$(FLUTTER_BUILD_NUMBER)`, and the Runner target sets `CURRENT_PROJECT_VERSION = $(FLUTTER_BUILD_NUMBER)`, so an iOS build takes `1.0.1` / `13` from pubspec. The Runner target has no `MARKETING_VERSION`; only the RunnerTests target sets one | [project.pbxproj](../ios/Runner.xcodeproj/project.pbxproj) |
 
 Reading the version from `local.properties` arrived in commit cd39097, first tagged as v0.1.13. From V0.1.1 to v0.1.12 the Gradle file hard-coded `versionCode = 1` and `versionName = "1.0"` (V0.1.0 still used the template's `flutter.versionCode` / `flutter.versionName`), and every tag before v0.1.13 set the release build to `signingConfig = signingConfigs.getByName("debug")` (for example `git show v0.1.12:android/app/build.gradle.kts`). The APKs published for v0.1.5 to v0.1.12 came from such trees, so they report version 1 / "1.0" and are debug-signed regardless of pubspec; the v0.1.5 asset, for example, reports `versionCode='1' versionName='1.0'` and is signed by `CN=Android Debug`. The consequences are described in [Signing of published APKs](#signing-of-published-apks).
 
@@ -74,7 +72,7 @@ Release notes live in [release-notes/](../release-notes/) as `vX.Y.Z.md` with a 
 
 ### Current inconsistencies
 
-- **Two version schemes.** pubspec says `1.0.1+13` (so Android and iOS report 1.0.1 / 13), while the tag and release notes say v0.1.13. Earlier pubspec values followed the tags from v0.1.5 (`0.1.5+5` ... `0.1.11+11`; the tags before v0.1.5 carried `1.0.0+1`); build number 12 never appears in pubspec history, and the tree tagged v0.1.12 still had `0.1.11+11`.
+- **Two version schemes.** pubspec says `1.0.1+13` (so Android reports 1.0.1 / 13), while the tag and release notes say v0.1.13. Earlier pubspec values followed the tags from v0.1.5 (`0.1.5+5` ... `0.1.11+11`; the tags before v0.1.5 carried `1.0.0+1`); build number 12 never appears in pubspec history, and the tree tagged v0.1.12 still had `0.1.11+11`.
 - **Tag case.** `V0.1.0`, `V0.1.1` and `V0.1.2` use an uppercase `V`; all later tags use lowercase. `V0.1.1` and `V0.1.2` point at the same commit.
 - **GitHub release bodies differ from the notes files.** The v0.1.13 GitHub release ("v0.1.13: Performance Optimization, Telemetry Memory Leak Fix, and Unit Tests", published 2026-07-07, no assets) has a different text from [v0.1.13.md](../release-notes/v0.1.13.md), and the v0.1.11 release carries the v0.1.12 APK (see [Computing artifact checksums](#computing-artifact-checksums)). Replacing the body and relabelling the asset on GitHub are owner tasks that have not been done.
 - **Mixed tag types.** Lightweight and annotated tags are both in use (see the table).
@@ -162,7 +160,7 @@ Then copy `android/key.properties.template` to `android/key.properties` and fill
 
 ## Application ID
 
-The Android `applicationId` and `namespace` in [android/app/build.gradle.kts](../android/app/build.gradle.kts) are `com.example.motocam`, the Flutter template placeholder, and the iOS Runner target uses the same bundle id. The owner has decided to keep this id for now.
+The Android `applicationId` and `namespace` in [android/app/build.gradle.kts](../android/app/build.gradle.kts) are `com.example.motocam`, the Flutter template placeholder. The owner has decided to keep this id for now.
 
 Google Play rejects package names that start with `com.example`; the Play Console reports the prefix as restricted. The id therefore has to change before the first Play upload. Sideloaded APKs and the GitHub releases are not affected.
 
@@ -172,7 +170,7 @@ To migrate:
 2. Change `applicationId` in android/app/build.gradle.kts. Changing `namespace` as well is optional. The namespace sets the package of the generated `R` class, which the Kotlin code uses (`R.drawable.ic_stat_recording`) from package `com.example.motocam`, so a new namespace also needs the Kotlin package moved or an import of the new `R`. The manifest names `MainActivity` and `BackgroundRecordingService` by their fully qualified class names, so they keep working while the Kotlin package stays.
 3. In [AndroidManifest.xml](../android/app/src/main/AndroidManifest.xml), change the hard-coded name `com.example.motocam.permission.INTERNAL_BROADCAST` in both the `<permission>` and the `<uses-permission>` element to `${applicationId}.permission.INTERNAL_BROADCAST`. `MainActivity` and `BackgroundRecordingService` already build the name from `packageName`. If the manifest keeps the old literal, the permission they use is no longer declared and the notification Stop relay stops reaching Dart.
 4. Relax the precheck rule in [scripts/release-security-precheck.ps1](../scripts/release-security-precheck.ps1) that requires exactly one `<permission>` named `com.example.motocam.permission.INTERNAL_BROADCAST`, so it accepts the new name.
-5. In the same change, update the iOS `PRODUCT_BUNDLE_IDENTIFIER` in [project.pbxproj](../ios/Runner.xcodeproj/project.pbxproj) (the Runner target's Debug, Release and Profile configurations, and `<id>.RunnerTests` for the test target) and `MapSourceConfig.userAgentPackageName` in [map_source_config.dart](../lib/features/map/map_source_config.dart), which identifies the app to the OpenStreetMap tile servers.
+5. In the same change, update `MapSourceConfig.userAgentPackageName` in [map_source_config.dart](../lib/features/map/map_source_config.dart), which identifies the app to the OpenStreetMap tile servers.
 6. The method-channel names (`com.example.motocam/<area>`, the same literals in Dart and Kotlin) and the Kotlin intent action strings (`com.example.motocam.action.*`) are fixed literals, not derived from the package name. They keep working and can stay.
 7. Update the documentation that names `Android/data/com.example.motocam/...` or runs `adb` commands against the package.
 
@@ -180,7 +178,7 @@ A new applicationId is a different app to Android and to Google Play. Existing i
 
 ## Release security precheck
 
-[scripts/release-security-precheck.ps1](../scripts/release-security-precheck.ps1) is a PowerShell script of file checks. It parses the Android manifests and `Info.plist` as XML, so it sees elements and attributes rather than text inside comments; the Gradle, Podfile and two of the `Info.plist` checks are regex matches on raw text. It changes the working directory to the repository root with `Set-Location` (when the script runs in-process, for example `./scripts/release-security-precheck.ps1` typed at a PowerShell prompt, the caller's location stays changed afterwards; `pwsh ./scripts/...` runs it in a child process and does not), runs the assertions below, then optionally runs `flutter analyze` and `flutter test`. Any failed assertion throws its message and stops the script.
+[scripts/release-security-precheck.ps1](../scripts/release-security-precheck.ps1) is a PowerShell script of file checks. It parses the Android manifests as XML, so it sees elements and attributes rather than text inside comments; the Gradle checks are regex matches on raw text. It changes the working directory to the repository root with `Set-Location` (when the script runs in-process, for example `./scripts/release-security-precheck.ps1` typed at a PowerShell prompt, the caller's location stays changed afterwards; `pwsh ./scripts/...` runs it in a child process and does not), runs the assertions below, then optionally runs `flutter analyze` and `flutter test`. Any failed assertion throws its message and stops the script.
 
 | # | File | Check | Failure message | Rationale |
 |---|---|---|---|---|
@@ -197,11 +195,6 @@ A new applicationId is a different app to Android and to Google Play. Existing i
 | 11 | Merged release manifest | the same permission check as item 3 | `android.permission.<NAME> must not be declared (merged release manifest).` | Checks what ships, including permissions added by plugins |
 | 12 | Tracked files | `git ls-files` lists no `*.a.conf`, `*.a.olf`, `*mappls*`, `*.jks`, `*.keystore`, `*.p12` or `android/key.properties` | Credential or signing files must not be tracked: \<files\> | Keeps SDK credentials and signing material out of the repository |
 | 13 | `android/app/src/main/assets` | absent or empty | android/app/src/main/assets must be empty; files there are packaged into every APK. | MotoCam ships no Android assets |
-| 14 | `ios/Runner/Info.plist` | text does not contain `NSLocalNetworkUsageDescription` | NSLocalNetworkUsageDescription should be removed unless local network is used. | The app does not use the local network |
-| 15 | `ios/Runner/Info.plist` | text does not contain `NSBonjourServiceTypes` | NSBonjourServiceTypes should be removed unless Bonjour discovery is used. | Same |
-| 16 | `ios/Runner/Info.plist` | the top-level `<dict>` has `CFBundleIdentifier`, `CFBundleExecutable`, `CFBundlePackageType`, `CFBundleShortVersionString`, `CFBundleVersion`, `UILaunchStoryboardName`, `UIMainStoryboardFile`, `UIApplicationSceneManifest`, `NSCameraUsageDescription`, `NSMicrophoneUsageDescription` and `NSLocationWhenInUseUsageDescription` | ios/Runner/Info.plist is missing \<key\>. | Keys a valid app bundle and the permission prompts need |
-| 17 | `ios/Runner/Info.plist` | `UIBackgroundModes`, if present, does not contain `audio` | UIBackgroundModes must not declare 'audio'; no feature plays or records audio in the background. | No feature plays or records audio in the background |
-| 18 | `ios/Podfile` | file exists and its text contains `PERMISSION_CAMERA=1`, `PERMISSION_MICROPHONE=1` and `PERMISSION_LOCATION_WHENINUSE=1` (or `PERMISSION_LOCATION=1`) | ios/Podfile is missing; it must define the permission_handler macros. / ios/Podfile must define \<macro\>. | Without the macros `permission_handler` reports these permissions as permanently denied without prompting |
 
 Item 11 reads `build/app/intermediates/merged_manifests/release/processReleaseManifest/AndroidManifest.xml`. It runs only when that file exists and is not older than the source manifest; otherwise the script prints a warning that the merged release manifest is missing or stale and continues. Item 12 runs only when `git` is available and the repository has a `.git` directory, and a failing `git ls-files` stops the script.
 
@@ -209,7 +202,7 @@ Optional steps: `flutter analyze` unless `-SkipAnalyze`, then `flutter test` unl
 
 Things to know when relying on it:
 
-- The regex checks (items 1, 2, 14, 15 and 18) also match text inside comments.
+- The regex checks (items 1 and 2) also match text inside comments.
 - It does not read signing credentials or check that the keystore exists (the Gradle guard does that), and it does not check the applicationId or that the version increased. Item 8 hard-codes the `com.example.motocam` permission name; see [Application ID](#application-id).
 - CI runs it as `./scripts/release-security-precheck.ps1 -SkipTests -SkipAnalyze`, with analyze and test as separate CI steps (see [development.md](development.md#continuous-integration)). CI builds only a debug APK, so item 11 is skipped there.
 
@@ -322,18 +315,3 @@ The pubspec line under Release Traceability is not in the existing notes; it mak
 | v0.1.13 | 2026-07-07 | Release-key signing and pubspec-driven version codes (uninstall required), recordings in app-specific storage, storage permissions removed, backups disabled, CI and release scripts, unit tests. No APK published | [v0.1.13.md](../release-notes/v0.1.13.md) |
 
 Statements in older notes describe the code at their tag, not today. For example, the v0.1.11/v0.1.12 "public folder only" storage policy no longer applies; see [recording-pipeline.md](recording-pipeline.md) and [data-formats.md](data-formats.md) for current behaviour.
-
-## iOS release status
-
-No iOS build has been released or attached to any GitHub release, and the iOS app is not ready for release. The [iOS: current state](platform-integration.md#ios-current-state) section of platform-integration.md is the reference for the project itself. In short:
-
-- [Info.plist](../ios/Runner/Info.plist) has the standard bundle keys and takes its version from pubspec (see [Where the version comes from](#where-the-version-comes-from)). `UIBackgroundModes` declares only `location`.
-- [ios/Podfile](../ios/Podfile) defines the `permission_handler` macros for camera, microphone and when-in-use location.
-- There are no native method-channel handlers, so the Android-native features (foreground service, Picture-in-Picture, device status, gallery export) are missing on iOS. The app also does not disable the idle timer while recording, so Auto-Lock interrupts a recording.
-
-Points specific to a release:
-
-- The project has no privacy manifest (`PrivacyInfo.xcprivacy`). A valid privacy manifest, included in the Runner target, is needed before an App Store submission.
-- The bundle id is the placeholder `com.example.motocam`; see [Application ID](#application-id).
-- The Runner target has no `DEVELOPMENT_TEAM` (no signing team); the deployment target is iOS 13.0.
-- CI's `ios` job builds an unsigned simulator app (`flutter build ios --simulator --no-codesign`). The project cannot be built on the Windows maintainer machine, and no device or App Store build has been verified.

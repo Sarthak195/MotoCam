@@ -20,8 +20,8 @@ import '../../../core/utils/path_utils.dart' as path_utils;
 ///
 /// A segment counts as locked when its path is in [lockedPaths] or when a
 /// locked path has the same file name: recordings live in one directory, and
-/// stored absolute paths can go stale (for example after an iOS container
-/// move) while the file itself is still there.
+/// stored absolute paths can go stale (for example after rides moved to
+/// private storage) while the file itself is still there.
 List<String> selectSegmentsToEvict({
   required List<String> sessionPaths,
   required Set<String> lockedPaths,

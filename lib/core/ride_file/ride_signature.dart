@@ -143,8 +143,8 @@ enum RideSignedBy {
   /// another phone, or this phone before a reinstall.
   otherKey,
 
-  /// A valid signature, but this phone's key could not be read (iOS, a
-  /// Keystore error), so the signer is unknown.
+  /// A valid signature, but this phone's key could not be read (a Keystore
+  /// error), so the signer is unknown.
   unknownSigner,
 }
 

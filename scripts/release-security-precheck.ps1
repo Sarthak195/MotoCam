@@ -92,24 +92,6 @@ function Assert-NoForbiddenPermissions {
     }
 }
 
-# Returns the top-level <dict> of a property list as key -> value element.
-function Get-PlistEntries {
-    param([Parameter(Mandatory = $true)][System.Xml.XmlDocument]$Plist)
-
-    $dict = Get-ChildElements $Plist.DocumentElement 'dict' | Select-Object -First 1
-    if (-not $dict) {
-        throw 'Info.plist has no top-level <dict>.'
-    }
-    $children = @(Get-ChildElements $dict)
-    $entries = @{}
-    for ($i = 0; $i -lt $children.Count - 1; $i += 2) {
-        if ($children[$i].LocalName -eq 'key') {
-            $entries[$children[$i].InnerText] = $children[$i + 1]
-        }
-    }
-    return $entries
-}
-
 function Assert-NativeSuccess {
     param([Parameter(Mandatory = $true)][string]$Step)
 
@@ -125,8 +107,6 @@ $gradleFile = Join-Path $repoRoot 'android/app/build.gradle.kts'
 $manifestFile = Join-Path $repoRoot 'android/app/src/main/AndroidManifest.xml'
 $mergedReleaseManifestFile = Join-Path $repoRoot 'build/app/intermediates/merged_manifests/release/processReleaseManifest/AndroidManifest.xml'
 $androidAssetsDir = Join-Path $repoRoot 'android/app/src/main/assets'
-$iosPlistFile = Join-Path $repoRoot 'ios/Runner/Info.plist'
-$podfile = Join-Path $repoRoot 'ios/Podfile'
 $backupRulesFile = Join-Path $repoRoot 'android/app/src/main/res/xml/backup_rules.xml'
 $dataExtractionRulesFile = Join-Path $repoRoot 'android/app/src/main/res/xml/data_extraction_rules.xml'
 
@@ -203,45 +183,6 @@ if ((Get-Command git -ErrorAction SilentlyContinue) -and (Test-Path (Join-Path $
 if ((Test-Path $androidAssetsDir) -and @(Get-ChildItem -Path $androidAssetsDir -Recurse -File).Count -gt 0) {
     throw 'android/app/src/main/assets must be empty; files there are packaged into every APK.'
 }
-
-# --- iOS -------------------------------------------------------------------
-Assert-NotContains -FilePath $iosPlistFile -Pattern 'NSLocalNetworkUsageDescription' -Message 'NSLocalNetworkUsageDescription should be removed unless local network is used.'
-Assert-NotContains -FilePath $iosPlistFile -Pattern 'NSBonjourServiceTypes' -Message 'NSBonjourServiceTypes should be removed unless Bonjour discovery is used.'
-
-$plistEntries = Get-PlistEntries (Read-XmlFile $iosPlistFile)
-$requiredPlistKeys = @(
-    'CFBundleIdentifier',
-    'CFBundleExecutable',
-    'CFBundlePackageType',
-    'CFBundleShortVersionString',
-    'CFBundleVersion',
-    'UILaunchStoryboardName',
-    'UIMainStoryboardFile',
-    'UIApplicationSceneManifest',
-    'NSCameraUsageDescription',
-    'NSMicrophoneUsageDescription',
-    'NSLocationWhenInUseUsageDescription'
-)
-foreach ($key in $requiredPlistKeys) {
-    if (-not $plistEntries.ContainsKey($key)) {
-        throw "ios/Runner/Info.plist is missing $key."
-    }
-}
-if ($plistEntries.ContainsKey('UIBackgroundModes')) {
-    $backgroundModes = @(Get-ChildElements $plistEntries['UIBackgroundModes'] 'string' | ForEach-Object { $_.InnerText })
-    if ($backgroundModes -contains 'audio') {
-        throw "UIBackgroundModes must not declare 'audio'; no feature plays or records audio in the background."
-    }
-}
-
-# permission_handler_apple reports every permission whose macro is not defined
-# as permanently denied without prompting.
-if (-not (Test-Path $podfile)) {
-    throw 'ios/Podfile is missing; it must define the permission_handler macros.'
-}
-Assert-Contains -FilePath $podfile -Pattern 'PERMISSION_CAMERA=1' -Message 'ios/Podfile must define PERMISSION_CAMERA=1.'
-Assert-Contains -FilePath $podfile -Pattern 'PERMISSION_MICROPHONE=1' -Message 'ios/Podfile must define PERMISSION_MICROPHONE=1.'
-Assert-Contains -FilePath $podfile -Pattern 'PERMISSION_LOCATION(_WHENINUSE)?=1' -Message 'ios/Podfile must define PERMISSION_LOCATION_WHENINUSE=1.'
 
 # --- Analyze and test ------------------------------------------------------
 if (-not $SkipAnalyze) {
