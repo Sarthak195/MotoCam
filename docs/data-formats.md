@@ -15,6 +15,7 @@ This document describes every file MotoCam writes: where it goes, how it is name
 - [Atomic-write procedure](#atomic-write-procedure)
 - [Ride index (cache)](#ride-index-cache)
 - [Gallery-link store](#gallery-link-store)
+- [Ride export folder](#ride-export-folder)
 - [Backward compatibility](#backward-compatibility)
 - [Related documents](#related-documents)
 
@@ -116,6 +117,8 @@ Plugin-generated segment names carry no timestamp or ride identifier; only the b
 | Staging copy `<application support>/ride_migration/staging/<name>.migrating` (Android only) | Byte copy of a legacy file being moved | `RecordingsMigrator` when a rename fails | `RecordingsMigrator` (size check, then renamed into the recordings directory) | Renamed into the recordings directory, or deleted on a pause, a failed check and at the start of every run. Outside every scanned root, so no sweeper or history scan sees it. |
 | Import journal `<application support>/ride_import/import_journal.json` (Android only) | UTF-8 JSON, compact; see [Import from the old public folder](#import-from-the-old-public-folder) | `LegacyRideImporter`, through a `.new` file plus rename | `LegacyRideImporter` at the start of each run; the storage budget (`LegacyRideImporter.protectedDestinationPaths`, read only, the `.new` file too) | Never deleted; a leftover `.new` file is deleted at the start of a run |
 | Import staging copy `<application support>/ride_import/staging/<name>.importing` (Android only) | Byte copy of a document of the picked folder | `LegacyRideImporter` (streamed by the native `copyDocument`) | `LegacyRideImporter` (size checks, a JSON also read for planning or compared for a collision, then renamed into the recordings directory) | Renamed into the recordings directory, or deleted after planning, on a pause or a failed check, and at the start and end of every run. Outside every scanned root |
+| Ride export folder `MotoCam ride <id> (<scope>)` in a folder the rider picked (Android only) | The ride's clips, its ride JSON byte for byte, `manifest.json` and `MOTOCAM-EXPORT.txt`; see [Ride export folder](#ride-export-folder) | `RideExporter.exportToFolder`, through the native `exportFile` into the picked Storage Access Framework tree | The rider, and any app the rider allows. MotoCam reads a file again only to hash it when an export is run again | The rider. MotoCam deletes only a leftover `manifest.json`, `MOTOCAM-EXPORT.txt` or cut-short clip of an earlier run of the same export; it never deletes any other file or overwrites a different file of the same name |
+| Export staging `<app cache>/ride_export/<folder name>-<epoch ms>/` (Android only) | `manifest.json` and `MOTOCAM-EXPORT.txt` of one export, written before they are copied or shared | `RideExporter` | The native `exportFile` (folder) or the FileProvider (share) | A folder export deletes its staging directory when the run ends; each share deletes staging directories older than 24 hours when it starts. The system may clear the cache directory |
 | Ride index `<application support>/ride_index/ride_index.json` | UTF-8 JSON, compact; see [Ride index (cache)](#ride-index-cache) | `RideIndexStore` on the UI isolate, through `writeTelemetryAtomically` (temp file plus rename) | `loadRideHistoryIndexed` (in the history isolate), `RideIndexStore.read` | Never deleted by the app; it is a cache and can be deleted at any time |
 | Map tile cache `<app cache>/fm_cache/` | flutter_map's built-in tile cache | `BuiltInMapCachingProvider` (size limit `MapSourceConfig.maxTileCacheBytes`, 25 MB) in [route_map_view.dart](../lib/features/history/widgets/route_map_view.dart), only after the rider accepts the one-time online map consent | `flutter_map` | The package's size limit or the OS (cache directory). It is not cleared when rides are deleted. See [playback-and-history.md](playback-and-history.md). |
 
@@ -592,6 +595,220 @@ How entries come and go:
 - **Forgotten** when the copy is removed (`removeGalleryCopies` drops the links reported `deleted` or `missing`, and on Android 9 and lower those reported `changed`, whose URI now names a file outside the gallery folder), when Save to gallery finds through `galleryItemsExist` that a linked copy no longer exists (the segment is then copied again), and when `deleteRideFiles` deleted a ride's video files (their links and pending entries go, the gallery copies stay). The storage budget deletes through `deleteRideFiles` and never touches a gallery copy.
 
 A copy made by a build before this store existed has no link and is never offered for removal. On API 29 and above, a copy that a killed process finished but did not record is linked on the next try through `reuseExisting` (only a MediaStore row added since the entry's `queuedAtMs`) instead of being copied again. Below API 29 nothing is reused: a copy is written under a hidden temporary name (`.<file name>.partial`) and renamed when complete, so a killed copy never shows in the gallery, and a copy killed after the rename is made again under a numbered name.
+
+## Ride export folder
+
+Android only. Ride History and playback can copy a ride out of private storage: into a folder the rider picks (**Export to folder**) or to the share sheet (**Share**). The rider-facing behaviour is in [features.md](features.md#export-to-folder-and-share); the native channel is in [platform-integration.md](platform-integration.md#comexamplemotocamride_export). This section is the format of what an export holds. The code is in [ride_export.dart](../lib/features/history/services/ride_export.dart) (planning and running) and [ride_export_text.dart](../lib/features/history/services/ride_export_text.dart) (manifest and README). The fixed strings below are part of the format: change them in the code only together with this section.
+
+An export never changes the ride in private storage, and the ride JSON is copied as raw bytes (never decoded and written again), so its `payloadHash` and signature stay valid.
+
+### Where it is written
+
+- **Folder.** One subfolder of the tree the rider picks with `ACTION_OPEN_DOCUMENT_TREE` (see [platform-integration.md](platform-integration.md#ride-export-folder-and-share)). If the picked folder's own display name already equals the export folder's name, that folder itself is used. The grant is never persisted.
+- **Share.** Nothing is written to shared storage. The clips and the ride JSON are shared from their private paths through a FileProvider, and the manifest and README are staged in `<cache directory>/ride_export/<folder name>-<epoch ms>/`. A folder export stages them in a directory of the same form and deletes it when the run ends; a share keeps its staging directory for the receiving app, and the next share deletes staging directories older than 24 hours.
+
+### Folder name
+
+`MotoCam ride <id> (<scope>)`:
+
+- `<id>` is the ride's `rideSessionId`, or for a ride without one (older rides) the base name of its video file (the file name without its extension). Every character outside `[A-Za-z0-9_-]` becomes `_`, the rule of the ride file's name (see [Directory layout and file naming](#directory-layout-and-file-naming)).
+- `<scope>` is one of `locked clips`, `all clips`, `locked clips, video only` and `all clips, video only`.
+
+The name depends only on the ride and the rider's two choices (which clips, with or without ride data). Exporting the same choice again lands in the same folder, which is how a stopped export is continued; a different choice never mixes with it. Example: `MotoCam ride 1794558143532_1aec41b3127e1626 (locked clips)`.
+
+### Files and their order
+
+| Order | File | Name | Notes |
+|---|---|---|---|
+| 1 | Clips | The original file names (`REC<digits>.mp4`), in recording order | Each is copied, read back and hashed. Which clips: see below |
+| 2 | Ride data | `ride_<id>.telemetry.json`, or `<video base>.telemetry.json` for a legacy ride | Only when "Include ride data" is on and the ride has a ride file. Raw bytes |
+| 3 | `manifest.json` | `manifest.json` | UTF-8 JSON, 2-space indent, one trailing newline. Not signed |
+| 4 | README | `MOTOCAM-EXPORT.txt` | Plain text, wrapped near 72 columns, one trailing newline. Not signed. Always last |
+
+- **Clips.** The ride's trusted segments (`segmentPaths`; a quarantined path is never exported). "All clips" is every segment file that still exists. "Locked and incident clips" is the locked segments plus, for each recorded incident at time `t`, the timeline entry that holds `t` (entries sorted by `startMs`: the last entry with `startMs <= t`, and `t <= endMs + 1000`) and, when `t` is less than 10 s after that entry's start, the entry before it (the lead-up). An incident that fits no entry is listed in the README ("Incident at mm:ss not in any kept clip"). Without a segment timeline only the locked clips are selected. A clip whose file is gone is never copied; it is listed as `missing`.
+- **MIME types** passed to the folder app: `video/mp4` for `.mp4`, `application/json` for `.json`, `text/plain` for `.txt`, else `application/octet-stream`.
+- **The folder must be empty or an earlier export of the same choice.** Before the first clip, the folder is listed: a file whose name is not one the export would write (the plan's clip and ride-data names, `manifest.json`, `MOTOCAM-EXPORT.txt`) refuses the folder (`FOLDER_NOT_EMPTY`), and an old `manifest.json` and `MOTOCAM-EXPORT.txt` there are deleted, so a failed re-run never leaves a manifest that describes other files.
+- **An existing file of the same name** is never overwritten. If its size differs from the source (a partial copy left by a killed run) it is deleted and copied again. If the size is equal, both are hashed: equal means it is skipped (nothing is written); different fails the export with `EXISTS_DIFFERENT`, because that file may be the only intact copy of something.
+
+### A half-finished folder
+
+The README is written last and the manifest second to last, so **a folder without `MOTOCAM-EXPORT.txt` is an incomplete export** (the README says so too). A stopped, failed or killed export can leave any of these:
+
+- Some of the clips, one of them possibly cut short (the next run deletes and rewrites a clip whose size differs).
+- If a clip fails to copy (or its copy differs from its source), the run still tries the remaining clips, then stops: no ride data, no manifest and no README are written.
+- If the ride file changed while it was copied (see [The ride file is read once](#the-ride-file-is-read-once-and-checked-again)), the folder keeps that copy of the ride data, with no manifest and no README.
+- The ride data without the manifest or README, when the run was killed or stopped between them.
+- `manifest.json` without the README, when the run was killed between the last two files.
+
+Running Export again with the same choice and the same folder continues it: files already there and equal to their source are skipped (each skip reads both files again to hash them).
+
+### Two checks per file
+
+- **Copy equals source.** The native side hashes the source bytes while it streams them, then reads the written document back through the content resolver and hashes it; the byte counts must match too. A difference fails the export (`COPY_MISMATCH`). In `manifest.json` and the README, `sha256` of a folder export is the hash of the copy, which by this check equals the source.
+- **Source equals recorded hash.** For a clip, the source hash is compared with the hash the ride's integrity envelope recorded for it (the `segmentHashes` entry for that segment, found by the rules in [Envelope fields](#envelope-fields)). The result is `match`, `differs` or `none` (no hash was recorded). `differs` and `none` never fail an export: they are labelled in the manifest and the README. The hash recorded for a clip is written even when the clip differs, so a reader can compare both.
+
+### The ride file is read once and checked again
+
+Before planning, a background isolate reads the ride file's bytes and hashes them (H0), builds the ride record from the file (no samples), applies the screen's signer context, and hashes the file again; a different hash fails with "The ride file changed; try again." The plan, the manifest and the README come from that record and those bytes, never from the record on screen. When the ride data is copied, the streamed hash of the source must equal H0 (else "The ride file changed during export; run Export again." for a folder, "The ride file changed while preparing the share; run Share again." for a share), and the copy runs while holding the same per-file lock as a lock change.
+
+### `manifest.json` (format 1)
+
+Keys are written in this order. `integrity` is `null` when ride data is not included.
+
+```json
+{
+  "format": "motocam-ride-export",
+  "formatVersion": 1,
+  "rideSessionId": "1794558143532_1aec41b3127e1626",
+  "exportedAt": "2026-11-19T13:05:00.000Z",
+  "destination": "folder",
+  "clips": "evidence",
+  "rideDataIncluded": true,
+  "sha256Of": "copy",
+  "integrity": {
+    "state": "signed",
+    "signed": true,
+    "alg": "ES256",
+    "keyId": "0123456789abcdef",
+    "publicKey": "<base64 SubjectPublicKeyInfo DER>",
+    "signedBy": "exportingPhone",
+    "envelopeVersion": 3,
+    "sessionComplete": true,
+    "mockLocationDetected": false,
+    "issues": []
+  },
+  "files": [
+    {
+      "name": "REC1234567890123456789.mp4",
+      "kind": "clip",
+      "bytes": 123456789,
+      "sha256": "<64 lowercase hex>",
+      "recordedSha256": "<64 lowercase hex>",
+      "recorded": "match",
+      "locked": true
+    }
+  ],
+  "rideData": {
+    "name": "ride_1794558143532_1aec41b3127e1626.telemetry.json",
+    "bytes": 456789,
+    "sha256": "<64 lowercase hex>"
+  },
+  "notExported": [
+    {
+      "name": "REC1234567890123456790.mp4",
+      "recordedSha256": "<64 lowercase hex>",
+      "reason": "notSelected"
+    }
+  ]
+}
+```
+
+| Field | Value |
+|---|---|
+| `format` | `"motocam-ride-export"` |
+| `formatVersion` | `1` |
+| `rideSessionId` | The ride's `rideSessionId`, or `null` for a ride without one |
+| `exportedAt` | UTC ISO 8601 with milliseconds and `Z` |
+| `destination` | `"folder"` or `"share"` |
+| `clips` | `"evidence"` (locked and incident clips) or `"all"` |
+| `rideDataIncluded` | `true` when the ride file is part of the export, else `false` (video only) |
+| `sha256Of` | `"copy"` (folder: each `sha256` is of the copy read back) or `"source"` (share: each `sha256` is of the file on the phone, because MotoCam cannot read the receiving app's copy) |
+| `integrity` | `null` when `rideDataIncluded` is `false`: nothing in the export can be checked against the ride's checksums or signature, and no key material is written. Otherwise the block below |
+| `files` | The clips exported (hashed, for a share), in recording order. May be empty |
+| `rideData` | `{name, bytes, sha256}`, or `null` when not included |
+| `notExported` | The ride's clips that are not in the export, in recording order. May be empty |
+
+`integrity` block:
+
+| Field | Value |
+|---|---|
+| `state` | One of the five states below |
+| `signed`, `alg`, `keyId`, `publicKey` | Written **only** when `state` is `signed` (left out, not `false` or `null`, otherwise, even if a signature on a failed ride verifies). `signed` is `true`, `alg` is `"ES256"`, `keyId` the signature's `keyId`, `publicKey` the signer's base64 SubjectPublicKeyInfo DER (see [Signature (version 3)](#signature-version-3)) |
+| `signedBy` | Always written: `"exportingPhone"` (the exporting phone's current key signed it), `"otherKey"` (another phone, or this phone before a reinstall), `"unknownSigner"` (the exporting phone could not read its own key) or `"none"`. It is `"none"` unless `state` is `signed` |
+| `envelopeVersion` | The ride file's envelope version (1 when the envelope has no `envelopeVersion`), or `null` when the file has no envelope |
+| `sessionComplete` | `false` when the ride ended without Stop (a recovered checkpoint) |
+| `mockLocationDetected` | `true` when the phone reported mock locations during the ride |
+| `issues` | The integrity check's issue codes, sanitised: the code keeps its prefix, the private path after the first `:` is replaced by its file name (for example `segment-hash-mismatch:REC1234567890123456789.mp4`), control characters are removed, at most 80 characters. Empty unless `state` is `failed` |
+
+`files[]` entry:
+
+| Field | Value |
+|---|---|
+| `name` | The file name |
+| `kind` | `"clip"` (the only value) |
+| `bytes` | Bytes exported |
+| `sha256` | See `sha256Of` |
+| `recordedSha256` | The hash the ride's envelope recorded for this clip, or `null` |
+| `recorded` | `"match"`, `"differs"` (the exported bytes differ from `recordedSha256`) or `"none"` (`recordedSha256` is `null`) |
+| `locked` | `true` when the clip is a locked segment of the ride |
+
+`notExported[]` entry: `name`; `recordedSha256` (written only when the ride recorded one); `reason`: `"notSelected"` (the rider chose the locked and incident clips and this is neither) or `"missing"` (the file is no longer on the phone).
+
+### The five integrity states
+
+The state is the ride file's own integrity check (the payload-level check of [Verification procedure](#verification-procedure-checkrideintegrity), without hashing the clip files) plus the exporting phone's signer context, taken from the file as read at the start of the export. **No clip is hashed for it**, so a `signed` export can still hold clips whose `recorded` is `differs`: that is a separate, per-file result. The README repeats the state as one of these lines (the manifest holds only the state):
+
+| `state` | When | README line |
+|---|---|---|
+| `signed` | Check `verified`, envelope version 3, and a valid signature | `SIGNED: the ride data and the listed clip hashes were not changed after the holder of this key signed them (ECDSA P-256, SHA-256).` followed by a second paragraph: `The key was made by the phone and is not certified by anyone. It identifies the signer only if you already know this key from another source (for example the rider's earlier exports). It does not prove the footage is genuine: a rooted phone or a modified app can sign anything.` |
+| `checksums` | Check `verified`, envelope version 2 (unsigned: a recovered checkpoint, a save that could not be signed, a lock change on a ride not signed by the exporting phone) | `Unsigned: SHA-256 checksums only. They show accidental corruption, not deliberate edits: anyone who can edit the files can recompute them.` |
+| `checksumsUnbound` | Check `verified`, envelope version 1 (no `envelopeVersion`) | `Older format: the clip checksums are not covered by the ride checksum, so they show accidental corruption of the clips only.` |
+| `failed` | Check `modified` (any issue, including quarantined paths and a removed signature) | `INTEGRITY CHECK FAILED when exported: <issues>.` with the sanitised issues joined by `, ` (`no details` when there are none) |
+| `none` | Check `unknown`: no envelope (an older ride, a ride saved without completing, a video-only recovery) | `No integrity data (older ride format or a video-only recovery).` |
+
+When ride data is not included, the README replaces the line above with `Video only: the ride data is not included, so nothing in this export can be checked against the ride's checksums or signature.` (or the `No integrity data` line, when the ride has no ride file at all).
+
+### MOTOCAM-EXPORT.txt
+
+Sections in order (underlined with `-`), after a title block:
+
+1. Title block: `MotoCam ride export`; `Ride:` (the `rideSessionId`, or the video file name); `Exported:` (UTC); `Local time:` (with the UTC offset); `Clips:` (`locked and incident clips` or `all clips`); `Ride data:` (`included (<name>)` or `not included (video only)`); `Destination:` (`a folder picked on the phone` or `the Android share sheet`).
+2. **Integrity**: the line of the state (above), then, with ride data only: `This ride ended without Stop: the ride data ends at its last checkpoint; clips recorded after it are separate rides and are not covered.` when `sessionComplete` is false, and `SIMULATED GPS: the phone reported mock locations during this ride.` when `mockLocationDetected` is true. Always: `Recorded-hash results mean something only when the integrity line is SIGNED or Unsigned.` and `N of M exported clips match their recorded hash; K differ; L have none.`
+3. **Signer key** (state `signed` with ride data only): the `keyId`, the full `publicKey` and its fingerprint (the SHA-256 of the key DER, as hex), with `Compare the full public key (or its fingerprint) with a key you already know, not the short keyId.` and one sentence on the signer: the exporting phone holds this key, this is not the key of the phone that made the export, or the exporting phone could not read its own key. A video-only README prints no key, keyId or fingerprint, so a video-only export cannot be linked to the ride's other exports.
+4. **Files**: each clip (name, `locked` when locked, bytes, SHA-256, recorded hash `matches`, `DIFFERS, recorded <hash>` or `none`) and the ride data, preceded by `Each SHA-256 is of the copy in this folder, read back after copying.` (folder) or `Each SHA-256 is of the file on the phone: MotoCam cannot read the copy the receiving app made.` (share).
+5. **Not exported** (when there is something): each clip with `not selected` or `missing on the phone` and its recorded SHA-256, and each `Incident at mm:ss not in any kept clip`.
+6. **How to check**: the steps of the next section (with ride data), or only the clip hash step (video only).
+7. **Privacy**: `Videos show other road users: share them only for your own records, the police or your insurer.`; with ride data `The ride data holds the route, the speed every second and private file paths of the phone.` and `All exports from this phone carry the same public key, so they can be linked to each other.`; for a folder `The folder you pick is shared storage: other apps with media or storage access, and gallery backups, may see these files.` and `A folder without MOTOCAM-EXPORT.txt is an incomplete export.`; always `manifest.json and this file are not signed.`
+
+### Checking an export (verification chain)
+
+Every step is required; a step that fails says what is wrong, not that the ride is false.
+
+1. **Clip hashes.** Hash each clip (`sha256sum FILE` on Linux or macOS, `certutil -hashfile FILE SHA256` on Windows). It must equal the `sha256` listed in `manifest.json` and the README, **and** the value in the ride data's `integrity.segmentHashes` whose key ends in that file name (the keys are the recording phone's private paths, so match by file name). A clip whose `recorded` is `differs` fails this comparison, and one whose `recorded` is `none` has nothing to compare with: it cannot be tied to the ride data. In a version 1 envelope `segmentHashes` is not covered by the payload hash (see [What is hashed](#what-is-hashed)), so step 1 means less there.
+2. **Payload hash.** Recompute `payloadHash` from the ride data and compare it with the stored `integrity.payloadHash`:
+   - envelope version 3: remove `integrity.payloadHash` and `integrity.signature`;
+   - version 2: remove `integrity.payloadHash`;
+   - version 1 (no `envelopeVersion`): remove the whole `integrity` key;
+   - then take the SHA-256 (lowercase hex) of the canonical JSON of the result: keys sorted by UTF-16 code unit at every level, list order kept, compact, numbers printed as Dart prints them. The canonical form is defined in [What is hashed](#what-is-hashed) (`hashJsonCanonical`).
+3. **Signature** (version 3 only). The message is the 64 ASCII characters of the lowercase `payloadHash`, with no newline. `integrity.signature.sig` is base64 of a **DER** ECDSA signature (`SEQUENCE { r, s }`), not JOSE `r||s`. `integrity.signature.publicKey` is base64 of an X.509 SubjectPublicKeyInfo DER holding a P-256 key, and `alg` is `ES256`. With OpenSSL (checked with 3.5), where `PAYLOADHASH`, `SIG` and `PUBLICKEY` are the three values from the ride data:
+
+   ```sh
+   printf %s PAYLOADHASH > m
+   printf %s 'SIG' | openssl base64 -d -A > sig.der
+   printf -- '-----BEGIN PUBLIC KEY-----\n%s\n-----END PUBLIC KEY-----\n' 'PUBLICKEY' > pub.pem
+   openssl dgst -sha256 -verify pub.pem -signature sig.der m
+   ```
+
+   It prints `Verified OK`. If an older OpenSSL rejects the 124-character key line, wrap the key at 64 characters (for example with `fold -w 64`).
+
+**Canonical-JSON caveat.** Step 2 depends on reproducing Dart's `jsonEncode` of the canonicalised value exactly, including how numbers are printed (`2` and `2.0` hash differently). A tool written in another language that prints a number differently gets a `payloadHash` mismatch without anything having been changed, so a mismatch from another language's JSON encoder is not by itself evidence of tampering; the README says so. The signature check of step 3 needs no JSON at all (only the stored `payloadHash`, `sig` and `publicKey`), but it proves nothing about the ride data unless step 2 holds. The README prints the URL of this document at the release tag (the Dart constant `rideExportFormatDocUrl`, bumped at each release).
+
+**What the signature does and does not show.** The key was made by the phone and no one certifies it. It identifies the signer only if the reader already knows the key from another source; the README prints the full public key and its fingerprint for that comparison, and says to compare the full key, not the 16-character `keyId`. It does not prove the footage is genuine (see [What it does and does not protect against](#what-it-does-and-does-not-protect-against)). `manifest.json` and the README are not signed: they are a convenience, and the signed ride data and the clip hashes it covers are the evidence.
+
+### Video only
+
+With "Include ride data" off, no ride data, key, `keyId` or fingerprint is written anywhere in the export: `rideDataIncluded` is `false`, `integrity` and `rideData` are `null`, and the README has no **Signer key** section. Each clip's `recordedSha256` stays, because it comes from the ride's envelope but is not a key. Such an export can show only that a copy matches the manifest; it cannot be checked against the ride's checksums or signature, and it carries nothing that links it to other exports from the same phone.
+
+### Share variant
+
+A share has `destination` `"share"` and `sha256Of` `"source"`: native `hashFile` hashes each clip (and the ride file, which must equal H0) before the share sheet opens, nothing is read back, and the README omits the folder-only sentences. The shared files are the clips, the ride data (when included), the staged `manifest.json` and the staged README, all under their own names. A share cannot be checked afterwards or continued: MotoCam cannot know whether the receiving app read every file or whether the rider sent them. A clip in a legacy root that was not migrated cannot be shared (`NOT_SHAREABLE`); export it to a folder.
+
+### Notes for a later checker and for restore
+
+These are design notes, not code.
+
+- **Checker (roadmap T0-2).** An exported ride JSON still declares the recording phone's private paths and, for a "locked and incident" export, lists clips that are not in the folder. Stage the JSON in a directory named `MotoCam Recordings` (so `resolveDeclaredRidePath` maps the declared paths to siblings and does not quarantine the clips), and treat the names in `notExported` as missing rather than as failures. Match `segmentHashes` by file name.
+- **Restore (roadmap T0-12).** Walk the `MotoCam ride *` subfolders and accept `*.telemetry.json`, including the legacy `<video base>.telemetry.json` names. The folder name holds the sanitised `rideSessionId`, but the ride data is the source of truth.
 
 ## Backward compatibility
 

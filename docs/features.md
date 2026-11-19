@@ -14,6 +14,7 @@ This guide describes what a rider can do in MotoCam and what the code does behin
 - [Playback](#playback)
 - [Integrity statuses](#integrity-statuses)
 - [Export to gallery](#export-to-gallery)
+- [Export to folder and share](#export-to-folder-and-share)
 - [Settings overview](#settings-overview)
 - [Permissions](#permissions)
 - [Platform availability](#platform-availability)
@@ -213,8 +214,8 @@ Consequences:
 - **Unlock clip** (locked rides only) asks `Unlock this clip?` first. Unlocking only removes the lock marker, and the ride moves from Locked Clips to All Rides. The dialog says past rides are never deleted automatically, or, with the storage budget on, that an unlocked ride can be deleted automatically once it is among the oldest. `RideRecord.setLockState(false)` re-reads and fully re-verifies the ride, including segment hashes (segments with a still-valid stored result are not hashed again), and refuses when any check fails. A progress ring counts the checked segments. The SnackBar reads `Clip unlocked.` or `Could not unlock this clip: its files failed the integrity check or could not be saved.` The button is disabled for rides with an integrity warning, quarantined paths or a stored failed video check. After an unlock, the ride's queued gallery copies are cancelled, and a ride with gallery copies that MotoCam recorded gets the offer to remove them (default: keep; Android). Unlock and delete wait while the ride is being saved to the gallery or its copies removed.
 - **Delete ride** asks `Delete this ride?` and then deletes the ride's segment files, main video and telemetry JSON (never quarantined paths or files outside the ride's folder) through the same routine as the storage budget, which also updates the ride index, the signed-ride registry and the gallery-link store. When the ride has gallery copies that MotoCam recorded (Android), it first offers to remove them (default: keep); see [Export to gallery](#export-to-gallery). A locked ride must be unlocked first. A locked ride that cannot be unlocked (integrity warning or quarantined paths) can still be deleted after the dialog warns about it.
 - **Import rides from an older version** (Android, app bar menu): see [Storage and retention](#storage-and-retention).
-- **Gallery menu** (Android, the "more" button on every card): **Save to gallery** and, for a ride with gallery copies, **Remove gallery copies**; a card with copies shows `Gallery copies: n (readable by other apps)`. See [Export to gallery](#export-to-gallery).
-- Pull to refresh reloads the list (not available when it is empty). There is no share action.
+- **Ride actions menu** (Android, the "more" button on every card, tooltip `Ride actions`): **Save to gallery**, for a ride with gallery copies **Remove gallery copies**, and **Export to folder** and **Share**; a card with copies shows `Gallery copies: n (readable by other apps)`. See [Export to gallery](#export-to-gallery) and [Export to folder and share](#export-to-folder-and-share). While a ride is being exported, a ring replaces the button; tapping it stops the export.
+- Pull to refresh reloads the list (not available when it is empty).
 
 ## Playback
 
@@ -232,6 +233,7 @@ Consequences:
 - **Telemetry.** When the ride has samples, an overlay shows `Speed`, `Dist`, `G` and `GPS` for the sample interpolated at the current position (`RideRecord.sampleForPosition`). A speed graph covers a 10 to 60 s window around the current time and can be tapped or dragged to seek. The segment timeline and the samples share the ride's start time as their zero point.
 - **Markers.** Incident markers come from the ride's saved `incidents`. Rides saved without that list fall back to markers recomputed from the samples with a fixed 3.2 g threshold and 5 s spacing, independent of the sensitivity setting. Lock markers sit at the start of each locked segment. Markers appear on the seekbar and as ticks on the speed graph.
 - **Simulated GPS.** When any fix of the ride came from a mock location provider, a SnackBar on open says `GPS in this ride came from a simulated (mock) location provider.`
+- **Ride actions** (Android, app bar menu, tooltip `Ride actions`): **Export to folder** and **Share**, the same as in Ride History; disabled while the ride loads or when it could not be read. While an export runs, a spinner replaces the menu. See [Export to folder and share](#export-to-folder-and-share).
 
 ### Route map
 
@@ -284,6 +286,44 @@ How copies are made (`exportVideoToGallery` on the `media` channel, through the 
 - After an automatic export run, a SnackBar summarizes it, for example `2 locked clips copied to the gallery.`, `1 locked clip not copied (storage permission denied).` or `1 locked clip could not be copied to the gallery.` A failed copy is tried again at the next run, up to three times.
 
 **Removing copies.** MotoCam stores each copy's content URI (in `gallery_links.json`, outside the ride file, which stays unchanged). When a ride with copies is unlocked, before it is deleted, and from **Remove gallery copies** in its menu, Ride History asks `Remove N gallery copies?` with **Keep copies** as the default. **Remove copies** deletes them without a prompt where it can (MotoCam owns what it inserted); when Android requires consent, one system prompt covers all of the ride's copies (Android 11 and later; one prompt per copy on Android 10), and on Android 9 and lower the storage permission is asked for. A copy already gone counts as removed. The SnackBar says what was not removed. Removing copies also cancels the ride's copies still queued. Copies made by versions before this one were not recorded and are not offered; neither are copies of a deleted ride the rider chose to keep. A copy that finishes after its ride was deleted or unlocked, or after its copies were removed, is deleted at once. Retention, the storage budget, the migration and the import never touch gallery copies.
+
+## Export to folder and share
+
+Android only. These two actions copy a ride out of MotoCam's private storage so the rider can keep it, hand it to the police or an insurer, or move it to a computer. **Export to folder** writes the ride into a folder the rider picks; **Share** opens the Android share sheet. Unlike Export to gallery, they can include the ride data (the JSON), they check every copy, and they write a `manifest.json` and a `MOTOCAM-EXPORT.txt` that say what the files are and how to check them. What an export holds, field by field, is in [data-formats.md](data-formats.md#ride-export-folder). The export code is in [ride_export.dart](../lib/features/history/services/ride_export.dart); the native side is in [platform-integration.md](platform-integration.md#ride-export-folder-and-share).
+
+**Where.** The per-ride menu of Ride History and the app bar menu of playback, both with the tooltip `Ride actions`, hold **Export to folder** and **Share**.
+
+**The dialog** (the title is `Export ride` or `Share ride`; buttons Cancel and Export or Share, the latter disabled when nothing would be exported) asks:
+
+- **Clips**: `Locked and incident clips (N, SIZE)` or `All clips (N, SIZE)`. The first is the ride's locked clips plus the clips that hold an incident (and, for an incident early in a clip, the clip before it); it is the default when it holds a clip and is disabled, with `All clips` preselected, when it holds none. Sizes count only files that still exist.
+- **Include ride data** (on by default; off and disabled for a ride with no ride file): the route, the speed every second and the private file paths of the phone. It is needed to check the signature. Turn it off to hand over video only: the export then carries no key, no `keyId` and nothing that links it to the rider's other exports.
+- Short warnings: videos show other road users, so share them only for the rider's own records, the police or the insurer; the folder picked is shared storage that other apps with storage access, and gallery backups, may see; with ride data, all exports from this phone carry the same public key, so they can be linked to each other. For Share: MotoCam cannot check a share, and in a messenger the files should be sent as documents, not as video, or the video is re-encoded.
+
+After **Export** the system folder picker opens (Share has no picker). Cancelling the dialog or the picker ends the action without a message.
+
+**What is exported, in this order:** the chosen clips, then the ride JSON (byte for byte), then `manifest.json`, then `MOTOCAM-EXPORT.txt`. The folder is named `MotoCam ride <id> (<choice>)`, so running the same choice again continues the same folder and a different choice never mixes with it. Files already in the folder and equal to their source are skipped, a file with the same name and different content is never overwritten, and a folder that holds other files is refused (`This folder holds other files; pick another folder.`). Each copy is read back and hashed, and a difference fails the export. The clip hashes are also compared with the ones recorded when the ride was saved; a clip that differs, or has no recorded hash, is still exported and is labelled in the manifest and the README. If a clip fails, the remaining clips are still tried and then the export stops without the ride data, the manifest and the README: a folder without `MOTOCAM-EXPORT.txt` is incomplete. Run Export again to continue.
+
+**When it is refused.** One export runs at a time, app-wide. The rider gets a 3 s message instead of the dialog, the first that applies: `Export is available on Android only.`, `Stop recording before exporting.` (a recording is starting, running or stopping), the migration, import or storage-budget message of Ride History (`Rides are being moved to private storage. Try again when the move finishes.` and so on), `A ride is still being saved. Try again in a moment.`, `MotoCam is tidying up after the last recording. Try again in a moment.` or `An export is already running.` The check runs again after the dialog and after the folder picker. While an export runs, **Unlock clip** and **Delete ride** of every ride are refused with `A ride is being exported. Try again when the export finishes.` (the exported ride's own buttons are disabled, tooltip `Wait for the export to finish`), and Import rides from an older version is refused with the same sentence; opening a ride stays allowed. The export holds the migration off from the moment it passes the first check until it ends.
+
+**While it runs.** The ring (Ride History, replacing the ride's menu button) or spinner (playback, replacing the menu) shows the files done out of the total, per file and not per byte; tapping it (tooltip `Stop export`) stops the export. The dialog tells the rider `Keep MotoCam open until the export finishes.` The screen stays on while the export runs. If a recording starts, the export stops at once and says `Export stopped because a recording started. Run it again to continue.` The grant for the folder is not kept, so a killed export is continued by running it again and picking the folder again.
+
+**When it ends,** an 8 s message says what happened, for example:
+
+- `Exported 5 files (1.6 GB) to "MotoCam ride 1794558143532_1aec41b3127e1626 (locked clips)". All copies checked.` The count includes the manifest and the README. If the folder app could not flush every copy to storage, it says `Copied and checked; the storage app may still be saving them.` instead of `All copies checked.`
+- `1 clip differs from the hash recorded when the ride was saved; this is noted in MOTOCAM-EXPORT.txt.` (or `N clips differ ...`), added to the line above.
+- `Could not copy 1 file (the folder may be full or was removed). Run Export again: files already exported are skipped.`
+- `Export stopped. Run it again to continue: files already exported are skipped.` (the rider stopped it).
+- For Share: `Opened the share sheet with N files. Check that the receiving app got all of them.` MotoCam cannot know whether the files were sent.
+- Other failures name the cause: `A different file named <name> is already in the folder.`, `This folder cannot be written; pick another.`, `The ride file changed during export; run Export again.`, `The ride file could not be read.`
+
+**Known limits.**
+
+- No resume journal and no persisted grant: continuing means picking the folder again; each skipped file is read again to hash it.
+- Progress is per file, not per byte, and free space on the target is not checked beforehand (a full target fails the copy).
+- A share cannot be verified or continued. The shared files are the ride's private files, so keep the ride (do not delete or unlock it) until the receiving app has finished reading them.
+- A ride still in an old storage folder (not yet moved to private storage) can be exported to a folder but not shared.
+- The manifest and the README are not signed, and the manifest holds no app version.
+- The signature identifies a signer only to someone who already knows the key; it does not prove the footage is genuine. See [Integrity statuses](#integrity-statuses).
 
 ## Settings overview
 
@@ -346,6 +386,7 @@ Based on the platform checks in the code today. See [platform-integration.md](pl
 | Foreground service, notification Stop, wake lock | Yes |
 | Stall recovery on resume | Yes |
 | Gallery export (automatic opt-in, Save to gallery, removal of copies) | Yes |
+| Ride export (Export to folder, Share) | Yes (Storage Access Framework, FileProvider) |
 | Rides list, delete, playback, route map, integrity checks | Yes |
 | Storage budget | Yes |
 | Import rides from an older version | Yes (Storage Access Framework) |
