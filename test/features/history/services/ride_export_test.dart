@@ -31,6 +31,9 @@ class _FakeNative implements RideExportNative {
   /// File name -> error code thrown by [exportFile] or [hashFile].
   final Map<String, String> fail = <String, String>{};
 
+  /// Error code thrown by [prepareFolder], if any.
+  String? failPrepare;
+
   /// File names whose copy reads back different (`COPY_MISMATCH`).
   final Set<String> mismatch = <String>{};
 
@@ -85,6 +88,10 @@ class _FakeNative implements RideExportNative {
     required List<String> expectedNames,
   }) async {
     calls.add('prepare');
+    final code = failPrepare;
+    if (code != null) {
+      throw RideExportFailure(code);
+    }
     final folder = Directory('$treeUri$_sep$name');
     await folder.create(recursive: true);
     for (final entity in folder.listSync()) {
@@ -762,9 +769,20 @@ void main() {
         rideExportFailureText('NOT_WRITABLE'),
         'This folder cannot be written; pick another.',
       );
+    });
+
+    test('a renamed folder names the folder in the message', () async {
+      final telemetry = await writeRide('r12', <File>[clip('a.mp4', 'aaaa')]);
+      final p = await plan(telemetry, 'r12');
+      final result = await exporter(
+        _FakeNative(tree)..failPrepare = 'NAME_CONFLICT',
+      ).exportToFolder(p, treeUri: tree.path);
+      expect(result.outcome, RideExportOutcome.failed);
+      expect(result.failureCode, 'NAME_CONFLICT');
       expect(
-        rideExportFailureText('NAME_CONFLICT', name: 'x'),
-        contains('"x"'),
+        rideExportSummary(result),
+        'The folder app would not keep the name '
+        '"MotoCam ride r12 (all clips)"; pick another folder.',
       );
     });
 
@@ -1215,9 +1233,9 @@ void main() {
   });
 
   group('export source', () {
-    test('a changed ride file is refused while it is read', () async {
-      // The source is read in an isolate; a ride file that cannot be
-      // decoded is refused with the rider's sentence.
+    test('a ride file that cannot be decoded is refused', () async {
+      // The source is read in an isolate; the failure carries the rider's
+      // sentence.
       final telemetry = File('${rides.path}${_sep}ride_bad.telemetry.json')
         ..writeAsStringSync('{not json');
       final ride = RideRecord(

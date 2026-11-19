@@ -799,7 +799,7 @@ class RideExporter {
       onProgress,
     );
     Directory? staging;
-    String? current;
+    String? current = plan.folderName;
     try {
       if (_mustStop) {
         throw const _Stopped();
