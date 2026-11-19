@@ -491,6 +491,7 @@ class _FixButton extends StatelessWidget {
   Widget build(BuildContext context) {
     final enabled = onPressed != null;
     return Semantics(
+      container: true,
       button: true,
       enabled: enabled,
       label: 'Fix $title',
