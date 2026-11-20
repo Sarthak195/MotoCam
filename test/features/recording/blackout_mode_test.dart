@@ -160,7 +160,11 @@ void main() {
           ),
           ChangeNotifierProvider(create: (_) => TelemetryProvider()),
         ],
-        child: const MaterialApp(home: RecordingScreen()),
+        // The portrait screen these tests were written for, whatever the
+        // build's MOTOCAM_LANDSCAPE value (on by default).
+        child: const MaterialApp(
+          home: RecordingScreen(landscapeRecording: false),
+        ),
       ),
     );
     await tester.pump(const Duration(milliseconds: 100));

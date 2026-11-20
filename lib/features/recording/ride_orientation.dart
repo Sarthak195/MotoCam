@@ -12,15 +12,18 @@ import 'package:flutter/services.dart';
 
 import '../../core/diagnostics/diagnostic_log.dart';
 
-/// Build switch for landscape recording, off by default. Turn it on with
-/// `--dart-define=MOTOCAM_LANDSCAPE=true` (bench builds only, until the UI
-/// redesign ships its landscape layouts).
+/// Build switch for landscape recording, on by default (the published
+/// v0.1.20 ships with it on). Turn it off at build time with
+/// `--dart-define=MOTOCAM_LANDSCAPE=false`.
 ///
 /// Off: the UI and the capture stay portraitUp, exactly as before the
 /// engine existed. On: while the recording screen is idle the UI is pinned
 /// to the orientation the phone is held in, and START takes that
 /// orientation for the whole ride (see [RideOrientationPinner]).
-const bool kLandscapeRecording = bool.fromEnvironment('MOTOCAM_LANDSCAPE');
+const bool kLandscapeRecording = bool.fromEnvironment(
+  'MOTOCAM_LANDSCAPE',
+  defaultValue: true,
+);
 
 /// The orientations a ride can be recorded in. portraitDown is not
 /// supported.

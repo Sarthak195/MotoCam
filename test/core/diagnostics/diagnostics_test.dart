@@ -107,6 +107,11 @@ void main() {
     });
 
     test('lists MOTOCAM_LANDSCAPE with the value of this build by default', () {
+      // On unless the build passes --dart-define=MOTOCAM_LANDSCAPE=false.
+      expect(
+        kLandscapeRecording,
+        const bool.fromEnvironment('MOTOCAM_LANDSCAPE', defaultValue: true),
+      );
       expect(diagnosticBuildSwitches, {
         'MOTOCAM_LANDSCAPE': kLandscapeRecording,
       });

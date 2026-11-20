@@ -31,7 +31,7 @@ Current limitations:
 - On Android, recording is designed to continue with the screen off or the app in the background while the recording notification shows, but this has not yet been confirmed on a device. The **Keep screen on while recording** setting (on by default) is the fallback. Swiping MotoCam away from Recents still ends the recording, because the activity and the Flutter engine are destroyed.
 - Each segment roll loses about 0.2 s of footage (measured on a phone on 2026-11-11 with 5 s segments and the preview on; about 1 s before rolls kept the camera's video stream bound, `third_party/camera_android_camerax/MOTOCAM_PATCHES.md` patch 1). On the first real ride (2026-11-13: 3 min segments, Blackout on) rolls lost about 0.9 s plus short gaps early in the next clip. On the bench with 3 min segments at 2160p60 and the preview on, each roll also lost about 4 to 8 s in two or three holes during the next 15 s, because the camera plugin kept every recording status event until the roll and then released them all on the main thread; since `MOTOCAM_PATCHES.md` patch 5 a check run (2026-11-17, one debug-build run, two rolls) had no hole over 0.25 s after either roll and about 0.45 to 0.6 s between the files. Rolls in Blackout, with the screen locked and on a real ride have not been re-measured since.
 
-The UI is portrait-only and always dark (Material 3). There is no localization; the `intl` package is used only for date formatting in the rides list.
+The UI is always dark (Material 3). Landscape recording is on by default: while no ride runs the UI follows the way the phone is held, and each ride keeps the orientation it was started in. A build made with `--dart-define=MOTOCAM_LANDSCAPE=false` stays portrait-only. There is no localization; the `intl` package is used only for date formatting in the rides list.
 
 ## Key features
 
@@ -107,7 +107,7 @@ MotoCam/
 ├── .github/                   CI workflow (ci.yml) and Dependabot configuration
 ├── android/                   Gradle project, manifest, Kotlin MainActivity and BackgroundRecordingService
 ├── lib/                       Dart source (see below)
-├── test/                      Unit and widget tests (1160 tests in 70 files)
+├── test/                      Unit and widget tests (1206 tests in 73 files)
 ├── docs/                      Developer documentation and audit reports
 ├── release-notes/             Per-release notes, v0.1.8.md to v0.1.14.md (v0.1.14 is a draft)
 ├── scripts/                   release-security-precheck.ps1, generate-keystore.ps1
@@ -236,7 +236,7 @@ Map tiles come from `tile.openstreetmap.org`, so the route map needs a network c
 | Debug APK | `flutter build apk --debug` |
 | Release APK | `flutter build apk --release` |
 
-- `flutter analyze` is clean, all 1160 tests pass and the tree is `dart format`-clean.
+- `flutter analyze` is clean, all 1206 tests pass and the tree is `dart format`-clean.
 - CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs on pushes to `main` and on pull requests with Flutter 3.41.2. It runs `flutter pub get --enforce-lockfile`, `flutter analyze`, the precheck, `flutter test --coverage`, a debug APK build and the format check.
 - The precheck mostly checks Android: the release signing config in `build.gradle.kts`, the manifest (no background location or all-files access, backups off, the signature-protected internal broadcast permission), that no credential or keystore files are tracked and that the Android assets folder is empty. It then runs `flutter analyze` and `flutter test` unless skipped. It fails when any step fails. It reads no signing credentials.
 - Release builds need four signing values. Gradle reads them from the environment variables `MOTOCAM_KEYSTORE_FILE`, `MOTOCAM_KEYSTORE_PASSWORD`, `MOTOCAM_KEY_ALIAS` and `MOTOCAM_KEY_PASSWORD`, or from `android/key.properties` (copied from `android/key.properties.template`). Each environment variable wins over its file value, and a relative keystore path is resolved against `android/app/`. Gradle stops with `Release signing config missing: ...` (naming the missing values) or `Release keystore not found ...` only when a task that packages or signs a release artifact is about to run. Release builds use R8 minification and resource shrinking. See [docs/release.md](docs/release.md#signing-setup-android).

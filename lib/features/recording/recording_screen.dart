@@ -44,7 +44,8 @@ import 'widgets/recording_view_state.dart';
 /// service and Picture-in-Picture.
 class RecordingScreen extends StatefulWidget {
   /// Creates the recording screen. [landscapeRecording] defaults to the
-  /// build switch [kLandscapeRecording]; tests turn it on directly.
+  /// build switch [kLandscapeRecording] (on unless the build turns it off);
+  /// tests set it directly.
   const RecordingScreen({
     super.key,
     @visibleForTesting this.landscapeRecording = kLandscapeRecording,

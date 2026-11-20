@@ -18,11 +18,15 @@ import 'diagnostic_log.dart';
 export 'diagnostic_log.dart';
 
 /// Build switches written to the session header (`--dart-define` values,
-/// as `bool.fromEnvironment('NAME')`), each with its value. Add each new
-/// switch here.
+/// read as their switch reads them, with the same default), each with its
+/// value. Add each new switch here.
 const Map<String, bool> diagnosticBuildSwitches = <String, bool>{
-  // kLandscapeRecording in features/recording/ride_orientation.dart.
-  'MOTOCAM_LANDSCAPE': bool.fromEnvironment('MOTOCAM_LANDSCAPE'),
+  // kLandscapeRecording in features/recording/ride_orientation.dart: on
+  // unless the build passes --dart-define=MOTOCAM_LANDSCAPE=false.
+  'MOTOCAM_LANDSCAPE': bool.fromEnvironment(
+    'MOTOCAM_LANDSCAPE',
+    defaultValue: true,
+  ),
 };
 
 /// The native side of the diagnostics (`Diagnostics.kt`).

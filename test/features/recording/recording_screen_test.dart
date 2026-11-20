@@ -270,7 +270,10 @@ void main() {
           home: MediaQuery.withClampedTextScaling(
             minScaleFactor: textScale,
             maxScaleFactor: textScale,
-            child: const RecordingScreen(),
+            // The portrait screen these characterisation tests were
+            // written for, whatever the build's MOTOCAM_LANDSCAPE value
+            // (on by default); the landscape screen has its own tests.
+            child: const RecordingScreen(landscapeRecording: false),
           ),
         ),
       ),
