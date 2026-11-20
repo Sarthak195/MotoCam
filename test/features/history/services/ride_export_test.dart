@@ -10,6 +10,7 @@ import 'package:crypto/crypto.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:motocam/core/ride_file/ride_telemetry_codec.dart';
 import 'package:motocam/core/services/ride_export_channel.dart';
+import 'package:motocam/core/utils/format_utils.dart';
 import 'package:motocam/core/utils/integrity_utils.dart';
 import 'package:motocam/features/history/models/ride_index.dart';
 import 'package:motocam/features/history/models/ride_record.dart';
@@ -25,11 +26,23 @@ class _FakeNative implements RideExportNative {
 
   final Directory treeRoot;
 
-  /// `prepare`, `export:<name>`, `hash:<name>`, `share`, `cancel`.
+  /// `prepare`, `export:<name>`, `hash:<name>`,
+  /// `trim:<name>:<startUs>-<endUs>`, `share`, `cancel`.
   final List<String> calls = <String>[];
 
-  /// File name -> error code thrown by [exportFile] or [hashFile].
+  /// Names copied with `replace: true`.
+  final List<String> replaced = <String>[];
+
+  /// File name (`trim:<name>` for a trim) -> error code thrown by
+  /// [exportFile], [hashFile] or [trimClip].
   final Map<String, String> fail = <String, String>{};
+
+  /// Trims made so far; each trim writes different bytes, like MediaMuxer.
+  int trims = 0;
+
+  /// Clip name -> the `lastUs` its trim reports (default: `endUs`, a
+  /// sample on the end).
+  final Map<String, int> lastUs = <String, int>{};
 
   /// Error code thrown by [prepareFolder], if any.
   String? failPrepare;
@@ -37,10 +50,11 @@ class _FakeNative implements RideExportNative {
   /// File names whose copy reads back different (`COPY_MISMATCH`).
   final Set<String> mismatch = <String>{};
 
-  /// File names that take a while to copy (cancellable).
+  /// File names (`trim:<name>` for a trim) that take a while (cancellable).
   final Set<String> slow = <String>{};
 
-  /// Called with the file name at the start of each copy or hash.
+  /// Called with the file name (`trim:<name>` for a trim) at the start of
+  /// each copy, hash or trim.
   void Function(String name)? during;
 
   /// Whether copies report `synced`.
@@ -115,9 +129,13 @@ class _FakeNative implements RideExportNative {
     required String sourcePath,
     required String name,
     required String mimeType,
+    bool replace = false,
   }) async {
     _cancelled = false;
     calls.add('export:$name');
+    if (replace) {
+      replaced.add(name);
+    }
     await _work(name);
     final source = File(sourcePath);
     if (!source.existsSync()) {
@@ -126,6 +144,9 @@ class _FakeNative implements RideExportNative {
     final bytes = source.readAsBytesSync();
     final sourceHash = _hash(bytes);
     final target = File('$folderUri$_sep$name');
+    if (replace && target.existsSync()) {
+      target.deleteSync();
+    }
     if (target.existsSync()) {
       final existing = target.readAsBytesSync();
       if (existing.length == bytes.length) {
@@ -168,6 +189,44 @@ class _FakeNative implements RideExportNative {
     }
     final bytes = file.readAsBytesSync();
     return RideHashedFile(bytes: bytes.length, sha256: _hash(bytes));
+  }
+
+  /// Writes `trim<n>:<startUs>-<endUs>:` and the source to [targetPath];
+  /// the start snaps back to a 0.7 s keyframe grid.
+  @override
+  Future<RideTrimmedClip> trimClip({
+    required String sourcePath,
+    required String targetPath,
+    required int startUs,
+    required int endUs,
+  }) async {
+    _cancelled = false;
+    final name = sourcePath.split(_sep).last;
+    calls.add('trim:$name:$startUs-$endUs');
+    if (!targetPath.contains('${_sep}ride_export$_sep')) {
+      throw const RideExportFailure('INVALID_ARGS');
+    }
+    final target = File(targetPath);
+    if (target.existsSync()) {
+      throw const RideExportFailure('INVALID_ARGS', 'target exists');
+    }
+    target.writeAsStringSync('partial');
+    try {
+      await _work('trim:$name');
+    } catch (_) {
+      target.deleteSync();
+      rethrow;
+    }
+    final source = File(sourcePath);
+    trims++;
+    target.writeAsStringSync(
+      'trim$trims:$startUs-$endUs:${source.readAsStringSync()}',
+    );
+    return RideTrimmedClip(
+      bytes: target.lengthSync(),
+      firstUs: startUs ~/ 700000 * 700000,
+      lastUs: lastUs[name] ?? endUs,
+    );
   }
 
   @override
@@ -334,6 +393,7 @@ void main() {
     String id, {
     RideExportClips clips = RideExportClips.all,
     bool includeRideData = true,
+    RideExportSection? section,
   }) async {
     final source = await loadRideExportSource(
       await screenRecord(telemetry, id),
@@ -342,6 +402,7 @@ void main() {
       source,
       clips: clips,
       includeRideData: includeRideData,
+      section: section,
     );
   }
 
@@ -556,6 +617,136 @@ void main() {
         'MOTOCAM-EXPORT.txt',
       ]);
     });
+
+    group('a section', () {
+      Future<RideFileStamp?> sized(String path) async =>
+          const RideFileStamp(size: 600, modifiedUs: 0, changedUs: 0);
+
+      Future<RideExportPlan> section(
+        RideRecord record,
+        int fromMs,
+        int toMs, {
+        RideFileStatSource? stat,
+      }) => planRideExport(
+        RideExportSource(ride: record, rideDataSha256: 'h0', rideDataBytes: 5),
+        clips: RideExportClips.section,
+        includeRideData: true,
+        section: RideExportSection(fromMs, toMs),
+        stat: stat ?? sized,
+      );
+
+      /// Each clip as `name whole|trimmed from-to` (clip-local ms).
+      List<String> parts(RideExportPlan p) => <String>[
+        for (final c in p.clips)
+          '${c.name} ${c.trimmed ? 'trimmed' : 'whole'} '
+              '${c.part!.clipFromMs}-${c.part!.clipToMs}',
+      ];
+
+      // The timeline: a 0 to 60000, b 60200 to 120000, c 120200 to 180000.
+
+      test('clips fully inside are whole; never the ride data', () async {
+        final p = await section(ride(), 0, 180000);
+        expect(p.clipChoice, RideExportClips.section);
+        expect(p.section, const RideExportSection(0, 180000));
+        expect(parts(p), <String>[
+          'a.mp4 whole 0-60000',
+          'b.mp4 whole 0-59800',
+          'c.mp4 whole 0-59800',
+        ]);
+        expect(p.clipBytes, 1800);
+        expect(p.includeRideData, isFalse);
+        expect(p.rideData, isNull);
+        expect(p.notExported, isEmpty);
+        expect(p.unmappedIncidentsMs, isEmpty);
+        expect(p.folderName, 'MotoCam ride x (section 00m00s to 03m00s)');
+        expect(p.expectedNames, <String>[
+          'a.mp4',
+          'b.mp4',
+          'c.mp4',
+          'manifest.json',
+          'MOTOCAM-EXPORT.txt',
+        ]);
+      });
+
+      test(
+        'clips cut at either end are trimmed with clip-local times',
+        () async {
+          final p = await section(ride(), 30000, 150000);
+          expect(parts(p), <String>[
+            'a.mp4 trimmed 30000-60000',
+            'b.mp4 whole 0-59800',
+            'c.mp4 trimmed 0-29800',
+          ]);
+          // A trimmed part's size is its share of the clip.
+          expect(p.clips.map((c) => c.bytes), <int>[300, 600, 299]);
+          expect(p.folderName, 'MotoCam ride x (section 00m30s to 02m30s)');
+        },
+      );
+
+      test('a range inside one clip trims that clip at both ends', () async {
+        final p = await section(ride(), 70000, 80000);
+        expect(parts(p), <String>['b.mp4 trimmed 9800-19800']);
+        expect(p.clips.single.part!.rideStartMs, 60200);
+      });
+
+      test('a range that starts or ends in a roll gap starts at the next clip '
+          'or ends at the previous one', () async {
+        expect(parts(await section(ride(), 60100, 120100)), <String>[
+          'b.mp4 whole 0-59800',
+        ]);
+        expect(parts(await section(ride(), 10000, 60100)), <String>[
+          'a.mp4 trimmed 10000-60000',
+        ]);
+        expect(parts(await section(ride(), 60100, 90000)), <String>[
+          'b.mp4 trimmed 0-29800',
+        ]);
+      });
+
+      test('a missing clip inside the range is listed, never copied', () async {
+        final p = await section(
+          ride(),
+          30000,
+          150000,
+          stat: (path) async => path.endsWith('b.mp4') ? null : sized(path),
+        );
+        expect(p.clips.map((c) => c.name), <String>['a.mp4', 'c.mp4']);
+        expect(p.notExported.map((o) => '${o.name}:${o.reason.name}'), <String>[
+          'b.mp4:missing',
+        ]);
+        expect(p.notExported.single.recordedSha256, isNull);
+        expect(p.expectedNames, isNot(contains('b.mp4')));
+      });
+
+      test('a ride without a timeline has no sections', () async {
+        final record = ride(timeline: const <RideSegmentTimelineEntry>[]);
+        expect(rideExportLengthMs(record), isNull);
+        expect(rideExportLengthMs(ride()), 180000);
+        await expectLater(section(record, 0, 1000), throwsArgumentError);
+      });
+
+      test('an empty or reversed range, or no range, is refused', () async {
+        await expectLater(section(ride(), 5000, 5000), throwsArgumentError);
+        await expectLater(section(ride(), 6000, 5000), throwsArgumentError);
+        await expectLater(section(ride(), -1000, 5000), throwsArgumentError);
+        await expectLater(
+          planRideExport(
+            RideExportSource(ride: ride()),
+            clips: RideExportClips.section,
+            includeRideData: false,
+          ),
+          throwsArgumentError,
+        );
+      });
+
+      test('the clock text is local HH:mm:ss after the ride start', () {
+        // The ride starts at local midnight.
+        expect(rideExportClockText(ride(), 125000), '00:02:05');
+        expect(
+          rideExportClockText(ride(), 14 * 3600000 + 5 * 60000 + 12000),
+          '14:05:12',
+        );
+      });
+    });
   });
 
   group('folder naming', () {
@@ -596,6 +787,36 @@ void main() {
       expect(
         name(RideExportClips.all, false),
         'MotoCam ride 1794558143532_1aec41b3127e1626 (all clips, video only)',
+      );
+    });
+
+    test('a section names its ride time range, always video only', () {
+      final ride = named('1794558143532_1aec41b3127e1626', 'REC_1.mp4');
+      String name(int fromMs, int toMs, bool data) => rideExportFolderName(
+        ride,
+        clips: RideExportClips.section,
+        includeRideData: data,
+        section: RideExportSection(fromMs, toMs),
+      );
+      expect(
+        name(312000, 400000, true),
+        'MotoCam ride 1794558143532_1aec41b3127e1626 '
+        '(section 05m12s to 06m40s)',
+      );
+      expect(name(312000, 400000, false), name(312000, 400000, true));
+      expect(
+        name(3912000, 3920500, false),
+        'MotoCam ride 1794558143532_1aec41b3127e1626 '
+        '(section 1h05m12s to 1h05m20s)',
+      );
+      expect(name(312000, 401000, true), isNot(name(312000, 400000, true)));
+      expect(
+        () => rideExportFolderName(
+          ride,
+          clips: RideExportClips.section,
+          includeRideData: true,
+        ),
+        throwsArgumentError,
       );
     });
 
@@ -918,6 +1139,225 @@ void main() {
     });
   });
 
+  group('section run', () {
+    Future<RideExportPlan> sectionPlan(String id, int fromMs, int toMs) async {
+      final telemetry = await writeRide(id, <File>[
+        clip('a.mp4', 'aaaa'),
+        clip('b.mp4', 'bbbb'),
+        clip('c.mp4', 'cccc'),
+      ]);
+      return plan(
+        telemetry,
+        id,
+        clips: RideExportClips.section,
+        section: RideExportSection(fromMs, toMs),
+      );
+    }
+
+    Directory trimDirectory() =>
+        Directory('${cache.path}${_sep}ride_export${_sep}trim');
+
+    test('trims cut clips with clip-local times, copies them with replace '
+        'and deletes the temp files', () async {
+      final p = await sectionPlan('t1', 30000, 150000);
+      final native = _FakeNative(tree);
+      final progress = <String>[];
+      final result = await exporter(native).exportToFolder(
+        p,
+        treeUri: tree.path,
+        onProgress: (done, total) => progress.add('$done/$total'),
+      );
+      expect(result.outcome, RideExportOutcome.done);
+      expect(native.calls, <String>[
+        'prepare',
+        'trim:a.mp4:30000000-59800000',
+        'export:a.mp4',
+        'export:b.mp4',
+        'trim:c.mp4:0-30000000',
+        'export:c.mp4',
+        'export:manifest.json',
+        'export:MOTOCAM-EXPORT.txt',
+      ]);
+      // Only the trimmed outputs replace a file of the same name.
+      expect(native.replaced, <String>['a.mp4', 'c.mp4']);
+      expect(progress, <String>['1/5', '2/5', '3/5', '4/5', '5/5']);
+      final folder = exportFolder(p).path;
+      expect(
+        File('$folder${_sep}a.mp4').readAsStringSync(),
+        'trim1:30000000-59800000:aaaa',
+      );
+      expect(File('$folder${_sep}b.mp4').readAsStringSync(), 'bbbb');
+      expect(result.clips.map((c) => c.trimmed), <bool>[true, false, true]);
+      expect(result.clips.first.clipFromMs, 29400);
+      expect(trimDirectory().listSync(), isEmpty);
+      expect(
+        rideExportSummary(result),
+        'Exported 5 files (${formatFileSize(result.bytes)}) to '
+        '"MotoCam ride t1 (section 00m30s to 02m30s)". All copies checked.',
+      );
+
+      // A re-run skips the whole clip and makes the trimmed ones again.
+      final again = _FakeNative(tree)..trims = 5;
+      final rerun = await exporter(again).exportToFolder(p, treeUri: tree.path);
+      expect(rerun.outcome, RideExportOutcome.done);
+      expect(rerun.skipped, 1);
+      expect(again.replaced, <String>['a.mp4', 'c.mp4']);
+      expect(
+        File('$folder${_sep}a.mp4').readAsStringSync(),
+        'trim6:30000000-59800000:aaaa',
+      );
+    });
+
+    test('a trimmed clip ends at the last sample written, or at the '
+        'requested end when the trim reports none', () async {
+      // a is cut at its start and runs to its timeline end (59.8 s), but
+      // its media ends at 58.6 s; c's trim reports no sample time.
+      final p = await sectionPlan('t7', 30000, 150000);
+      final native = _FakeNative(tree)
+        ..lastUs['a.mp4'] = 58633333
+        ..lastUs['c.mp4'] = -1;
+      final result = await exporter(
+        native,
+      ).exportToFolder(p, treeUri: tree.path);
+      expect(result.outcome, RideExportOutcome.done);
+      expect(result.clips.map((c) => c.clipToMs), <int>[58633, 59800, 30000]);
+      final folder = exportFolder(p).path;
+      final manifest =
+          jsonDecode(File('$folder${_sep}manifest.json').readAsStringSync())
+              as Map<String, dynamic>;
+      final files = (manifest['files'] as List).cast<Map<String, dynamic>>();
+      expect(files.map((f) => f['clipToMs']), <int>[58633, 59800, 30000]);
+      expect(
+        File('$folder${_sep}MOTOCAM-EXPORT.txt').readAsStringSync(),
+        contains('  In the clip: 00:29.400 to 00:58.633\n'),
+      );
+    });
+
+    test('a section run clears temp files a killed run left behind', () async {
+      final p = await sectionPlan('t0', 30000, 150000);
+      final leftover = File('${trimDirectory().path}${_sep}old.mp4')
+        ..createSync(recursive: true)
+        ..writeAsStringSync('left by a killed run');
+      final result = await exporter(
+        _FakeNative(tree),
+      ).exportToFolder(p, treeUri: tree.path);
+      expect(result.outcome, RideExportOutcome.done);
+      expect(leftover.existsSync(), isFalse);
+      expect(trimDirectory().listSync(), isEmpty);
+    });
+
+    test('a failed trim fails the run and leaves no temp file', () async {
+      final p = await sectionPlan('t2', 30000, 150000);
+      final native = _FakeNative(tree)..fail['trim:c.mp4'] = 'TRIM_FAILED';
+      final result = await exporter(
+        native,
+      ).exportToFolder(p, treeUri: tree.path);
+      expect(result.outcome, RideExportOutcome.failed);
+      expect(result.failureCode, 'TRIM_FAILED');
+      expect(native.calls, isNot(contains('export:manifest.json')));
+      expect(trimDirectory().listSync(), isEmpty);
+      expect(
+        rideExportSummary(result),
+        'Could not cut c.mp4 for this section. Pick another section, or '
+        'export whole clips.',
+      );
+    });
+
+    test('the rider can cancel during a trim', () async {
+      final p = await sectionPlan('t3', 30000, 150000);
+      final native = _FakeNative(tree)..slow.add('trim:a.mp4');
+      final run = exporter(native);
+      native.during = (name) {
+        if (name == 'trim:a.mp4') {
+          unawaited(run.cancel());
+        }
+      };
+      final result = await run.exportToFolder(p, treeUri: tree.path);
+      expect(result.outcome, RideExportOutcome.cancelled);
+      expect(native.calls, contains('cancel'));
+      expect(native.calls.where((c) => c.startsWith('export:')), isEmpty);
+      expect(namesIn(exportFolder(p)), isEmpty);
+      expect(trimDirectory().listSync(), isEmpty);
+    });
+
+    test('a recording that starts pauses a trim at once', () async {
+      final p = await sectionPlan('t4', 30000, 150000);
+      var recording = false;
+      final native = _FakeNative(tree)
+        ..slow.add('trim:c.mp4')
+        ..during = (name) {
+          if (name == 'trim:c.mp4') {
+            recording = true;
+          }
+        };
+      final result = await exporter(
+        native,
+        shouldPause: () => recording,
+      ).exportToFolder(p, treeUri: tree.path);
+      expect(result.outcome, RideExportOutcome.paused);
+      expect(native.calls, contains('cancel'));
+      expect(native.calls, isNot(contains('export:c.mp4')));
+      expect(namesIn(exportFolder(p)), <String>['a.mp4', 'b.mp4']);
+      expect(trimDirectory().listSync(), isEmpty);
+    });
+
+    test('a share trims into its staging folder and shares the cut copies '
+        'under their own names', () async {
+      final p = await sectionPlan('t5', 30000, 90000);
+      final native = _FakeNative(tree);
+      final later = DateTime.now().add(const Duration(days: 2));
+      final result = await exporter(native, now: () => later).share(p);
+      expect(result.outcome, RideExportOutcome.done);
+      expect(native.calls, <String>[
+        'trim:a.mp4:30000000-59800000',
+        'hash:a.mp4',
+        'trim:b.mp4:0-30000000',
+        'hash:b.mp4',
+        'share',
+      ]);
+      final staging =
+          '${cache.path}${_sep}ride_export$_sep${p.folderName}-'
+          '${later.millisecondsSinceEpoch}';
+      expect(native.sharedPaths, <String>[
+        '$staging${_sep}a.mp4',
+        '$staging${_sep}b.mp4',
+        '$staging${_sep}manifest.json',
+        '$staging${_sep}MOTOCAM-EXPORT.txt',
+      ]);
+      // The cut copies stay for the receiving app.
+      expect(File('$staging${_sep}a.mp4').existsSync(), isTrue);
+      final manifest =
+          jsonDecode(File('$staging${_sep}manifest.json').readAsStringSync())
+              as Map<String, dynamic>;
+      expect(manifest['sha256Of'], 'source');
+      expect((manifest['files'] as List).first, <String, Object?>{
+        'name': 'a.mp4',
+        'bytes': File('$staging${_sep}a.mp4').lengthSync(),
+        'sha256': sha256
+            .convert(File('$staging${_sep}a.mp4').readAsBytesSync())
+            .toString(),
+        'trimmed': true,
+        'clipFromMs': 29400,
+        'clipToMs': 59800,
+      });
+    });
+
+    test('a share stopped during a trim leaves no staging folder', () async {
+      final p = await sectionPlan('t6', 30000, 90000);
+      final native = _FakeNative(tree)..slow.add('trim:b.mp4');
+      final run = exporter(native);
+      native.during = (name) {
+        if (name == 'trim:b.mp4') {
+          unawaited(run.cancel());
+        }
+      };
+      final result = await run.share(p);
+      expect(result.outcome, RideExportOutcome.cancelled);
+      expect(native.sharedPaths, isNull);
+      expect(Directory('${cache.path}${_sep}ride_export').listSync(), isEmpty);
+    });
+  });
+
   group('manifest and README', () {
     test('a signed ride lists its key, the chain and fixed strings', () async {
       final telemetry = await writeRide(
@@ -1034,12 +1474,41 @@ void main() {
         ),
       );
       expect(
-        flat,
+        readme,
         contains(
-          'A payloadHash mismatch caused by another language\'s JSON encoder '
-          'is not by itself evidence of tampering.',
+          "check.py:\n\n"
+          "import hashlib, json, sys\n"
+          "d = json.load(open(sys.argv[1], encoding='utf-8'))\n"
+          "i = dict(d['integrity'])\n"
+          "stored = i.pop('payloadHash')\n"
+          "v = i.get('envelopeVersion')\n"
+          "if v == 3: i.pop('signature', None)\n"
+          "if v in (2, 3): d['integrity'] = i\n"
+          "else: del d['integrity']\n"
+          "s = json.dumps(d, sort_keys=True, separators=(',', ':'), "
+          "ensure_ascii=False)\n"
+          "h = hashlib.sha256(s.encode('utf-8')).hexdigest()\n"
+          "print(h, 'MATCH' if h == stored else 'MISMATCH')\n\n",
         ),
       );
+      expect(readme, contains('\n  python3 check.py RIDEDATA '));
+      expect(readme, contains('\n  py check.py RIDEDATA '));
+      expect(
+        flat,
+        contains(
+          'so a MISMATCH from this recipe or another JSON encoder alone is '
+          'not proof of tampering.',
+        ),
+      );
+      expect(
+        flat,
+        contains(
+          '3. Verify the signature (SIGNED rides) in a POSIX shell (Linux, '
+          'macOS, or Git Bash or WSL on Windows):',
+        ),
+      );
+      expect(readme, contains('\n  Verified OK\n  Verification failure\n'));
+      expect(readme, isNot(contains('another language')));
       expect(
         flat,
         contains(
@@ -1065,7 +1534,9 @@ void main() {
         if (line.contains(' ') &&
             !line.startsWith('  ') &&
             !line.startsWith('Ride data:') &&
-            !line.startsWith('Clips:')) {
+            !line.startsWith('Clips:') &&
+            // A line of the Python recipe, never wrapped.
+            !line.startsWith('s = json.dumps(')) {
           expect(line.length, lessThanOrEqualTo(72), reason: line);
         }
       }
@@ -1234,6 +1705,8 @@ void main() {
       expect(read.manifest['rideData'], isNull);
       expect(read.manifest['rideDataIncluded'], isFalse);
       expect(read.manifest['clips'], 'evidence');
+      expect(read.manifest.containsKey('section'), isTrue);
+      expect(read.manifest['section'], isNull);
       final files = (read.manifest['files'] as List)
           .cast<Map<String, dynamic>>();
       expect(files.single['recordedSha256'], isNotNull);
@@ -1260,6 +1733,185 @@ void main() {
         'a.mp4',
         'manifest.json',
       ]);
+    });
+
+    test('a section exports its files, without ride data or key '
+        'material', () async {
+      final a = clip('a.mp4', 'aaaa');
+      final b = clip('b.mp4', 'bbbb');
+      final c = clip('c.mp4', 'cccc');
+      final d = clip('d.mp4', 'dddd');
+      final telemetry = await writeRide(
+        's9',
+        <File>[a, b, c, d],
+        locked: <File>[b],
+        seal: _Seal.v3,
+        mock: true,
+        sessionComplete: false,
+      );
+      // d is gone; a section from 00:30 to 03:30 cuts a and d.
+      d.deleteSync();
+      final p = await plan(
+        telemetry,
+        's9',
+        clips: RideExportClips.section,
+        section: const RideExportSection(30000, 210000),
+      );
+      expect(p.folderName, 'MotoCam ride s9 (section 00m30s to 03m30s)');
+      final read = await exportAndRead(p);
+      expect(namesIn(exportFolder(p)), <String>[
+        'MOTOCAM-EXPORT.txt',
+        'a.mp4',
+        'b.mp4',
+        'c.mp4',
+        'manifest.json',
+      ]);
+      final folder = exportFolder(p).path;
+      String hashOf(String name) => sha256
+          .convert(File('$folder$_sep$name').readAsBytesSync())
+          .toString();
+      final manifest = read.manifest;
+      expect(manifest['format'], 'motocam-ride-export');
+      expect(manifest['clips'], 'section');
+      expect(manifest['section'], <String, Object?>{
+        'fromMs': 30000,
+        'toMs': 210000,
+        // a's trim snapped back to the keyframe at 29.4 s.
+        'actualFromMs': 29400,
+      });
+      expect(manifest['rideDataIncluded'], isFalse);
+      expect(manifest['rideData'], isNull);
+      expect(manifest['integrity'], isNull);
+      expect(manifest['sha256Of'], 'copy');
+      expect(manifest['files'], <Object?>[
+        <String, Object?>{
+          'name': 'a.mp4',
+          'bytes': File('$folder${_sep}a.mp4').lengthSync(),
+          'sha256': hashOf('a.mp4'),
+          'trimmed': true,
+          'clipFromMs': 29400,
+          'clipToMs': 59800,
+        },
+        <String, Object?>{
+          'name': 'b.mp4',
+          'bytes': 4,
+          'sha256': sha256.convert(utf8.encode('bbbb')).toString(),
+          'trimmed': false,
+          'clipFromMs': 0,
+          'clipToMs': 59800,
+        },
+        <String, Object?>{
+          'name': 'c.mp4',
+          'bytes': 4,
+          'sha256': hashOf('c.mp4'),
+          'trimmed': false,
+          'clipFromMs': 0,
+          'clipToMs': 59800,
+        },
+      ]);
+      expect(manifest['notExported'], <Object?>[
+        <String, Object?>{'name': 'd.mp4', 'reason': 'missing'},
+      ]);
+
+      final readme = read.readme;
+      final ride = p.source.ride;
+      expect(readme, contains('Ride: s9\n'));
+      expect(
+        readme,
+        contains(
+          'Section: 00:30 to 03:30 of the ride (clock time '
+          '${rideExportClockText(ride, 30000)} to '
+          '${rideExportClockText(ride, 210000)})\n',
+        ),
+      );
+      expect(readme, contains('Ride data: not included (video only)\n'));
+      expect(
+        readme,
+        contains(
+          'a.mp4 (trimmed)\n'
+          '  In the clip: 00:29.400 to 00:59.800\n'
+          '  ${File('$folder${_sep}a.mp4').lengthSync()} bytes\n'
+          '  SHA-256: ${hashOf('a.mp4')}\n'
+          'b.mp4 (whole clip)\n'
+          '  In the clip: 00:00.000 to 00:59.800\n'
+          '  4 bytes\n',
+        ),
+      );
+      expect(readme, contains('d.mp4: missing on the phone\n'));
+      final flat = _flat(readme);
+      expect(
+        flat,
+        contains(
+          'Files keep their original clip names. Trimmed files are cut '
+          'copies made without re-encoding: they are not the original '
+          'recordings and do not match the original clips\' checksums. This '
+          'export carries no ride data and no signature.',
+        ),
+      );
+      expect(
+        flat,
+        contains(
+          'Videos show other road users: share them only for your own '
+          'records, the police or your insurer.',
+        ),
+      );
+      expect(flat, contains('The folder you pick is shared storage'));
+      for (final text in <String>[
+        'Integrity',
+        'SIGNED',
+        'Recorded hash',
+        'Recorded-hash',
+        'How to check',
+        'openssl',
+        'payloadHash',
+        'Public key',
+        'keyId',
+        'Fingerprint',
+        'SIMULATED GPS',
+        'ended without Stop',
+        'same public key',
+        'ride_s9.telemetry.json',
+      ]) {
+        expect(readme, isNot(contains(text)), reason: text);
+      }
+      final manifestText = jsonEncode(manifest);
+      expect(manifestText, isNot(contains(phone.publicKeyBase64)));
+      expect(readme, isNot(contains(phone.publicKeyBase64)));
+      expect(manifestText, isNot(contains('recordedSha256')));
+      expect(manifestText, isNot(contains('keyId')));
+    });
+
+    test('a section shared from Playback names the share sheet in its '
+        'README', () async {
+      final telemetry = await writeRide('s10', <File>[clip('a.mp4', 'aaaa')]);
+      final p = await plan(
+        telemetry,
+        's10',
+        clips: RideExportClips.section,
+        section: const RideExportSection(1000, 2000),
+      );
+      final readme = buildExportReadme(
+        p,
+        clips: const <RideExportFileEntry>[],
+        rideData: null,
+        destination: RideExportDestination.share,
+        exportedAt: exportedAt,
+      );
+      expect(readme, contains('Destination: the Android share sheet\n'));
+      expect(readme, isNot(contains('The folder you pick')));
+      final manifest = buildExportManifest(
+        p,
+        clips: const <RideExportFileEntry>[],
+        rideData: null,
+        destination: RideExportDestination.share,
+        exportedAt: exportedAt,
+      );
+      expect(manifest['sha256Of'], 'source');
+      expect(manifest['section'], <String, Object?>{
+        'fromMs': 1000,
+        'toMs': 2000,
+        'actualFromMs': null,
+      });
     });
 
     test('a video-only recovery exports its video without ride data', () async {

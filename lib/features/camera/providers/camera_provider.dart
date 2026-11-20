@@ -27,6 +27,7 @@ import '../../../core/services/legacy_recordings_access.dart';
 import 'dart:io';
 import 'dart:async';
 import 'dart:isolate';
+import '../../../core/diagnostics/diagnostic_log.dart';
 
 /// Lifecycle state of the segmented recording session.
 enum RecordingState {
@@ -531,8 +532,9 @@ class CameraProvider extends ChangeNotifier {
 
   // Warnings and errors: logged in every build mode. Uses
   // debugPrintSynchronously, which the release-mode debugPrint no-op in
-  // main.dart does not silence.
+  // main.dart does not silence, and goes to the diagnostic log.
   void _logError(String message) {
+    DiagnosticLog.instance.error('camera', message);
     if (enableDebugLogging) {
       debugPrint('[MotoCam] $message');
     } else {
@@ -1869,7 +1871,9 @@ class CameraProvider extends ChangeNotifier {
     try {
       await controller.lockCaptureOrientation(orientation);
     } catch (e) {
-      _log('Idle capture orientation lock to ${orientation.name} failed: $e');
+      _logError(
+        'Idle capture orientation lock to ${orientation.name} failed: $e',
+      );
     }
   }
 

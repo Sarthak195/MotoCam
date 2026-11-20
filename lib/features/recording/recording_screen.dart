@@ -26,6 +26,7 @@ import 'ride_orientation.dart';
 import 'widgets/recording_settings_sheet.dart';
 import 'start_preflight_evaluator.dart';
 import 'widgets/start_preflight_sheet.dart';
+import '../../core/diagnostics/diagnostic_log.dart';
 
 /// The app's home screen: camera preview, live telemetry and the controls
 /// that start, stop and lock recordings.
@@ -179,7 +180,10 @@ class _RecordingScreenState extends State<RecordingScreen>
     try {
       await SystemChrome.setPreferredOrientations([orientation]);
     } catch (e) {
-      debugPrint('Pinning the UI to ${orientation.name} failed: $e');
+      debugPrintError(
+        'recording',
+        'Pinning the UI to ${orientation.name} failed: $e',
+      );
     }
     await _cameraProvider?.setIdleCaptureOrientation(orientation);
   }
@@ -408,7 +412,7 @@ class _RecordingScreenState extends State<RecordingScreen>
     try {
       opened = await open();
     } catch (e) {
-      debugPrint('Opening system settings failed: $e');
+      debugPrintError('recording', 'Opening system settings failed: $e');
     }
 
     if (opened) {
@@ -897,7 +901,10 @@ class _RecordingScreenState extends State<RecordingScreen>
             .startForegroundRecording(elapsed: Duration.zero);
       } catch (e) {
         backgroundProtected = false;
-        debugPrint('Starting the foreground recording service failed: $e');
+        debugPrintError(
+          'recording',
+          'Starting the foreground recording service failed: $e',
+        );
       }
       if (!mounted) {
         // dispose() already asked to stop the service, possibly before the
@@ -918,7 +925,10 @@ class _RecordingScreenState extends State<RecordingScreen>
           _backgroundRecordingService
               .updateForegroundRecording(elapsed: elapsed)
               .catchError((Object e) {
-                debugPrint('Updating the recording notification failed: $e');
+                debugPrintError(
+                  'recording',
+                  'Updating the recording notification failed: $e',
+                );
               }),
         );
         // Segment registration does not notify listeners, so new segments
@@ -1372,7 +1382,7 @@ class _RecordingScreenState extends State<RecordingScreen>
       }
     } catch (e) {
       stopError = e;
-      debugPrint('Stopping the recording failed: $e');
+      debugPrintError('recording', 'Stopping the recording failed: $e');
       // Do not leave the telemetry ride active (the next START would
       // discard it): save it with whatever segments were registered.
       if (telemetry.isRideActive) {
@@ -1388,9 +1398,10 @@ class _RecordingScreenState extends State<RecordingScreen>
               recordingSettings: recordingSettings,
             );
           } catch (persistError) {
-            debugPrint(
+            debugPrintError(
+              'recording',
               'Saving the ride after a stop failure failed: '
-              '$persistError',
+                  '$persistError',
             );
           }
         } else {
@@ -1546,7 +1557,7 @@ class _RecordingScreenState extends State<RecordingScreen>
       }
       await _backgroundRecordingService.requestIgnoreBatteryOptimizations();
     } catch (e) {
-      debugPrint('Battery optimization offer failed: $e');
+      debugPrintError('recording', 'Battery optimization offer failed: $e');
     } finally {
       _isOfferingBatteryExemption = false;
     }
@@ -1556,7 +1567,10 @@ class _RecordingScreenState extends State<RecordingScreen>
     try {
       await _backgroundRecordingService.stopForegroundRecording();
     } catch (e) {
-      debugPrint('Stopping the foreground recording service failed: $e');
+      debugPrintError(
+        'recording',
+        'Stopping the foreground recording service failed: $e',
+      );
     }
   }
 

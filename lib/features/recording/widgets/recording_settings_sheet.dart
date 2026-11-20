@@ -3,7 +3,9 @@ import 'dart:async';
 import 'package:camera/camera.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:provider/provider.dart';
+import '../../../core/diagnostics/diagnostics.dart';
 import '../../../core/providers/app_settings_provider.dart';
 import '../../camera/providers/camera_provider.dart';
 import '../recording_screen_logic.dart';
@@ -92,12 +94,22 @@ class RecordingSettingsSheet extends StatefulWidget {
   /// Resolution presets known to fail on this device; shown as unsupported.
   final Set<ResolutionPreset> initialUnsupportedPresets;
 
+  /// Shares the diagnostic log; defaults to [shareDiagnosticLog] on
+  /// [DiagnosticLog.instance] (tests pass a fake).
+  final Future<DiagnosticShareResult> Function()? onShareDiagnosticLog;
+
+  /// Clears the diagnostic log; defaults to [clearDiagnosticLog] on
+  /// [DiagnosticLog.instance] (tests pass a fake).
+  final Future<bool> Function()? onClearDiagnosticLog;
+
   /// Creates the settings form with the given option lists.
   const RecordingSettingsSheet({
     super.key,
     required this.initialFpsOptions,
     required this.initialCameraOptions,
     required this.initialUnsupportedPresets,
+    this.onShareDiagnosticLog,
+    this.onClearDiagnosticLog,
   });
 
   @override
@@ -203,6 +215,95 @@ class _RecordingSettingsSheetState extends State<RecordingSettingsSheet> {
           fontWeight: FontWeight.w600,
         ),
       ),
+    );
+  }
+
+  Future<bool> _confirm(String title, String message, String action) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text(title),
+        content: Text(message),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('CANCEL'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: Text(action),
+          ),
+        ],
+      ),
+    );
+    return confirmed ?? false;
+  }
+
+  // A dialog, not a SnackBar: the sheet would cover a SnackBar shown on the
+  // screen under it.
+  Future<void> _showDiagnosticMessage(String message) => showDialog<void>(
+    context: context,
+    builder: (dialogContext) => AlertDialog(
+      content: Text(message),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(dialogContext).pop(),
+          child: const Text('OK'),
+        ),
+      ],
+    ),
+  );
+
+  Future<void> _shareDiagnosticLog() async {
+    if (!await _confirm(
+      'Share diagnostic log?',
+      diagnosticShareConfirmText,
+      'SHARE',
+    )) {
+      return;
+    }
+    final share =
+        widget.onShareDiagnosticLog ??
+        () => shareDiagnosticLog(
+          log: DiagnosticLog.instance,
+          cacheDirectory: getTemporaryDirectory,
+        );
+    final result = await share();
+    if (!mounted) {
+      return;
+    }
+    switch (result) {
+      case DiagnosticShareResult.shared:
+        break;
+      case DiagnosticShareResult.empty:
+        await _showDiagnosticMessage('The diagnostic log is empty.');
+      case DiagnosticShareResult.failed:
+        await _showDiagnosticMessage('Could not share the diagnostic log.');
+    }
+  }
+
+  Future<void> _clearDiagnosticLog() async {
+    if (!await _confirm(
+      'Clear diagnostic log?',
+      'This deletes the recorded app errors and crash reports.',
+      'CLEAR',
+    )) {
+      return;
+    }
+    final clear =
+        widget.onClearDiagnosticLog ??
+        () => clearDiagnosticLog(
+          log: DiagnosticLog.instance,
+          cacheDirectory: getTemporaryDirectory,
+        );
+    final cleared = await clear();
+    if (!mounted) {
+      return;
+    }
+    await _showDiagnosticMessage(
+      cleared
+          ? 'Diagnostic log cleared.'
+          : 'Could not clear the diagnostic log.',
     );
   }
 
@@ -723,6 +824,30 @@ class _RecordingSettingsSheetState extends State<RecordingSettingsSheet> {
                     context: context,
                     applicationName: 'MotoCam',
                   ),
+                ),
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: const Icon(
+                    Icons.bug_report_outlined,
+                    color: Colors.white70,
+                  ),
+                  title: const Text(
+                    'Share diagnostic log',
+                    style: TextStyle(color: Colors.white),
+                  ),
+                  onTap: _shareDiagnosticLog,
+                ),
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: const Icon(
+                    Icons.delete_outline,
+                    color: Colors.white70,
+                  ),
+                  title: const Text(
+                    'Clear diagnostic log',
+                    style: TextStyle(color: Colors.white),
+                  ),
+                  onTap: _clearDiagnosticLog,
                 ),
               ],
             ),

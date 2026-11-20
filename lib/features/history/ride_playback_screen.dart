@@ -21,6 +21,7 @@ import 'widgets/playback_timeline.dart';
 import 'widgets/playback_video_area.dart';
 import 'widgets/ride_export_flow.dart';
 import 'widgets/ride_playback_body.dart';
+import '../../core/diagnostics/diagnostic_log.dart';
 
 /// Plays back a recorded ride: its video segments as one continuous timeline,
 /// with a telemetry overlay, a speed graph, a seekbar that marks missing
@@ -164,8 +165,15 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
           enabled: !_isLoading && !_rideReadFailed,
           // The State's context: the app bar (and this builder's context)
           // unmounts when the video goes fullscreen, the screen does not.
-          onSelected: (destination) =>
-              unawaited(runRideExportFlow(this.context, _ride, destination)),
+          // A section starts around the playhead (ride time).
+          onSelected: (destination) => unawaited(
+            runRideExportFlow(
+              this.context,
+              _ride,
+              destination,
+              playheadMs: _positionNotifier.value.position.inMilliseconds,
+            ),
+          ),
           itemBuilder: (_) => const [
             PopupMenuItem<RideExportDestination>(
               value: RideExportDestination.folder,
@@ -551,9 +559,11 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
       if (isTrailingSegment) {
         unreadableTrailingSegmentsCount++;
       }
-      debugPrint(
+      debugPrintError(
+        'playback',
         'Ride playback: skipped unreadable segment ${index + 1} '
-        '(${probe.error ?? 'unknown-error'})',
+            '(${probe.error ?? 'unknown-error'})',
+        level: DiagnosticLogLevel.warning,
       );
     }
     if (_isDisposing || !mounted) {
@@ -788,7 +798,10 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
         await controller.initialize();
         return controller;
       } catch (e) {
-        debugPrint('Ride playback: failed loading segment ($e)');
+        debugPrintError(
+          'playback',
+          'Ride playback: failed loading segment ($e)',
+        );
         await _stopAndDisposeController(controller);
         return null;
       }
@@ -944,9 +957,10 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
     }
     _erroredController = controller;
     final index = _activeSegmentIndex;
-    debugPrint(
+    debugPrintError(
+      'playback',
       'Ride playback: segment ${index + 1} failed during playback '
-      '(${controller.value.errorDescription})',
+          '(${controller.value.errorDescription})',
     );
     _markSegmentFailed(index);
 
@@ -1110,7 +1124,7 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
           await current.play();
         }
       } catch (e) {
-        debugPrint('Ride playback: seek failed ($e)');
+        debugPrintError('playback', 'Ride playback: seek failed ($e)');
       }
       return;
     }

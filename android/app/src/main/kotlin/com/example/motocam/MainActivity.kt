@@ -261,6 +261,7 @@ class MainActivity: FlutterActivity() {
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         RideSigner.register(flutterEngine.dartExecutor.binaryMessenger)
+        Diagnostics.register(this, flutterEngine.dartExecutor.binaryMessenger)
 
         if (legacyRecordingsAccess == null) {
             val access = LegacyRecordingsAccess(this)
@@ -818,6 +819,9 @@ class MainActivity: FlutterActivity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        // Before super.onCreate, which configures the Flutter engine: a crash
+        // from there on reaches the diagnostic log.
+        Diagnostics.installCrashHandler(this)
         super.onCreate(savedInstanceState)
         // Registered for the whole activity lifetime (not onStart/onStop) so a
         // Stop tapped in the notification while the screen is off or the app

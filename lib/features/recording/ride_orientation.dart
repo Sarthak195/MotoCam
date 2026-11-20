@@ -8,8 +8,9 @@
 import 'dart:async';
 import 'dart:math' as math;
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+
+import '../../core/diagnostics/diagnostic_log.dart';
 
 /// Build switch for landscape recording, off by default. Turn it on with
 /// `--dart-define=MOTOCAM_LANDSCAPE=true` (bench builds only, until the UI
@@ -263,7 +264,11 @@ class RideOrientationPinner {
       _subscription = _gravity().listen(
         _onSample,
         onError: (Object error) {
-          debugPrint('Orientation pin: gravity stream error: $error');
+          debugPrintError(
+            'recording',
+            'Orientation pin: gravity stream error: $error',
+            level: DiagnosticLogLevel.warning,
+          );
         },
       );
     } else if (!watch && _subscription != null) {
