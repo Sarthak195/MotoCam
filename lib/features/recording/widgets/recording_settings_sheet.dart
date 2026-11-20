@@ -222,6 +222,12 @@ class _RecordingSettingsSheetState extends State<RecordingSettingsSheet> {
             bottom: MediaQuery.of(context).viewInsets.bottom + 12,
           ),
           child: SingleChildScrollView(
+            // Each dropdown is keyed by its value so a programmatic change
+            // recreates it with the new initialValue. The keys carry a
+            // per-field prefix because these dropdowns are siblings: bare
+            // ValueKey<int> keys collide when two fields hold the same
+            // number (fps 24 and a 24 segment loop buffer), and a duplicate
+            // key here broke the sheet's element tree (red error screens).
             child: Column(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -237,7 +243,7 @@ class _RecordingSettingsSheetState extends State<RecordingSettingsSheet> {
                 const SizedBox(height: 16),
                 _buildSettingsLabel('Quality group'),
                 DropdownButtonFormField<QualityPresetTier>(
-                  key: ValueKey(selectedPresetTier),
+                  key: ValueKey('tier:$selectedPresetTier'),
                   initialValue: selectedPresetTier,
                   dropdownColor: const Color(0xFF1B1B1B),
                   decoration: _settingsInputDecoration(),
@@ -294,7 +300,7 @@ class _RecordingSettingsSheetState extends State<RecordingSettingsSheet> {
                 const SizedBox(height: 12),
                 _buildSettingsLabel('Recording quality preset'),
                 DropdownButtonFormField<String>(
-                  key: ValueKey(selectedQualityProfileId),
+                  key: ValueKey('profile:$selectedQualityProfileId'),
                   initialValue: selectedQualityProfileId,
                   dropdownColor: const Color(0xFF1B1B1B),
                   decoration: _settingsInputDecoration(),
@@ -356,7 +362,7 @@ class _RecordingSettingsSheetState extends State<RecordingSettingsSheet> {
                 if (cameraOptions.isNotEmpty) ...[
                   _buildSettingsLabel('Camera lens'),
                   DropdownButtonFormField<String>(
-                    key: ValueKey(selectedCameraName),
+                    key: ValueKey('camera:$selectedCameraName'),
                     initialValue:
                         cameraOptions.any(
                           (camera) => camera.name == selectedCameraName,
@@ -382,7 +388,7 @@ class _RecordingSettingsSheetState extends State<RecordingSettingsSheet> {
                 ],
                 _buildSettingsLabel('Recording resolution'),
                 DropdownButtonFormField<int>(
-                  key: ValueKey(selectedResolution),
+                  key: ValueKey('resolution:$selectedResolution'),
                   initialValue: selectedResolution,
                   dropdownColor: const Color(0xFF1B1B1B),
                   decoration: _settingsInputDecoration(),
@@ -445,7 +451,7 @@ class _RecordingSettingsSheetState extends State<RecordingSettingsSheet> {
                 const SizedBox(height: 12),
                 _buildSettingsLabel('Frame rate (FPS)'),
                 DropdownButtonFormField<int>(
-                  key: ValueKey(selectedFps),
+                  key: ValueKey('fps:$selectedFps'),
                   initialValue: selectedFps,
                   dropdownColor: const Color(0xFF1B1B1B),
                   decoration: _settingsInputDecoration(),
@@ -469,7 +475,7 @@ class _RecordingSettingsSheetState extends State<RecordingSettingsSheet> {
                 const SizedBox(height: 12),
                 _buildSettingsLabel('Video bitrate'),
                 DropdownButtonFormField<int>(
-                  key: ValueKey(selectedBitrateMbps),
+                  key: ValueKey('bitrate:$selectedBitrateMbps'),
                   initialValue: selectedBitrateMbps,
                   dropdownColor: const Color(0xFF1B1B1B),
                   decoration: _settingsInputDecoration(),
@@ -493,7 +499,7 @@ class _RecordingSettingsSheetState extends State<RecordingSettingsSheet> {
                 const SizedBox(height: 12),
                 _buildSettingsLabel('Segment length'),
                 DropdownButtonFormField<int>(
-                  key: ValueKey(segmentDurationSeconds),
+                  key: ValueKey('segment:$segmentDurationSeconds'),
                   initialValue: segmentDurationSeconds,
                   dropdownColor: const Color(0xFF1B1B1B),
                   decoration: _settingsInputDecoration(),
@@ -515,7 +521,7 @@ class _RecordingSettingsSheetState extends State<RecordingSettingsSheet> {
                 const SizedBox(height: 12),
                 _buildSettingsLabel('Loop buffer size'),
                 DropdownButtonFormField<int>(
-                  key: ValueKey(loopSegmentCount),
+                  key: ValueKey('loop:$loopSegmentCount'),
                   initialValue: loopSegmentCount,
                   dropdownColor: const Color(0xFF1B1B1B),
                   decoration: _settingsInputDecoration(),
@@ -535,7 +541,7 @@ class _RecordingSettingsSheetState extends State<RecordingSettingsSheet> {
                 const SizedBox(height: 12),
                 _buildSettingsLabel('Storage budget for all rides'),
                 DropdownButtonFormField<int>(
-                  key: ValueKey(recordingsStorageBudgetGb),
+                  key: ValueKey('budget:$recordingsStorageBudgetGb'),
                   initialValue: recordingsStorageBudgetGb,
                   dropdownColor: const Color(0xFF1B1B1B),
                   decoration: _settingsInputDecoration(),
@@ -565,7 +571,7 @@ class _RecordingSettingsSheetState extends State<RecordingSettingsSheet> {
                 const SizedBox(height: 12),
                 _buildSettingsLabel('Speed UI refresh'),
                 DropdownButtonFormField<int>(
-                  key: ValueKey(speedRefreshMs),
+                  key: ValueKey('refresh:$speedRefreshMs'),
                   initialValue: speedRefreshMs,
                   dropdownColor: const Color(0xFF1B1B1B),
                   decoration: _settingsInputDecoration(),
@@ -585,7 +591,7 @@ class _RecordingSettingsSheetState extends State<RecordingSettingsSheet> {
                 const SizedBox(height: 12),
                 _buildSettingsLabel('Incident sensitivity'),
                 DropdownButtonFormField<IncidentSensitivity>(
-                  key: ValueKey(incidentSensitivity),
+                  key: ValueKey('sensitivity:$incidentSensitivity'),
                   initialValue: incidentSensitivity,
                   dropdownColor: const Color(0xFF1B1B1B),
                   decoration: _settingsInputDecoration(),
