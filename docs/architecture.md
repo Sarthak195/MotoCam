@@ -182,7 +182,7 @@ The tests check the text and accent pairs against WCAG AA (4.5:1 for text) and t
 | `kResolutionChips` | Resolution chips on the recording screen | nothing yet |
 | `kHoldToStop` | Press and hold (1 s) to STOP; waits for the owner's decision | nothing yet (`HoldButton` exists) |
 
-The landscape recording flag belongs to the landscape engine branch and is deliberately not defined here. The flags marked "nothing yet" have no widget that reads them: the widgets for those slots do not exist, so the app shows no placeholder.
+The landscape recording flag, `kLandscapeRecording`, belongs to the landscape engine ([ride_orientation.dart](../lib/features/recording/ride_orientation.dart)) and is deliberately not defined here. The flags marked "nothing yet" have no widget that reads them: the widgets for those slots do not exist, so the app shows no placeholder.
 
 ## State management
 

@@ -7,7 +7,8 @@
 // feature behind them is built and approved.
 //
 // The landscape recording flag (kLandscapeRecording) belongs to the
-// landscape engine branch and is deliberately not defined here.
+// landscape engine, in lib/features/recording/ride_orientation.dart, and is
+// deliberately not defined here.
 
 /// The yellow "NOT WRITING" state band for a stalled recording.
 const bool kShowStalled = false;
