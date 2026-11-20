@@ -5,12 +5,19 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/foundation.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:provider/provider.dart';
+import 'core/diagnostics/diagnostics.dart';
 import 'core/providers/app_settings_provider.dart';
 import 'features/camera/providers/camera_provider.dart';
 import 'features/map/map_licence.dart';
 import 'features/telemetry/providers/telemetry_provider.dart';
 import 'features/recording/recording_screen.dart';
+
+// Flushes the diagnostic log when the app is paused; kept for the app's
+// lifetime.
+// ignore: unused_element
+AppLifecycleListener? _diagnosticsPauseListener;
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -23,32 +30,19 @@ Future<void> main() async {
     debugPrint = (String? message, {int? wrapWidth}) {};
   }
 
-  // Framework errors (build, layout, paint, gesture callbacks): keep
-  // Flutter's default reporting in debug and profile; in release, where
-  // that reporting goes through the silenced debugPrint, log the error and
-  // its stack directly. Like the default, release skips errors reported as
-  // silent (for example failed image loads, whose message can contain a
-  // file path or a map-tile URL).
-  FlutterError.onError = (FlutterErrorDetails details) {
-    if (kReleaseMode) {
-      if (details.silent) {
-        return;
-      }
-      debugPrintSynchronously('Flutter error: ${details.exceptionAsString()}');
-      debugPrintSynchronously('Stack trace: ${details.stack}');
-      return;
-    }
-    FlutterError.presentError(details);
-  };
-
-  // Uncaught asynchronous errors: log them in every build mode and keep the
-  // app running.
-  PlatformDispatcher.instance.onError = (Object error, StackTrace stack) {
-    debugPrintSynchronously('Uncaught error: $error');
-    debugPrintSynchronously('Stack trace: $stack');
-    return true;
-  };
-
+  // Errors (framework and uncaught asynchronous) go to the persistent
+  // diagnostic log (<filesDir>/diagnostics/app.log, shared from the
+  // recording settings sheet) and, as before, to the console: Flutter's
+  // default reporting in debug and profile, debugPrintSynchronously in
+  // release. Errors reported as silent are never logged; see
+  // installErrorHooks.
+  final diagnostics = DiagnosticLog(
+    resolveDirectory: getApplicationSupportDirectory,
+  );
+  DiagnosticLog.instance = diagnostics;
+  installErrorHooks(diagnostics);
+  _diagnosticsPauseListener = flushDiagnosticsOnPause(diagnostics);
+  unawaited(startDiagnosticSession(diagnostics, const DiagnosticsChannel()));
   // Android 16 ignores this lock on large screens (smallest width >= 600dp)
   // for apps targeting API 36 unless the manifest opts out.
   await SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
