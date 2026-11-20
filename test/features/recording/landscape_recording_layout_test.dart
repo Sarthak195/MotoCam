@@ -59,6 +59,9 @@ class _FakeCameraProvider extends CameraProvider {
   bool recording = false;
   bool segmentLocked = false;
   int? freeBytes;
+
+  /// The ride's capture orientation, as START would have locked it.
+  DeviceOrientation rideOrientation = DeviceOrientation.portraitUp;
   int stopCalls = 0;
   final List<String> incidents = [];
   final Completer<String?> _stopResult = Completer<String?>();
@@ -68,6 +71,9 @@ class _FakeCameraProvider extends CameraProvider {
 
   @override
   bool get isRecordingSegmentLocked => segmentLocked;
+
+  @override
+  DeviceOrientation get rideCaptureOrientation => rideOrientation;
 
   @override
   bool get isInitialized => true;
@@ -273,7 +279,11 @@ void main() {
       await holdLandscape(tester);
     }
     if (recording) {
+      // START takes the pinned orientation for the ride.
       camera
+        ..rideOrientation = pinLandscape
+            ? DeviceOrientation.landscapeLeft
+            : DeviceOrientation.portraitUp
         ..recording = true
         ..notifyListeners();
     }
@@ -465,6 +475,7 @@ void main() {
     final idlePreview = tester.element(preview);
 
     camera
+      ..rideOrientation = DeviceOrientation.landscapeLeft
       ..recording = true
       ..notifyListeners();
     await tester.pump();
@@ -582,4 +593,67 @@ void main() {
       semantics.dispose();
     });
   }
+
+  // The preview's aspect ratio, full or thumbnail.
+  double previewRatio(WidgetTester tester) => tester
+      .widget<AspectRatio>(
+        find
+            .ancestor(
+              of: find.byType(CameraPreview),
+              matching: find.byType(AspectRatio),
+            )
+            .first,
+      )
+      .aspectRatio;
+
+  testWidgets('the live thumbnail of a landscape ride takes the landscape '
+      'ratio in the 196 x 110 box of the board', (tester) async {
+    await pumpScreen(tester, recording: true);
+    telemetry.setSpeed(62);
+    await tester.pump();
+
+    expect(previewRatio(tester), closeTo(16 / 9, 0.01));
+    final box = find
+        .ancestor(of: find.byType(CameraPreview), matching: find.byType(Stack))
+        .first;
+    expect(tester.getSize(box), const Size(196, 110));
+    expect(tester.takeException(), isNull);
+
+    await disposeTree(tester);
+  });
+
+  testWidgets('a portrait ride with the switch on keeps the portrait ratio, '
+      'full and in the 120 x 68 thumbnail', (tester) async {
+    final camera = await pumpScreen(
+      tester,
+      size: const Size(390, 844),
+      pinLandscape: false,
+    );
+    expect(previewRatio(tester), closeTo(9 / 16, 0.01));
+
+    camera
+      ..recording = true
+      ..notifyListeners();
+    telemetry.setSpeed(62);
+    await tester.pump();
+    expect(previewRatio(tester), closeTo(9 / 16, 0.01));
+    final box = find
+        .ancestor(of: find.byType(CameraPreview), matching: find.byType(Stack))
+        .first;
+    expect(tester.getSize(box), const Size(120, 68));
+    expect(tester.takeException(), isNull);
+
+    await disposeTree(tester);
+  });
+
+  testWidgets('the ratio follows the capture, not the layout: pinned to '
+      'landscape in a window that has not turned yet, the idle camera '
+      'captures sideways and the preview shows it so', (tester) async {
+    await pumpScreen(tester, size: const Size(390, 844));
+    expect(rail, findsNothing);
+    expect(previewRatio(tester), closeTo(16 / 9, 0.01));
+    expect(tester.takeException(), isNull);
+
+    await disposeTree(tester);
+  });
 }

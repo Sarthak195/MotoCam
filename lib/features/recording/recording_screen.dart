@@ -1941,7 +1941,7 @@ class _RecordingScreenState extends State<RecordingScreen>
         // frame before the platform rotates keeps the portrait layout.
         final landscape =
             _pinnedToLandscape && constraints.maxWidth > constraints.maxHeight;
-        final preview = _buildPreview(camera: camera, landscape: landscape);
+        final preview = _buildPreview(camera: camera);
         return landscape
             ? _buildLandscapeLayout(
                 camera: camera,
@@ -1960,11 +1960,9 @@ class _RecordingScreenState extends State<RecordingScreen>
   }
 
   /// The camera preview: the full Ready preview, or the small live
-  /// thumbnail while recording.
-  Widget _buildPreview({
-    required CameraProvider camera,
-    required bool landscape,
-  }) {
+  /// thumbnail while recording. Its aspect ratio follows the capture
+  /// orientation (see [_captureIsLandscape]), never the layout.
+  Widget _buildPreview({required CameraProvider camera}) {
     final controller = camera.isInitialized ? camera.controller : null;
     return RecordingPreview(
       isBlackoutMode: _isBlackoutMode,
@@ -1984,7 +1982,7 @@ class _RecordingScreenState extends State<RecordingScreen>
         'camera-preview-${camera.resolutionPreset}-${camera.recordingFps}-${camera.activeCameraName}-${controller.hashCode}',
       ),
       thumbnail: camera.isRecording,
-      landscape: landscape,
+      landscape: _captureIsLandscape(camera),
       onRetry: _retryCameraSetup,
       onOpenSettings: () => unawaited(_openAppSettingsAndRetry()),
     );
@@ -2176,6 +2174,20 @@ class _RecordingScreenState extends State<RecordingScreen>
       ),
     );
   }
+
+  /// Landscape recording: whether the camera captures in landscape, so the
+  /// preview and the live thumbnail take the landscape aspect ratio. During
+  /// a ride that is the ride's capture orientation (taken at START);
+  /// otherwise the orientation the UI is pinned to, which the idle camera
+  /// locks its capture to. With the switch off both are portraitUp, so the
+  /// portrait preview is unchanged.
+  bool _captureIsLandscape(CameraProvider camera) =>
+      widget.landscapeRecording &&
+      isLandscapeOrientation(
+        camera.isRecording
+            ? camera.rideCaptureOrientation
+            : _orientationPinner.pinned,
+      );
 
   /// Landscape recording: whether the UI is pinned to landscape with the
   /// switch on (the landscape layout then replaces the portrait one once
