@@ -38,6 +38,7 @@ class RecordingViewState {
     required this.locationOff,
     required this.highIncidentSensitivity,
     required this.presetWarning,
+    this.settingsPending = false,
   });
 
   /// A recording is running.
@@ -82,6 +83,10 @@ class RecordingViewState {
   /// Whether the applied values are known (the camera is initialized and no
   /// saved setting waits for the next START).
   final bool showApplied;
+
+  /// Settings saved during a ride wait for the next START; the camera still
+  /// runs the old ones.
+  final bool settingsPending;
 
   /// Bitrate the rider asked for, in Mbps.
   final int requestedBitrateMbps;
@@ -189,6 +194,22 @@ class RecordingViewState {
 
   /// Applied profile, for example "1080p30".
   String get appliedProfileLabel => '${shownResolution}p$shownFps';
+
+  /// Caption over the chip's values: "APPLIED" only when the values are
+  /// the camera's, "NEXT START" for settings that wait for the next START,
+  /// "SET" for saved values the camera has not reported.
+  String get profileCaption => showApplied
+      ? 'APPLIED'
+      : settingsPending
+      ? 'NEXT START'
+      : 'SET';
+
+  /// Start of the chip's semantics label, matching [profileCaption].
+  String get profileSemanticsTitle => showApplied
+      ? 'Applied recording profile'
+      : settingsPending
+      ? 'Recording profile from next START'
+      : 'Set recording profile';
 
   /// Requested profile, for example "1080p30".
   String get requestedProfileLabel => '${requestedResolution}p$requestedFps';

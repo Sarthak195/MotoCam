@@ -53,11 +53,12 @@ class _Harness {
   bool closed = false;
 }
 
-Future<_Harness> openSettings(
+Future<_Harness> _openSettings(
   WidgetTester tester, {
   _FakeCamera? camera,
   List<int> fpsOptions = const [30],
   Set<ResolutionPreset> unsupported = const {},
+  bool settingsPending = false,
   Map<String, Object> prefs = const {},
   Size size = const Size(390, 844),
   double textScale = 1,
@@ -95,6 +96,7 @@ Future<_Harness> openSettings(
                     initialFpsOptions: fpsOptions,
                     initialCameraOptions: const [],
                     initialUnsupportedPresets: unsupported,
+                    settingsPending: settingsPending,
                   );
                   harness.closed = true;
                 },
@@ -151,7 +153,7 @@ void main() {
 
   group('SAVE result', () {
     testWidgets('unchanged settings come back as saved', (tester) async {
-      final harness = await openSettings(tester);
+      final harness = await _openSettings(tester);
       await save(tester);
       final result = harness.result!;
       expect(result.resolution, 1080);
@@ -171,7 +173,7 @@ void main() {
     testWidgets('choices on the main page and every sub-page reach SAVE', (
       tester,
     ) async {
-      final harness = await openSettings(tester, fpsOptions: [24, 30]);
+      final harness = await _openSettings(tester, fpsOptions: [24, 30]);
 
       await tapVisible(tester, find.text('720p'));
       await tapVisible(tester, find.text('12 Mbps'));
@@ -211,7 +213,7 @@ void main() {
     });
 
     testWidgets('Privacy and data shares the audio choice', (tester) async {
-      final harness = await openSettings(tester);
+      final harness = await _openSettings(tester);
       await tapVisible(tester, find.text('Privacy and data'));
       await tapVisible(tester, find.text('Record audio'));
       await back(tester);
@@ -221,7 +223,7 @@ void main() {
     });
 
     testWidgets('back without SAVE returns null', (tester) async {
-      final harness = await openSettings(tester);
+      final harness = await _openSettings(tester);
       await tapVisible(tester, find.text('720p'));
       await back(tester);
       expect(harness.closed, isTrue);
@@ -288,7 +290,7 @@ void main() {
     testWidgets('board values on the main page, saved values always shown', (
       tester,
     ) async {
-      await openSettings(
+      await _openSettings(
         tester,
         prefs: {'recording_resolution_p': 480, 'video_bitrate_mbps': 4},
       );
@@ -316,7 +318,7 @@ void main() {
 
     testWidgets('meets the Android tap target guideline', (tester) async {
       final handle = tester.ensureSemantics();
-      await openSettings(tester);
+      await _openSettings(tester);
       await expectLater(tester, meetsGuideline(androidTapTargetGuideline));
       handle.dispose();
     });
@@ -324,14 +326,14 @@ void main() {
     testWidgets('frame rate: fixed when the camera offers one rate', (
       tester,
     ) async {
-      await openSettings(tester);
+      await _openSettings(tester);
       expect(find.textContaining('Fixed at 30 fps'), findsOneWidget);
     });
 
     testWidgets('frame rate: no picker and no 60 fps on the main page', (
       tester,
     ) async {
-      await openSettings(tester, fpsOptions: [24, 30, 60]);
+      await _openSettings(tester, fpsOptions: [24, 30, 60]);
       expect(find.textContaining('Fixed at'), findsNothing);
       expect(find.textContaining('30 fps. More in Advanced'), findsOneWidget);
       expect(find.textContaining('60'), findsNothing);
@@ -340,7 +342,7 @@ void main() {
     testWidgets('reserved Controls and Backup rows are not in the tree', (
       tester,
     ) async {
-      await openSettings(tester);
+      await _openSettings(tester);
       expect(find.text('Controls'), findsNothing);
       expect(find.text('Backup'), findsNothing);
       for (final row in const [
@@ -358,7 +360,7 @@ void main() {
     testWidgets('a known unsupported resolution is struck and disabled', (
       tester,
     ) async {
-      final harness = await openSettings(
+      final harness = await _openSettings(
         tester,
         unsupported: {ResolutionPreset.ultraHigh},
       );
@@ -374,7 +376,7 @@ void main() {
     testWidgets('no applied values before the camera is initialized', (
       tester,
     ) async {
-      await openSettings(tester);
+      await _openSettings(tester);
       expect(find.textContaining('Applied'), findsNothing);
       expect(
         find.text('Recording settings apply to the next recording.'),
@@ -386,7 +388,7 @@ void main() {
       final camera = _FakeCamera()
         ..initialized = true
         ..preset = ResolutionPreset.high;
-      await openSettings(tester, camera: camera);
+      await _openSettings(tester, camera: camera);
       expect(find.text('Applied 720p. 1080p could not apply'), findsOneWidget);
       expect(find.textContaining('30 fps, applied'), findsOneWidget);
       expect(find.text('Applied 8 Mbps'), findsOneWidget);
@@ -403,7 +405,7 @@ void main() {
       final camera = _FakeCamera()
         ..initialized = true
         ..recording = true;
-      await openSettings(tester, camera: camera);
+      await _openSettings(tester, camera: camera);
       expect(
         find.text(
           'A ride is recording. Resolution, frame rate, bitrate, clip '
@@ -418,10 +420,32 @@ void main() {
       );
     });
 
+    testWidgets('settings saved during a ride apply from the next START', (
+      tester,
+    ) async {
+      // Stopped after a mid-ride save: the camera still runs the old values.
+      final camera = _FakeCamera()
+        ..initialized = true
+        ..mbps = 12
+        ..segmentSeconds = 120
+        ..audio = false;
+      await _openSettings(tester, camera: camera, settingsPending: true);
+      expect(find.textContaining('could not apply'), findsNothing);
+      expect(
+        find.text('Applied 2 min, 5 min from next recording'),
+        findsOneWidget,
+      );
+      expect(
+        find.text('Applied 12 Mbps, 8 Mbps from next recording'),
+        findsOneWidget,
+      );
+      expect(find.text('Applied off, on from next recording'), findsOneWidget);
+    });
+
     testWidgets('the storage row sums up budget and gallery copies', (
       tester,
     ) async {
-      await openSettings(
+      await _openSettings(
         tester,
         prefs: {'recordings_storage_budget_gb': 64, 'video_bitrate_mbps': 16},
       );
@@ -443,7 +467,7 @@ void main() {
             ..initialized = true
             ..recording = true
             ..preset = ResolutionPreset.high;
-          await openSettings(
+          await _openSettings(
             tester,
             camera: camera,
             fpsOptions: [24, 30, 60],
@@ -494,17 +518,36 @@ void main() {
     });
 
     test('applied status text', () {
-      String status(String applied, String requested, String saved, bool rec) =>
-          appliedStatusText(
-            applied: applied,
-            requested: requested,
-            saved: saved,
-            recording: rec,
-          );
+      String status(
+        String applied,
+        String requested,
+        String saved,
+        bool rec, {
+        bool pending = false,
+      }) => appliedStatusText(
+        applied: applied,
+        requested: requested,
+        saved: saved,
+        recording: rec,
+        pending: pending,
+      );
       expect(status('2 min', '2 min', '2 min', false), 'Applied 2 min');
       expect(
-        status('2 min', '3 min', '3 min', true),
+        status('2 min', '3 min', '2 min', true),
         'Applied 2 min, 3 min from next recording',
+      );
+      expect(
+        status('2 min', '3 min', '3 min', true, pending: true),
+        'Applied 2 min, 3 min from next recording',
+      );
+      expect(
+        status('2 min', '3 min', '3 min', false, pending: true),
+        'Applied 2 min, 3 min from next recording',
+      );
+      // Negotiated down at START and nothing pending: START will not fix it.
+      expect(
+        status('1080p', '4K', '4K', true),
+        'Applied 1080p. 4K could not apply',
       );
       expect(
         status('2 min', '3 min', '2 min', false),

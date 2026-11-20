@@ -269,6 +269,24 @@ void main() {
       expect(find.text('Ready to record?'), findsOneWidget);
     });
 
+    testWidgets('the button node carries only its label, the caption is '
+        'its own node', (tester) async {
+      final handle = tester.ensureSemantics();
+      await openChecklist(
+        tester,
+        checks: evaluate(batteryLevelPercent: 80, batteryTemperatureC: 30),
+        onResult: (_) {},
+      );
+      // Android joins value, label and hint into the content description,
+      // and the phone harness matches "Start Recording" exactly.
+      final data = tester.getSemantics(startButton).getSemanticsData();
+      expect(data.label, 'Start Recording');
+      expect(data.hint, isEmpty);
+      expect(data.value, isEmpty);
+      expect(find.bySemanticsLabel('All checks OK.'), findsOneWidget);
+      handle.dispose();
+    });
+
     testWidgets('the caption names every blocking group', (tester) async {
       await openChecklist(
         tester,

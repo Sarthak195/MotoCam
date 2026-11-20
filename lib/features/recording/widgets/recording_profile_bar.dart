@@ -290,8 +290,10 @@ class StorageChip extends StatelessWidget {
   }
 }
 
-/// The applied recording profile: "1080p30 / 20 Mbps" under an APPLIED
-/// caption while idle, the two parts stacked while recording. A dashed
+/// The recording profile: "1080p30 / 20 Mbps" under a caption while idle,
+/// the two parts stacked while recording. The caption reads APPLIED only
+/// when the values are the camera's (otherwise NEXT START or SET, also shown
+/// while recording). A dashed
 /// amber outline marks a resolution or frame rate the camera chose instead
 /// of the one asked; the bitrate cannot differ today, so it has no "asked"
 /// variant.
@@ -308,7 +310,7 @@ class AppliedChip extends StatelessWidget {
     final bitrate = '${view.shownBitrateMbps} Mbps';
     final differs = view.profileDiffers;
     final label =
-        'Applied recording profile: $profile at ${view.shownBitrateMbps} '
+        '${view.profileSemanticsTitle}: $profile at ${view.shownBitrateMbps} '
         'megabits per second'
         '${differs ? '; ${view.requestedProfileLabel} was asked' : ''}';
     final strong = MotoFonts.condensedStyle(
@@ -319,12 +321,24 @@ class AppliedChip extends StatelessWidget {
       tabularFigures: true,
     );
 
+    final caption = Text(
+      view.profileCaption,
+      maxLines: 1,
+      style: MotoFonts.bodyStyle(
+        12,
+        letterSpacingEm: 0.08,
+        color: MotoColors.muted,
+        height: 1.1,
+      ),
+    );
+
     final Widget content;
     if (view.isRecording) {
       content = Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          if (!view.showApplied) caption,
           Text(profile, maxLines: 1, style: strong),
           Text(
             bitrate,
@@ -344,16 +358,7 @@ class AppliedChip extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            'APPLIED',
-            maxLines: 1,
-            style: MotoFonts.bodyStyle(
-              12,
-              letterSpacingEm: 0.08,
-              color: MotoColors.muted,
-              height: 1.1,
-            ),
-          ),
+          caption,
           Text.rich(
             TextSpan(
               text: '$profile ',

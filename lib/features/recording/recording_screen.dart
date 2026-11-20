@@ -1747,6 +1747,7 @@ class _RecordingScreenState extends State<RecordingScreen>
       highIncidentSensitivity:
           settings.incidentSensitivity == IncidentSensitivity.high,
       presetWarning: _presetWarning(camera: camera, settings: settings),
+      settingsPending: _hasPendingCameraSettings,
     );
   }
 
@@ -2246,6 +2247,7 @@ class _RecordingScreenState extends State<RecordingScreen>
       initialFpsOptions: initialFpsOptions,
       initialCameraOptions: initialCameraOptions,
       initialUnsupportedPresets: initialUnsupportedPresets,
+      settingsPending: _hasPendingCameraSettings,
     );
 
     if (result == null || !mounted) {

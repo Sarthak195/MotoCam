@@ -4,6 +4,7 @@
 // decides whether it opens, and the full-screen "Ready to record?" page.
 
 import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart';
 
 import '../../../core/theme/tokens.dart';
 import '../../../core/ui/kit.dart';
@@ -587,81 +588,101 @@ class _ChecklistStartButton extends StatelessWidget {
     final fill = enabled ? MotoColors.text : MotoColors.surfaceTop;
     final foreground = enabled ? MotoColors.bg : MotoColors.dim;
     final captionColor = enabled ? const Color(0xFF3A3E39) : MotoColors.text;
-    return Semantics(
-      container: true,
-      button: true,
-      enabled: enabled,
-      // The phone harness taps the checklist's "Start Recording".
-      label: 'Start Recording',
-      hint: caption,
-      onTap: enabled ? onPressed : null,
-      excludeSemantics: true,
-      child: SizedBox(
-        height: MotoSize.start,
-        child: Material(
-          color: fill,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(MotoRadii.xl),
-            side: enabled
-                ? BorderSide.none
-                : const BorderSide(
-                    color: MotoColors.hairlineStrong,
-                    width: 2,
-                    strokeAlign: BorderSide.strokeAlignInside,
-                  ),
+    // The phone harness matches the button's description exactly, and
+    // Android joins a hint into it, so the caption is its own node under
+    // the button, read after it.
+    return Stack(
+      fit: StackFit.passthrough,
+      children: [
+        Positioned.fill(
+          child: Semantics(
+            container: true,
+            sortKey: const OrdinalSortKey(1),
+            label: caption,
+            child: const SizedBox.expand(),
           ),
-          clipBehavior: Clip.antiAlias,
-          child: InkWell(
-            onTap: enabled ? onPressed : null,
-            highlightColor: foreground.withValues(alpha: 0.14),
-            splashColor: foreground.withValues(alpha: 0.18),
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Flexible(
-                    child: FittedBox(
-                      fit: BoxFit.scaleDown,
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          MotoGlyph(
-                            shape: enabled
-                                ? MotoGlyphShape.startMark
-                                : MotoGlyphShape.ring,
-                            size: 60,
+        ),
+        Semantics(
+          container: true,
+          button: true,
+          enabled: enabled,
+          sortKey: const OrdinalSortKey(0),
+          // The phone harness taps the checklist's "Start Recording".
+          label: 'Start Recording',
+          onTap: enabled ? onPressed : null,
+          excludeSemantics: true,
+          child: _visual(fill, foreground, captionColor),
+        ),
+      ],
+    );
+  }
+
+  Widget _visual(Color fill, Color foreground, Color captionColor) {
+    return SizedBox(
+      height: MotoSize.start,
+      child: Material(
+        color: fill,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(MotoRadii.xl),
+          side: enabled
+              ? BorderSide.none
+              : const BorderSide(
+                  color: MotoColors.hairlineStrong,
+                  width: 2,
+                  strokeAlign: BorderSide.strokeAlignInside,
+                ),
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: enabled ? onPressed : null,
+          highlightColor: foreground.withValues(alpha: 0.14),
+          splashColor: foreground.withValues(alpha: 0.18),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Flexible(
+                  child: FittedBox(
+                    fit: BoxFit.scaleDown,
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        MotoGlyph(
+                          shape: enabled
+                              ? MotoGlyphShape.startMark
+                              : MotoGlyphShape.ring,
+                          size: 60,
+                          color: foreground,
+                          accent: enabled ? MotoColors.recDot : foreground,
+                        ),
+                        const SizedBox(width: 18),
+                        Text(
+                          'START',
+                          style: MotoFonts.condensedStyle(
+                            72,
+                            letterSpacingEm: 0.04,
                             color: foreground,
-                            accent: enabled ? MotoColors.recDot : foreground,
+                            height: 1,
                           ),
-                          const SizedBox(width: 18),
-                          Text(
-                            'START',
-                            style: MotoFonts.condensedStyle(
-                              72,
-                              letterSpacingEm: 0.04,
-                              color: foreground,
-                              height: 1,
-                            ),
-                          ),
-                        ],
-                      ),
+                        ),
+                      ],
                     ),
                   ),
-                  const SizedBox(height: 6),
-                  Text(
-                    caption,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    textAlign: TextAlign.center,
-                    style: MotoFonts.bodyStyle(
-                      15,
-                      weight: FontWeight.w500,
-                      color: captionColor,
-                    ),
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  caption,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  textAlign: TextAlign.center,
+                  style: MotoFonts.bodyStyle(
+                    15,
+                    weight: FontWeight.w500,
+                    color: captionColor,
                   ),
-                ],
-              ),
+                ),
+              ],
             ),
           ),
         ),

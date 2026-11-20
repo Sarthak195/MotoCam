@@ -17,6 +17,7 @@ RecordingViewState _view({
   bool isPersistingRide = false,
   bool isPreparingCamera = false,
   bool showApplied = true,
+  bool settingsPending = false,
   int appliedResolution = 1080,
   int appliedFps = 30,
   int requestedResolution = 1080,
@@ -50,6 +51,7 @@ RecordingViewState _view({
     locationOff: false,
     highIncidentSensitivity: false,
     presetWarning: null,
+    settingsPending: settingsPending,
   );
 }
 
@@ -205,6 +207,30 @@ void main() {
       final pending = _view(appliedResolution: 720, showApplied: false);
       expect(pending.appliedProfileLabel, '1080p30');
       expect(pending.profileDiffers, isFalse);
+    });
+
+    test('the chip says APPLIED only for the camera values', () {
+      expect(_view().profileCaption, 'APPLIED');
+      expect(_view().profileSemanticsTitle, 'Applied recording profile');
+
+      // Saved during a ride: the requested values wait for the next START.
+      final pending = _view(
+        isRecording: true,
+        showApplied: false,
+        settingsPending: true,
+        requestedResolution: 2160,
+      );
+      expect(pending.appliedProfileLabel, '2160p30');
+      expect(pending.profileCaption, 'NEXT START');
+      expect(
+        pending.profileSemanticsTitle,
+        'Recording profile from next START',
+      );
+
+      // The camera has not reported (an init failure).
+      final unknown = _view(showApplied: false);
+      expect(unknown.profileCaption, 'SET');
+      expect(unknown.profileSemanticsTitle, 'Set recording profile');
     });
 
     test('the bitrate never shows an asked variant', () {

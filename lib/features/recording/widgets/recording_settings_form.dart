@@ -365,23 +365,27 @@ List<int> mainPageOptions(List<int> common, int selected) {
 ///
 /// [applied] is what the camera runs now, [requested] the form value and
 /// [saved] the saved value when the page opened. Equal values read
-/// "Applied X". Otherwise the text says when the request takes effect: from
-/// the next recording while [recording], when saved for an unsaved change,
-/// and "could not apply" for a saved value the camera did not take.
+/// "Applied X". An unsaved change applies from the next recording while
+/// [recording], otherwise when saved. A saved value applies from the next
+/// recording while [pending] (saved during a ride, waiting for the next
+/// START); otherwise the camera did not take it and it "could not apply".
 String appliedStatusText({
   required String applied,
   required String requested,
   required String saved,
   required bool recording,
+  bool pending = false,
 }) {
   if (applied == requested) {
     return 'Applied $applied';
   }
-  if (recording) {
-    return 'Applied $applied, $requested from next recording';
-  }
   if (requested != saved) {
-    return 'Applied $applied, $requested when you save';
+    return recording
+        ? 'Applied $applied, $requested from next recording'
+        : 'Applied $applied, $requested when you save';
+  }
+  if (pending) {
+    return 'Applied $applied, $requested from next recording';
   }
   return 'Applied $applied. $requested could not apply';
 }

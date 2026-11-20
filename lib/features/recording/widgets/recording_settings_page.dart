@@ -40,6 +40,7 @@ Future<RecordingSettingsFormResult?> showRecordingSettingsPage(
   required List<int> initialFpsOptions,
   required List<CameraDescription> initialCameraOptions,
   required Set<ResolutionPreset> initialUnsupportedPresets,
+  bool settingsPending = false,
 }) {
   return Navigator.of(context).push<RecordingSettingsFormResult>(
     MaterialPageRoute<RecordingSettingsFormResult>(
@@ -47,6 +48,7 @@ Future<RecordingSettingsFormResult?> showRecordingSettingsPage(
         initialFpsOptions: initialFpsOptions,
         initialCameraOptions: initialCameraOptions,
         initialUnsupportedPresets: initialUnsupportedPresets,
+        settingsPending: settingsPending,
       ),
     ),
   );
@@ -64,6 +66,7 @@ class RecordingSettingsPage extends StatefulWidget {
     required this.initialFpsOptions,
     required this.initialCameraOptions,
     required this.initialUnsupportedPresets,
+    this.settingsPending = false,
   });
 
   /// Frame rates offered for the saved resolution.
@@ -74,6 +77,10 @@ class RecordingSettingsPage extends StatefulWidget {
 
   /// Resolution presets known to fail on this device; shown as unsupported.
   final Set<ResolutionPreset> initialUnsupportedPresets;
+
+  /// Settings saved during a ride still wait for the next START, so saved
+  /// values the camera does not run yet apply from the next recording.
+  final bool settingsPending;
 
   @override
   State<RecordingSettingsPage> createState() => _RecordingSettingsPageState();
@@ -198,6 +205,7 @@ class _RecordingSettingsPageState extends State<RecordingSettingsPage> {
             requested: requested,
             saved: saved,
             recording: cam.isRecording,
+            pending: widget.settingsPending,
           )
         : null;
 
