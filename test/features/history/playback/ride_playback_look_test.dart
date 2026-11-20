@@ -3,17 +3,22 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:motocam/core/theme/app_theme.dart';
+import 'package:motocam/core/theme/tokens.dart';
 import 'package:motocam/features/camera/providers/camera_provider.dart';
 import 'package:motocam/features/history/models/ride_record.dart';
 import 'package:motocam/features/history/services/ride_export.dart';
+import 'package:motocam/features/history/services/ride_integrity_text.dart';
 import 'package:motocam/features/history/widgets/playback_legend.dart';
 import 'package:motocam/features/history/widgets/playback_position.dart';
 import 'package:motocam/features/history/widgets/playback_ride_panel.dart';
+import 'package:motocam/features/history/widgets/playback_seekbar_track_shape.dart';
 import 'package:motocam/features/history/widgets/playback_timeline.dart';
 import 'package:motocam/features/history/widgets/ride_playback_body.dart';
 import 'package:motocam/features/telemetry/models/telemetry_data.dart';
 
+import '../../../core/ui/kit_harness.dart' show expectTextContrast;
 import '../../../support/load_fonts.dart';
+import '../widgets/ride_list_fixtures.dart';
 
 const Map<String, Size> _surfaces = {
   'portrait 390x844': Size(390, 844),
@@ -303,17 +308,25 @@ void main() {
       }
     });
 
-    testWidgets('the timeline gets every range, marker and clip edge', (
-      tester,
-    ) async {
-      await _pump(tester, const Size(390, 844));
-      final body = tester.widget<RidePlaybackBody>(
-        find.byType(RidePlaybackBody),
-      );
-      expect(identical(body.marks, _allMarks), isTrue);
-      final legend = tester.widget<PlaybackLegend>(find.byType(PlaybackLegend));
-      expect(identical(legend.marks, _allMarks), isTrue);
-    });
+    for (final entry in _surfaces.entries) {
+      testWidgets('the timeline draws every range, marker and clip edge at '
+          '${entry.key}', (tester) async {
+        await _pump(tester, entry.value);
+        final slider = tester.renderObject(find.byType(Slider));
+        expect(
+          slider,
+          paints
+            ..rect(color: noVideoColor.withValues(alpha: 0.86))
+            ..rect(color: missingFootageColor.withValues(alpha: 0.86))
+            ..rect(color: failedCheckColor.withValues(alpha: 0.86))
+            ..line(color: MotoColors.bg)
+            ..line(color: clipEdgeColor)
+            ..path(color: lockMarkerColor)
+            ..path(color: lockMarkerColor)
+            ..path(color: incidentMarkerColor),
+        );
+      });
+    }
   });
 
   group('ride actions', () {
@@ -415,6 +428,17 @@ void main() {
       expect(badge(hasTelemetry: false).kind, PlaybackIntegrityKind.videoOnly);
     });
 
+    test('a ride badge carries the shared integrity sentence', () {
+      final ride = listRide(mock: true);
+      final result = playbackIntegrityBadge(
+        ride: ride,
+        failedVideoCount: 0,
+        rideReadFailed: false,
+      );
+      expect(result.kind, PlaybackIntegrityKind.simulatedGps);
+      expect(result.detail, startsWith(rideIntegrityLine(ride)));
+    });
+
     test('a failed check always wins and says how many videos', () {
       final failed = badge(failed: 2, mock: true);
       expect(failed.kind, PlaybackIntegrityKind.checkFailed);
@@ -479,6 +503,28 @@ void main() {
       await pumpStrip(tester, showCheck: false, isChecking: false);
       expect(find.byType(OutlinedButton), findsNothing);
       expect(find.text('Signed on this phone'), findsOneWidget);
+    });
+  });
+
+  group('accessibility', () {
+    for (final entry in _surfaces.entries) {
+      testWidgets('tap targets and text contrast at ${entry.key}', (
+        tester,
+      ) async {
+        await _pump(tester, entry.value);
+        await expectLater(tester, meetsGuideline(androidTapTargetGuideline));
+        expectTextContrast(tester);
+      });
+    }
+
+    testWidgets('the play button reads as a button', (tester) async {
+      await _pump(tester, const Size(390, 844));
+      final handle = tester.ensureSemantics();
+      expect(
+        tester.getSemantics(find.byIcon(Icons.play_arrow_rounded)),
+        isSemantics(isButton: true, hasTapAction: true, tooltip: 'Play'),
+      );
+      handle.dispose();
     });
   });
 

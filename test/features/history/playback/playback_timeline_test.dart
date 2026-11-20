@@ -21,6 +21,38 @@ RideSegmentTimelineEntry _entry(String path, int startMs, int endMs) =>
     RideSegmentTimelineEntry(path: path, startMs: startMs, endMs: endMs);
 
 void main() {
+  group('clipEdgeOffsetsMs', () {
+    test('every clip start after the first, inside the ride, sorted', () {
+      expect(
+        clipEdgeOffsetsMs(
+          playlistOffsets: const [
+            Duration.zero,
+            Duration(seconds: 180),
+            Duration(seconds: 360),
+            Duration(seconds: 360),
+            Duration(seconds: 900),
+          ],
+          totalMs: 600000,
+        ),
+        [180000, 360000],
+      );
+    });
+
+    test('nothing for one clip or an empty ride', () {
+      expect(
+        clipEdgeOffsetsMs(playlistOffsets: const [Duration.zero], totalMs: 1),
+        isEmpty,
+      );
+      expect(
+        clipEdgeOffsetsMs(
+          playlistOffsets: const [Duration.zero, Duration(seconds: 5)],
+          totalMs: 0,
+        ),
+        isEmpty,
+      );
+    });
+  });
+
   group('orderedDeclaredSegmentPaths', () {
     test('trims, de-duplicates and appends the video path once', () {
       expect(
