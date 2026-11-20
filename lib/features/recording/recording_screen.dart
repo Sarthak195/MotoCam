@@ -24,7 +24,9 @@ import 'recording_screen_logic.dart';
 import 'widgets/recording_settings_sheet.dart';
 import 'start_preflight_evaluator.dart';
 import 'widgets/start_preflight_sheet.dart';
+import '../../core/theme/tokens.dart';
 import 'widgets/recording_controls.dart';
+import 'widgets/recording_details_panel.dart';
 import 'widgets/recording_header.dart';
 import 'widgets/recording_preview.dart';
 import 'widgets/recording_profile_bar.dart';
@@ -86,6 +88,9 @@ class _RecordingScreenState extends State<RecordingScreen>
   final ValueNotifier<DeviceStatusSnapshot> _deviceStatus = ValueNotifier(
     DeviceStatusSnapshot.empty,
   );
+  // Free bytes for recordings, read with the device status every 15 s; null
+  // when unknown. Only the storage chip and the details panel listen.
+  final ValueNotifier<int?> _freeStorageBytes = ValueNotifier(null);
   Timer? _inAppNoticeTimer;
   Timer? _blackoutExitHoldTimer;
   bool _blackoutExitTriggered = false;
@@ -498,10 +503,26 @@ class _RecordingScreenState extends State<RecordingScreen>
 
   void _startDeviceStatusPolling() {
     unawaited(_refreshDeviceStatus());
+    unawaited(_refreshFreeStorage());
     _deviceStatusTimer?.cancel();
     _deviceStatusTimer = Timer.periodic(const Duration(seconds: 15), (_) {
       unawaited(_refreshDeviceStatus());
+      unawaited(_refreshFreeStorage());
     });
+  }
+
+  // Updates only the storage notifier, never the whole screen.
+  Future<void> _refreshFreeStorage() async {
+    if (!mounted) {
+      return;
+    }
+    final freeBytes = await context
+        .read<CameraProvider>()
+        .availableStorageBytes();
+    if (!mounted) {
+      return;
+    }
+    _freeStorageBytes.value = freeBytes;
   }
 
   Future<void> _refreshDeviceStatus() async {
@@ -1637,7 +1658,7 @@ class _RecordingScreenState extends State<RecordingScreen>
           child: _isInPipMode
               ? _buildPipRecordingView()
               : Scaffold(
-                  backgroundColor: Colors.black,
+                  backgroundColor: MotoColors.bg,
                   body: SafeArea(
                     child: Stack(
                       children: [
@@ -1801,56 +1822,213 @@ class _RecordingScreenState extends State<RecordingScreen>
     required RecordingViewState view,
   }) {
     final controller = camera.isInitialized ? camera.controller : null;
-    return Column(
+    final preview = RecordingPreview(
+      isBlackoutMode: _isBlackoutMode,
+      controller: controller,
+      mode: cameraPreviewMode(
+        cameraReady: false,
+        initState: camera.initState,
+        initAttempted: _cameraInitAttempted,
+        setupBusy:
+            _isBootstrapping ||
+            _isNavigatingHistory ||
+            camera.isInitializing ||
+            camera.isRecording,
+      ),
+      initFailure: camera.initFailure,
+      previewKey: ValueKey(
+        'camera-preview-${camera.resolutionPreset}-${camera.recordingFps}-${camera.activeCameraName}-${controller.hashCode}',
+      ),
+      thumbnail: camera.isRecording,
+      onRetry: _retryCameraSetup,
+      onOpenSettings: () => unawaited(_openAppSettingsAndRetry()),
+    );
+    final panel = RecordingDetailsPanel(
+      view: view,
+      deviceStatus: _deviceStatus,
+      freeStorageBytes: _freeStorageBytes,
+      onSettings: () => unawaited(_openSettingsSheet()),
+      onPop: () => unawaited(_handleBackPressWhileRecording()),
+    );
+    // One Stack slot for the preview in every state: the full Ready preview,
+    // or the small live thumbnail while recording. The slot keeps its
+    // element across START, STOP and parking, so the preview subtree is
+    // never rebuilt from scratch. While recording the speed fills the rest;
+    // parked, a smaller speed sits beside the thumbnail and the details
+    // panel takes the space under it.
+    Widget middle({required bool parkedPanel}) => Stack(
+      fit: StackFit.expand,
       children: [
-        RecordingHeader(
-          view: view,
-          onBlackout: () => _onBlackoutPressed(camera),
-          onSettings: () => unawaited(_openSettingsSheet()),
-        ),
-        RecordingProfileBar(view: view),
-        // Rides moving into private storage (idle only: a run pauses while
-        // recording).
-        if (!camera.isRecording)
-          RecordingsMigrationBanner(migration: camera.recordingsMigration),
-        Expanded(
-          child: RecordingPreview(
-            isBlackoutMode: _isBlackoutMode,
-            controller: controller,
-            mode: cameraPreviewMode(
-              cameraReady: false,
-              initState: camera.initState,
-              initAttempted: _cameraInitAttempted,
-              setupBusy:
-                  _isBootstrapping ||
-                  _isNavigatingHistory ||
-                  camera.isInitializing ||
-                  camera.isRecording,
+        if (camera.isRecording)
+          Positioned(
+            top: 0,
+            right: 0,
+            width: _thumbnailWidth,
+            height: _thumbnailHeight,
+            child: DecoratedBox(
+              position: DecorationPosition.foreground,
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: MotoColors.hairlineStrong),
+              ),
+              child: preview,
             ),
-            initFailure: camera.initFailure,
-            previewKey: ValueKey(
-              'camera-preview-${camera.resolutionPreset}-${camera.recordingFps}-${camera.activeCameraName}-${controller.hashCode}',
+          )
+        else
+          Positioned(
+            top: 0,
+            right: 0,
+            bottom: 0,
+            left: 0,
+            child: DecoratedBox(
+              position: DecorationPosition.foreground,
+              decoration: const BoxDecoration(),
+              child: preview,
             ),
-            isRecording: camera.isRecording,
-            isSegmentLocked: camera.isRecordingSegmentLocked,
-            onRetry: _retryCameraSetup,
-            onOpenSettings: () => unawaited(_openAppSettingsAndRetry()),
           ),
-        ),
-        RecordingStats(
-          timerStream: camera.timerStream,
-          elapsed: camera.elapsedTime,
-          deviceStatus: _deviceStatus,
-        ),
-        RecordingControls(
+        if (camera.isRecording && !parkedPanel)
+          const Positioned(
+            left: 0,
+            right: 0,
+            top: _thumbnailHeight + MotoSize.gap,
+            bottom: 0,
+            child: Align(
+              alignment: Alignment.bottomCenter,
+              child: RecordingSpeed(),
+            ),
+          ),
+        if (camera.isRecording && parkedPanel) ...[
+          const Positioned(
+            left: 0,
+            top: 0,
+            right: _thumbnailWidth + MotoSize.gap,
+            height: _thumbnailHeight,
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: RecordingSpeed(size: _thumbnailHeight),
+            ),
+          ),
+          Positioned(
+            left: 0,
+            right: 0,
+            top: _thumbnailHeight + MotoSize.gapWide,
+            bottom: 0,
+            child: SingleChildScrollView(child: panel),
+          ),
+        ],
+      ],
+    );
+    final header = RecordingHeader(
+      view: view,
+      timerStream: camera.timerStream,
+      elapsed: camera.elapsedTime,
+    );
+    final chips = RecordingProfileBar(
+      view: view,
+      deviceStatus: _deviceStatus,
+      freeStorageBytes: _freeStorageBytes,
+      onBlackout: () => _onBlackoutPressed(camera),
+    );
+    // Rides moving into private storage (idle only: a run pauses while
+    // recording).
+    final banner = camera.isRecording
+        ? null
+        : RecordingsMigrationBanner(migration: camera.recordingsMigration);
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        // The portrait layout needs about 640 dp of height. A shorter
+        // window (split screen, or landscape before its own layout exists)
+        // gets smaller thumb controls and scrolls.
+        final compact = constraints.maxHeight < _minPortraitHeight;
+        // Below the boards' 844 dp, START and LOCK give up height first, so
+        // the speed keeps its room on a shorter phone.
+        final bigTargetCut = compact
+            ? 0.0
+            : (_boardHeight - constraints.maxHeight).clamp(
+                0.0,
+                RecordingControls.maxBigTargetCut,
+              );
+        final controls = RecordingControls(
           view: view,
+          compact: compact,
+          bigTargetCut: bigTargetCut,
           onStart: () => _onStartPressed(camera),
           onStop: () => _onStopPressed(camera),
           onRides: () => unawaited(_openRideHistory(camera: camera)),
-          onPop: () => unawaited(_handleBackPressWhileRecording()),
+          onSettings: () => unawaited(_openSettingsSheet()),
           onLock: () => _onLockPressed(camera),
-        ),
-      ],
+        );
+        if (compact) {
+          return SingleChildScrollView(
+            padding: const EdgeInsets.all(MotoSize.gutter),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                header,
+                const SizedBox(height: MotoSize.gapWide),
+                chips,
+                ?banner,
+                const SizedBox(height: MotoSize.gapWide),
+                _ParkedGate(
+                  isRecording: camera.isRecording,
+                  builder: (showPanel) => showPanel
+                      ? Padding(
+                          padding: const EdgeInsets.only(
+                            bottom: MotoSize.gapWide,
+                          ),
+                          child: panel,
+                        )
+                      : const SizedBox.shrink(),
+                ),
+                SizedBox(
+                  height: _compactMiddleHeight,
+                  child: middle(parkedPanel: false),
+                ),
+                const SizedBox(height: MotoSize.gapWide),
+                controls,
+              ],
+            ),
+          );
+        }
+        return Padding(
+          padding: const EdgeInsets.all(MotoSize.gutter),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              header,
+              const SizedBox(height: MotoSize.gapWide),
+              chips,
+              ?banner,
+              const SizedBox(height: MotoSize.gapWide),
+              Expanded(
+                key: const ValueKey('recording-middle'),
+                child: _ParkedGate(
+                  isRecording: camera.isRecording,
+                  builder: (showPanel) => Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      // Idle, the panel sits above the Ready preview.
+                      if (showPanel && !camera.isRecording) ...[
+                        Flexible(child: SingleChildScrollView(child: panel)),
+                        const SizedBox(height: MotoSize.gapWide),
+                      ],
+                      Expanded(
+                        key: const ValueKey('recording-preview-slot'),
+                        child: middle(
+                          parkedPanel: showPanel && camera.isRecording,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(height: MotoSize.gapWide),
+              controls,
+            ],
+          ),
+        );
+      },
     );
   }
 
@@ -1867,16 +2045,16 @@ class _RecordingScreenState extends State<RecordingScreen>
             alignment: Alignment.center,
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
             decoration: BoxDecoration(
-              color: Colors.black.withValues(alpha: 0.35),
+              color: MotoColors.surfaceRaised.withValues(alpha: 0.94),
               borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: Colors.white.withValues(alpha: 0.12)),
+              border: Border.all(color: MotoColors.hairlineStrong),
             ),
             child: Text(
               _inAppNoticeText ?? '',
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: const TextStyle(
-                color: Colors.white,
+                color: MotoColors.text,
                 fontSize: 12,
                 fontWeight: FontWeight.w600,
               ),
@@ -1957,7 +2135,7 @@ class _RecordingScreenState extends State<RecordingScreen>
 
   Widget _buildPipRecordingView() {
     return Scaffold(
-      backgroundColor: Colors.black,
+      backgroundColor: MotoColors.bg,
       body: SafeArea(
         child: Center(
           child: Padding(
@@ -1975,8 +2153,8 @@ class _RecordingScreenState extends State<RecordingScreen>
                           camera.isRecording ? 'REC' : 'IDLE',
                           style: TextStyle(
                             color: camera.isRecording
-                                ? Colors.redAccent
-                                : Colors.white70,
+                                ? MotoColors.rec
+                                : MotoColors.dim,
                             fontSize: 11,
                             fontWeight: FontWeight.w700,
                             letterSpacing: 0.8,
@@ -1995,7 +2173,7 @@ class _RecordingScreenState extends State<RecordingScreen>
                         return Text(
                           text,
                           style: const TextStyle(
-                            color: Colors.white,
+                            color: MotoColors.text,
                             fontSize: 18,
                             fontWeight: FontWeight.w700,
                           ),
@@ -2006,7 +2184,7 @@ class _RecordingScreenState extends State<RecordingScreen>
                     const Text(
                       'Return to app for controls',
                       style: TextStyle(
-                        color: Colors.white54,
+                        color: MotoColors.dim,
                         fontSize: 10,
                         fontWeight: FontWeight.w500,
                       ),
@@ -2191,6 +2369,7 @@ class _RecordingScreenState extends State<RecordingScreen>
     unawaited(_pipModeSubscription?.cancel());
     _deviceStatusTimer?.cancel();
     _deviceStatus.dispose();
+    _freeStorageBytes.dispose();
     final resumeWaiter = _resumeWaiter;
     _resumeWaiter = null;
     if (resumeWaiter != null && !resumeWaiter.isCompleted) {
@@ -2243,10 +2422,41 @@ class _BlinkingRecDotState extends State<_BlinkingRecDot> {
         height: 8,
         margin: const EdgeInsets.only(right: 6),
         decoration: const BoxDecoration(
-          color: Colors.redAccent,
+          color: MotoColors.rec,
           shape: BoxShape.circle,
         ),
       ),
+    );
+  }
+}
+
+// The portrait layout's minimum height; a shorter window scrolls.
+const double _minPortraitHeight = 680;
+
+// The boards' screen height, at which START and LOCK have their full size.
+const double _boardHeight = 844;
+
+// The live thumbnail of a recording, as on the boards.
+const double _thumbnailWidth = 120;
+const double _thumbnailHeight = 68;
+
+// Height of the preview and speed area when the screen scrolls.
+const double _compactMiddleHeight = 220;
+
+/// Shows the details panel while parked: always while idle, and while
+/// recording only below [parkedSpeedKmh]. Its [Selector] rebuilds only when
+/// the rider stops or moves off, never on a speed tick.
+class _ParkedGate extends StatelessWidget {
+  const _ParkedGate({required this.isRecording, required this.builder});
+
+  final bool isRecording;
+  final Widget Function(bool showPanel) builder;
+
+  @override
+  Widget build(BuildContext context) {
+    return Selector<TelemetryProvider, bool>(
+      selector: (_, telemetry) => isParkedSpeed(telemetry.currentData.speed),
+      builder: (context, parked, _) => builder(!isRecording || parked),
     );
   }
 }

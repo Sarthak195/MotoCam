@@ -3,6 +3,7 @@
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 
+import '../../../core/theme/tokens.dart';
 import '../../camera/providers/camera_init_status.dart';
 import '../recording_screen_logic.dart';
 
@@ -20,8 +21,7 @@ class RecordingPreview extends StatelessWidget {
     required this.mode,
     required this.initFailure,
     required this.previewKey,
-    required this.isRecording,
-    required this.isSegmentLocked,
+    required this.thumbnail,
     required this.onRetry,
     required this.onOpenSettings,
   });
@@ -42,11 +42,9 @@ class RecordingPreview extends StatelessWidget {
   /// changes only with the resolution, frame rate, camera or controller.
   final Key previewKey;
 
-  /// A recording is running.
-  final bool isRecording;
-
-  /// The segment being recorded is locked.
-  final bool isSegmentLocked;
+  /// Drawn as the small live thumbnail of a recording (no caption, smaller
+  /// corners) instead of the large Ready preview.
+  final bool thumbnail;
 
   /// Retries the camera setup.
   final VoidCallback onRetry;
@@ -66,13 +64,13 @@ class RecordingPreview extends StatelessWidget {
         return _buildCameraUnavailable();
       }
       return const Center(
-        child: CircularProgressIndicator(color: Colors.white),
+        child: CircularProgressIndicator(color: MotoColors.dim),
       );
     }
 
     if (!controller.value.isInitialized) {
       return const Center(
-        child: CircularProgressIndicator(color: Colors.white),
+        child: CircularProgressIndicator(color: MotoColors.dim),
       );
     }
     final rawAspectRatio = controller.value.aspectRatio;
@@ -88,9 +86,9 @@ class RecordingPreview extends StatelessWidget {
       children: [
         Positioned.fill(
           child: ClipRRect(
-            borderRadius: BorderRadius.circular(10),
+            borderRadius: BorderRadius.circular(thumbnail ? 10 : MotoRadii.lg),
             child: ColoredBox(
-              color: Colors.black,
+              color: MotoColors.surface,
               child: Center(
                 child: AspectRatio(
                   aspectRatio: portraitAspectRatio,
@@ -100,48 +98,24 @@ class RecordingPreview extends StatelessWidget {
             ),
           ),
         ),
-        if (isRecording)
+        if (!thumbnail)
           Positioned(
-            top: 12,
             left: 12,
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-              decoration: BoxDecoration(
-                color: Colors.red,
-                borderRadius: BorderRadius.circular(20),
-              ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Container(
-                    width: 10,
-                    height: 10,
-                    decoration: const BoxDecoration(
-                      color: Colors.white,
-                      shape: BoxShape.circle,
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  const Text(
-                    'REC',
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                  if (isSegmentLocked) ...[
-                    const SizedBox(width: 10),
-                    const Icon(Icons.lock, color: Colors.white, size: 14),
-                    const SizedBox(width: 4),
-                    const Text(
-                      'LOCKED',
-                      style: TextStyle(
-                        color: Colors.white,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                  ],
-                ],
+            top: 12,
+            child: ExcludeSemantics(
+              child: Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 10,
+                  vertical: 4,
+                ),
+                decoration: BoxDecoration(
+                  color: MotoColors.bg,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Text(
+                  'Live view',
+                  style: MotoFonts.bodyStyle(13, color: MotoColors.dim),
+                ),
               ),
             ),
           ),
@@ -151,58 +125,55 @@ class RecordingPreview extends StatelessWidget {
 
   Widget _buildCameraUnavailable() {
     final panel = cameraInitPanelFor(initFailure);
-    return Center(
-      child: SingleChildScrollView(
-        padding: const EdgeInsets.all(24),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Icon(Icons.videocam_off, color: Colors.white54, size: 40),
-            const SizedBox(height: 12),
-            Text(
-              panel.title,
-              textAlign: TextAlign.center,
-              style: const TextStyle(
-                color: Colors.white,
-                fontSize: 16,
-                fontWeight: FontWeight.bold,
+    return ColoredBox(
+      color: MotoColors.surface,
+      child: Center(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(
+                Icons.videocam_off_outlined,
+                color: MotoColors.dim,
+                size: 40,
               ),
-            ),
-            const SizedBox(height: 6),
-            Text(
-              panel.message,
-              textAlign: TextAlign.center,
-              style: const TextStyle(color: Colors.white70, fontSize: 13),
-            ),
-            const SizedBox(height: 16),
-            Wrap(
-              alignment: WrapAlignment.center,
-              spacing: 12,
-              runSpacing: 8,
-              children: [
-                if (panel.showRetry)
-                  ElevatedButton(
-                    onPressed: onRetry,
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: recordingStartButtonColor,
-                      foregroundColor: recordingButtonLabelColor,
+              const SizedBox(height: MotoSize.gapWide),
+              Text(
+                panel.title,
+                textAlign: TextAlign.center,
+                style: MotoFonts.condensedStyle(
+                  24,
+                  weight: FontWeight.w600,
+                  color: MotoColors.text,
+                ),
+              ),
+              const SizedBox(height: 6),
+              Text(
+                panel.message,
+                textAlign: TextAlign.center,
+                style: MotoFonts.bodyStyle(15, color: MotoColors.dim),
+              ),
+              const SizedBox(height: 16),
+              Wrap(
+                alignment: WrapAlignment.center,
+                spacing: MotoSize.gapWide,
+                runSpacing: MotoSize.gap,
+                children: [
+                  if (panel.showRetry)
+                    FilledButton(
+                      onPressed: onRetry,
+                      child: const Text('Retry'),
                     ),
-                    child: const Text('Retry'),
-                  ),
-                if (panel.showOpenSettings)
-                  OutlinedButton(
-                    onPressed: onOpenSettings,
-                    style: OutlinedButton.styleFrom(
-                      foregroundColor: Colors.white,
-                      side: BorderSide(
-                        color: Colors.white.withValues(alpha: 0.4),
-                      ),
+                  if (panel.showOpenSettings)
+                    OutlinedButton(
+                      onPressed: onOpenSettings,
+                      child: const Text('Open Settings'),
                     ),
-                    child: const Text('Open Settings'),
-                  ),
-              ],
-            ),
-          ],
+                ],
+              ),
+            ],
+          ),
         ),
       ),
     );

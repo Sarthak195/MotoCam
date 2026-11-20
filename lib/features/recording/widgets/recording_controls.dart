@@ -2,10 +2,21 @@
 
 import 'package:flutter/material.dart';
 
-import '../recording_screen_logic.dart';
+import '../../../core/theme/tokens.dart';
+import '../../../core/ui/thumb_button.dart';
 import 'recording_view_state.dart';
 
-/// START or STOP, Rides (or Pop-out while recording) and LOCK.
+/// The thumb controls at the bottom of the recording screen.
+///
+/// Idle: Rides and Settings, then START. Recording: STOP (a single tap;
+/// press-and-hold is off with kHoldToStop) and the large LOCK, which turns
+/// into LOCKED while the clip being recorded is locked. The LOCK Undo
+/// (kLockUndo) and the lock tone (kLockTone) need features the app does not
+/// have, so STOP stays full width and nothing promises them.
+///
+/// Every control keeps the accessibility label the phone harness reads
+/// (START RECORDING, STOP RECORDING and its busy variants, HISTORY, LOCK,
+/// Settings) while its visible text follows the boards.
 class RecordingControls extends StatelessWidget {
   /// Creates the controls.
   const RecordingControls({
@@ -14,9 +25,14 @@ class RecordingControls extends StatelessWidget {
     required this.onStart,
     required this.onStop,
     required this.onRides,
-    required this.onPop,
+    required this.onSettings,
     required this.onLock,
+    this.compact = false,
+    this.bigTargetCut = 0,
   });
+
+  /// The most [bigTargetCut] takes off START (220 dp) and LOCK (240 dp).
+  static const double maxBigTargetCut = 90;
 
   /// What the screen shows.
   final RecordingViewState view;
@@ -30,133 +46,119 @@ class RecordingControls extends StatelessWidget {
   /// Opens the ride history.
   final VoidCallback onRides;
 
-  /// Leaves the recording screen into Picture-in-Picture.
-  final VoidCallback onPop;
+  /// Opens the recording settings.
+  final VoidCallback onSettings;
 
   /// Locks the current clips.
   final VoidCallback onLock;
 
+  /// Smaller START and LOCK for a short window (a landscape or split
+  /// screen before the landscape layouts exist).
+  final bool compact;
+
+  /// Height (dp, up to [maxBigTargetCut]) taken off START and LOCK on a
+  /// screen shorter than the boards, so the speed keeps its room.
+  final double bigTargetCut;
+
+  double get _cut => bigTargetCut.clamp(0, maxBigTargetCut);
+
   @override
   Widget build(BuildContext context) {
-    // While recording this button minimises into PiP instead of opening
-    // history, so it says so.
-    final historyLabel = view.isRecording ? 'MINIMISE' : 'HISTORY';
-    final historyIcon = view.isRecording
-        ? Icons.picture_in_picture_alt
-        : Icons.video_library_outlined;
-    final presetWarning = view.presetWarning;
+    // START and LOCK are far above any reading size already; a larger
+    // system text size would only clip them, so their words keep the board
+    // size on screen.
+    final unscale = 1 / MediaQuery.textScalerOf(context).scale(1).clamp(1, 3);
+    return view.isRecording ? _buildLive(unscale) : _buildReady(unscale);
+  }
 
-    return Container(
-      padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              ElevatedButton(
-                onPressed: view.isMainBusy
-                    ? null
-                    : (view.isRecording ? onStop : onStart),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: view.isRecording
-                      ? recordingStopButtonColor
-                      : recordingStartButtonColor,
-                  foregroundColor: recordingButtonLabelColor,
-                  disabledBackgroundColor: Colors.grey.shade800,
-                  disabledForegroundColor: Colors.white70,
-                  minimumSize: const Size(double.infinity, 52),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                ),
-                child: Text(
-                  view.mainControlLabel,
-                  style: const TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
+  /// Short visible text of a busy START or STOP; the accessibility label
+  /// keeps the full wording.
+  String? get _busyWord {
+    if (view.isApplyingSettings) {
+      return 'APPLYING';
+    }
+    if (view.isSaving) {
+      return 'SAVING';
+    }
+    if (view.isStarting) {
+      return 'STARTING';
+    }
+    if (view.isPreparingCamera) {
+      return 'PREPARING';
+    }
+    return null;
+  }
+
+  Widget _buildReady(double unscale) {
+    final busyWord = _busyWord;
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Row(
+          children: [
+            Expanded(
+              child: ThumbButton(
+                variant: ThumbButtonVariant.secondary,
+                label: 'Rides',
+                semanticsLabel: 'HISTORY',
+                icon: Icons.format_list_bulleted_rounded,
+                height: compact ? 56 : 76,
+                onPressed: view.secondaryEnabled ? onRides : null,
               ),
-              if (view.isApplyingSettings)
-                const Padding(
-                  padding: EdgeInsets.only(top: 8),
-                  child: Text(
-                    'Applying settings... camera controls are temporarily locked.',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(
-                      color: Colors.white70,
-                      fontSize: 12,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ),
-              if (presetWarning != null)
-                Padding(
-                  padding: const EdgeInsets.only(top: 8),
-                  child: Text(
-                    presetWarning,
-                    textAlign: TextAlign.center,
-                    style: const TextStyle(
-                      color: Colors.orange,
-                      fontSize: 12,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ),
-            ],
-          ),
-          const SizedBox(height: 8),
-          Row(
-            children: [
-              Expanded(
-                child: OutlinedButton.icon(
-                  onPressed: view.secondaryEnabled
-                      ? (view.isRecording ? onPop : onRides)
-                      : null,
-                  icon: Icon(historyIcon, color: Colors.blue),
-                  label: Text(
-                    historyLabel,
-                    style: const TextStyle(fontSize: 14, color: Colors.blue),
-                  ),
-                  style: OutlinedButton.styleFrom(
-                    minimumSize: const Size.fromHeight(44),
-                    side: const BorderSide(color: Colors.blue),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                  ),
-                ),
+            ),
+            const SizedBox(width: MotoSize.gap),
+            Expanded(
+              child: ThumbButton(
+                variant: ThumbButtonVariant.secondary,
+                label: 'Settings',
+                semanticsLabel: 'Settings',
+                icon: Icons.tune_rounded,
+                height: compact ? 56 : 76,
+                onPressed: view.settingsEnabled ? onSettings : null,
               ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: OutlinedButton.icon(
-                  onPressed: view.lockEnabled ? onLock : null,
-                  icon: const Icon(
-                    Icons.warning_amber_rounded,
-                    color: Colors.orange,
-                  ),
-                  label: const Text(
-                    'LOCK',
-                    style: TextStyle(fontSize: 14, color: Colors.orange),
-                  ),
-                  style: OutlinedButton.styleFrom(
-                    minimumSize: const Size.fromHeight(44),
-                    side: BorderSide(
-                      color: view.isRecording
-                          ? Colors.orange
-                          : Colors.orange.withValues(alpha: 0.3),
-                    ),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ],
-      ),
+            ),
+          ],
+        ),
+        const SizedBox(height: MotoSize.gapWide),
+        ThumbButton(
+          variant: ThumbButtonVariant.start,
+          label: busyWord ?? 'START',
+          labelSize:
+              (busyWord == null ? (compact ? 56 : 84) : (compact ? 40 : 56)) *
+              unscale,
+          semanticsLabel: view.mainControlLabel,
+          height: compact ? 112 : 220 - _cut,
+          onPressed: view.isMainBusy ? null : onStart,
+        ),
+      ],
+    );
+  }
+
+  Widget _buildLive(double unscale) {
+    final locked = view.isSegmentLocked;
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        ThumbButton(
+          variant: ThumbButtonVariant.stop,
+          label: _busyWord ?? 'STOP',
+          semanticsLabel: view.mainControlLabel,
+          height: compact ? 56 : 72,
+          onPressed: view.isMainBusy ? null : onStop,
+        ),
+        const SizedBox(height: MotoSize.gapWide),
+        ThumbButton(
+          variant: locked ? ThumbButtonVariant.locked : ThumbButtonVariant.lock,
+          label: locked ? 'LOCKED' : 'LOCK',
+          labelSize: (compact ? 56 : (locked ? 72 : 96)) * unscale,
+          semanticsLabel: 'LOCK',
+          semanticsHint: locked ? 'The current clips are locked' : null,
+          height: compact ? 112 : 240 - _cut,
+          onPressed: view.lockEnabled ? onLock : null,
+        ),
+      ],
     );
   }
 }

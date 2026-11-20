@@ -6,6 +6,8 @@
 
 import 'package:flutter/foundation.dart';
 
+import '../../../core/ui/state_band.dart';
+
 /// What the recording screen shows, taken once per build.
 @immutable
 class RecordingViewState {
@@ -153,14 +155,51 @@ class RecordingViewState {
   /// LOCK can be used.
   bool get lockEnabled => isRecording && !isStopping;
 
-  /// Resolution label, with the request when the camera applied another.
-  String get resolutionLabel =>
-      showApplied && appliedResolution != requestedResolution
-      ? '${appliedResolution}p (set ${requestedResolution}p)'
-      : '${requestedResolution}p';
+  /// The state the band at the top names.
+  BandState get bandState {
+    if (isSaving) {
+      return BandState.saving;
+    }
+    if (isRecording) {
+      return BandState.recording;
+    }
+    if (isStarting) {
+      return BandState.starting;
+    }
+    return BandState.ready;
+  }
 
-  /// Frame rate label, with the request when the camera applied another.
-  String get fpsLabel => showApplied && appliedFps != requestedFps
-      ? '$appliedFps FPS (set $requestedFps)'
-      : '$requestedFps FPS';
+  /// Resolution the chip shows: the applied one when known.
+  int get shownResolution =>
+      showApplied ? appliedResolution : requestedResolution;
+
+  /// Frame rate the chip shows: the applied one when known.
+  int get shownFps => showApplied ? appliedFps : requestedFps;
+
+  /// Bitrate the chip and the storage estimate use: the applied one when
+  /// known. It always equals the request today, so the chip never shows an
+  /// "asked" bitrate.
+  int get shownBitrateMbps =>
+      showApplied ? appliedBitrateMbps : requestedBitrateMbps;
+
+  /// The camera applied another resolution or frame rate than was asked.
+  bool get profileDiffers =>
+      showApplied &&
+      (appliedResolution != requestedResolution || appliedFps != requestedFps);
+
+  /// Applied profile, for example "1080p30".
+  String get appliedProfileLabel => '${shownResolution}p$shownFps';
+
+  /// Requested profile, for example "1080p30".
+  String get requestedProfileLabel => '${requestedResolution}p$requestedFps';
+
+  /// The rest of the recording profile, for the details panel, for example
+  /// "Cam 0, audio on, 3 min x 5 loop, incident MEDIUM, speed 500 ms".
+  String get profileDetail => [
+    if (cameraName.isNotEmpty) 'Cam $cameraName',
+    audioEnabled ? 'audio on' : 'audio off',
+    '$segmentLabel x $loopSegmentCount loop',
+    'incident ${incidentSensitivityName.toUpperCase()}',
+    'speed $speedRefreshMs ms',
+  ].join(', ');
 }

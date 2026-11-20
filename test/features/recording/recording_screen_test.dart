@@ -14,9 +14,14 @@ import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:motocam/core/providers/app_settings_provider.dart';
+import 'package:motocam/core/theme/app_theme.dart';
+import 'package:motocam/core/ui/big_numeral.dart';
 import 'package:motocam/features/camera/providers/camera_provider.dart';
 import 'package:motocam/features/recording/recording_screen.dart';
+import 'package:motocam/features/telemetry/models/telemetry_data.dart';
 import 'package:motocam/features/telemetry/providers/telemetry_provider.dart';
+
+import '../../support/load_fonts.dart';
 
 const _permissionChannel = MethodChannel(
   'flutter.baseflow.com/permissions/methods',
@@ -83,6 +88,12 @@ class _FakeCameraProvider extends CameraProvider {
   @override
   bool get isInitialized => true;
 
+  /// What the storage poll reads.
+  int? freeBytes;
+
+  @override
+  Future<int?> availableStorageBytes() async => freeBytes;
+
   @override
   CameraController? get controller => _fakeController;
 
@@ -123,6 +134,28 @@ class _FakeCameraProvider extends CameraProvider {
   }
 }
 
+/// A telemetry provider whose speed the test sets.
+class _FakeTelemetryProvider extends TelemetryProvider {
+  double _speed = 0;
+
+  void setSpeed(double kmh) {
+    _speed = kmh;
+    notifyListeners();
+  }
+
+  @override
+  TelemetryData get currentData => TelemetryData(
+    latitude: 0,
+    longitude: 0,
+    speed: _speed,
+    bearing: 0,
+    accelerationG: 0,
+    elapsedMs: 0,
+    distanceKm: 0,
+    timestamp: DateTime(2026, 11, 20),
+  );
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
@@ -132,10 +165,14 @@ void main() {
   // its first step).
   final permissionCalls = <String>[];
   var holdPermissions = false;
+  // What the 15 s device status poll returns.
+  var deviceStatus = <String, Object?>{'batteryLevelPercent': 80};
+  late _FakeTelemetryProvider telemetry;
 
   setUp(() {
     permissionCalls.clear();
     holdPermissions = false;
+    deviceStatus = {'batteryLevelPercent': 80};
     SharedPreferences.setMockInitialValues({
       'recording_resolution_p': 720,
       'recording_fps': 30,
@@ -162,7 +199,7 @@ void main() {
           case 'isIgnoringBatteryOptimizations':
             return true;
           case 'getBatteryStatus':
-            return {'batteryLevelPercent': 80};
+            return deviceStatus;
           case 'isLocationServiceEnabled':
             return true;
           case 'checkPermission':
@@ -200,18 +237,38 @@ void main() {
   Future<_FakeCameraProvider> pumpScreen(
     WidgetTester tester, {
     bool recording = false,
+    Size size = const Size(390, 844),
+    double textScale = 1,
+    int? freeBytes,
+    bool segmentLocked = false,
   }) async {
+    // A phone screen in portrait, at device pixel ratio 1.
+    tester.view
+      ..physicalSize = size
+      ..devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
     final settings = AppSettingsProvider();
     await tester.runAsync(settings.load);
-    final camera = _FakeCameraProvider(controller, recording: recording);
+    final camera = _FakeCameraProvider(controller, recording: recording)
+      ..freeBytes = freeBytes
+      ..segmentLocked = segmentLocked;
+    telemetry = _FakeTelemetryProvider();
     await tester.pumpWidget(
       MultiProvider(
         providers: [
           ChangeNotifierProvider<AppSettingsProvider>.value(value: settings),
           ChangeNotifierProvider<CameraProvider>.value(value: camera),
-          ChangeNotifierProvider(create: (_) => TelemetryProvider()),
+          // Created here so the provider disposes it (and its timers).
+          ChangeNotifierProvider<TelemetryProvider>(create: (_) => telemetry),
         ],
-        child: const MaterialApp(home: RecordingScreen()),
+        child: MaterialApp(
+          theme: buildAppTheme(),
+          home: MediaQuery.withClampedTextScaling(
+            minScaleFactor: textScale,
+            maxScaleFactor: textScale,
+            child: const RecordingScreen(),
+          ),
+        ),
       ),
     );
     await tester.pump(const Duration(milliseconds: 100));
@@ -439,5 +496,245 @@ void main() {
 
     await disposeTree(tester);
     semantics.dispose();
+  });
+
+  group('redesign A', () {
+    testWidgets('Ready: READY band, Rides, Settings and START with the '
+        'harness labels; no Dark, Pop-out or recording controls', (
+      tester,
+    ) async {
+      final semantics = tester.ensureSemantics();
+      await pumpScreen(tester);
+
+      expect(find.text('READY'), findsOneWidget);
+      expect(find.text('START'), findsOneWidget);
+      expect(find.text('Rides'), findsOneWidget);
+      expect(find.text('Live view'), findsOneWidget);
+      expect(find.bySemanticsLabel('START RECORDING'), findsOneWidget);
+      expect(find.bySemanticsLabel('HISTORY'), findsOneWidget);
+      expect(find.bySemanticsLabel('Settings'), findsOneWidget);
+      // Idle Dark and Pop-out do not exist.
+      expect(find.byTooltip('Enter blackout'), findsNothing);
+      expect(find.bySemanticsLabel('Enter blackout'), findsNothing);
+      expect(find.bySemanticsLabel('Pop-out'), findsNothing);
+      expect(find.text('STOP'), findsNothing);
+      expect(find.bySemanticsLabel('LOCK'), findsNothing);
+
+      await disposeTree(tester);
+      semantics.dispose();
+    });
+
+    testWidgets('Live: REC band, single-tap STOP, the big LOCK and Blackout; '
+        'reserved slots leave nothing behind', (tester) async {
+      final semantics = tester.ensureSemantics();
+      await pumpScreen(tester, recording: true);
+      telemetry.setSpeed(62);
+      await tester.pump();
+
+      expect(find.text('REC'), findsOneWidget);
+      expect(find.text('STOP'), findsOneWidget);
+      expect(find.text('LOCK'), findsOneWidget);
+      expect(find.text('62'), findsOneWidget);
+      expect(find.text('km/h'), findsOneWidget);
+      expect(find.bySemanticsLabel('STOP RECORDING'), findsOneWidget);
+      expect(find.bySemanticsLabel('LOCK'), findsOneWidget);
+      expect(find.bySemanticsLabel('Enter blackout'), findsOneWidget);
+      expect(find.byTooltip('Enter blackout'), findsOneWidget);
+      // kHoldToStop, kShowWriteAge, kShowStalled, kLockUndo, kLockTone and
+      // kOrientationChip are all off.
+      expect(find.textContaining('hold'), findsNothing);
+      expect(find.textContaining('Writing'), findsNothing);
+      expect(find.text('NOT WRITING'), findsNothing);
+      expect(find.text('Undo'), findsNothing);
+      expect(find.textContaining('Tone'), findsNothing);
+      expect(find.textContaining('Taken at START'), findsNothing);
+      expect(find.text('Rides'), findsNothing);
+
+      await disposeTree(tester);
+      semantics.dispose();
+    });
+
+    testWidgets('a locked clip shows the LOCKED band and button, still '
+        'labelled LOCK for the harness', (tester) async {
+      final semantics = tester.ensureSemantics();
+      final camera = await pumpScreen(
+        tester,
+        recording: true,
+        segmentLocked: true,
+      );
+
+      expect(find.text('LOCKED'), findsNWidgets(2));
+      expect(find.bySemanticsLabel('LOCK'), findsOneWidget);
+      expect(
+        find.bySemanticsLabel('Locked: the current clips are protected'),
+        findsOneWidget,
+      );
+
+      // A tap on LOCKED locks again, as a tap on LOCK does.
+      await tester.tap(find.bySemanticsLabel('LOCK'));
+      await tester.pump();
+      expect(camera.incidents, hasLength(1));
+
+      await disposeTree(tester);
+      semantics.dispose();
+    });
+
+    testWidgets('the details panel shows while parked (battery, distance, '
+        'Settings) and leaves when riding, without rebuilding the preview', (
+      tester,
+    ) async {
+      final semantics = tester.ensureSemantics();
+      final camera = await pumpScreen(tester);
+      await tester.pump(const Duration(seconds: 1));
+
+      // Idle: the panel is there and the preview fills the middle.
+      expect(find.text('80%'), findsOneWidget);
+      expect(find.text('Battery'), findsOneWidget);
+      expect(find.text('Distance'), findsOneWidget);
+      final idlePreview = tester.element(preview);
+
+      // START: the same preview element becomes the thumbnail.
+      camera
+        ..recording = true
+        ..notifyListeners();
+      await tester.pump();
+      expect(tester.element(preview), same(idlePreview));
+      expect(find.text('80%'), findsOneWidget);
+      expect(harnessLabel('Settings'), findsWidgets);
+      expect(find.bySemanticsLabel('Pop-out'), findsOneWidget);
+
+      telemetry.setSpeed(40);
+      await tester.pump();
+      expect(find.text('80%'), findsNothing);
+      expect(find.bySemanticsLabel('Settings'), findsNothing);
+      expect(find.text('40'), findsOneWidget);
+      expect(tester.element(preview), same(idlePreview));
+
+      telemetry.setSpeed(2);
+      await tester.pump();
+      expect(find.text('80%'), findsOneWidget);
+      expect(tester.element(preview), same(idlePreview));
+
+      await disposeTree(tester);
+      semantics.dispose();
+    });
+
+    testWidgets('the chips read the polled temperature and storage', (
+      tester,
+    ) async {
+      final semantics = tester.ensureSemantics();
+      deviceStatus = {
+        'batteryLevelPercent': 80,
+        'batteryTemperatureC': 44.0,
+        'thermalStatus': 'severe',
+      };
+      // 18 GB at the 20 Mbps floor (9 GB an hour).
+      await pumpScreen(tester, recording: true, freeBytes: 18000000000);
+      await tester.pump(const Duration(seconds: 1));
+
+      expect(find.bySemanticsLabel('Phone temperature hot'), findsOneWidget);
+      expect(
+        find.bySemanticsLabel(
+          RegExp(r'^Storage: up to 2\.0 hours left at 20 megabits'),
+        ),
+        findsOneWidget,
+      );
+      expect(find.text('up to'), findsOneWidget);
+      expect(find.textContaining('Phone hot.'), findsOneWidget);
+
+      await disposeTree(tester);
+      semantics.dispose();
+    });
+
+    testWidgets('storage under an hour warns in the chip and the panel', (
+      tester,
+    ) async {
+      final semantics = tester.ensureSemantics();
+      await pumpScreen(tester, freeBytes: 3600000000);
+      await tester.pump(const Duration(seconds: 1));
+
+      expect(
+        find.bySemanticsLabel(RegExp(r'^Storage low: up to 0\.4 hours')),
+        findsOneWidget,
+      );
+      expect(find.textContaining('Storage low.'), findsOneWidget);
+
+      await disposeTree(tester);
+      semantics.dispose();
+    });
+
+    for (final size in const [Size(390, 844), Size(844, 390)]) {
+      for (final textScale in const [1.0, 1.3]) {
+        for (final recording in const [false, true]) {
+          testWidgets(
+            'no overflow at ${size.width.toInt()}x${size.height.toInt()}, '
+            'text x$textScale, ${recording ? 'recording' : 'ready'}',
+            (tester) async {
+              await tester.runAsync(loadBundledFonts);
+              deviceStatus = {
+                'batteryLevelPercent': 80,
+                'batteryTemperatureC': 44.0,
+                'thermalStatus': 'severe',
+              };
+              await pumpScreen(
+                tester,
+                recording: recording,
+                size: size,
+                textScale: textScale,
+                freeBytes: 300000000,
+                segmentLocked: recording,
+              );
+              await tester.pump(const Duration(seconds: 1));
+              expect(tester.takeException(), isNull);
+
+              await disposeTree(tester);
+            },
+          );
+        }
+      }
+    }
+
+    // Shorter phones than the boards' 844 dp: START and LOCK give up
+    // height first, so a locked ride at speed keeps a readable speed.
+    for (final size in const [Size(360, 780), Size(360, 730), Size(360, 690)]) {
+      testWidgets('a ${size.width.toInt()}x${size.height.toInt()} screen keeps '
+          'the speed readable while locked and riding', (tester) async {
+        await tester.runAsync(loadBundledFonts);
+        await pumpScreen(
+          tester,
+          recording: true,
+          size: size,
+          segmentLocked: true,
+        );
+        telemetry.setSpeed(62);
+        await tester.pump();
+        expect(tester.takeException(), isNull);
+
+        final speed = find.bySemanticsLabel('Speed 62 kilometres per hour');
+        expect(speed, findsOneWidget);
+        // About 114 dp at 690 dp high, 178 dp at 780 dp high.
+        expect(
+          tester.getSize(find.byType(BigNumeral)).height,
+          greaterThanOrEqualTo(100),
+        );
+
+        await disposeTree(tester);
+      });
+    }
+
+    for (final recording in const [false, true]) {
+      testWidgets('tap targets meet the Android guideline '
+          '(${recording ? 'recording' : 'ready'})', (tester) async {
+        final semantics = tester.ensureSemantics();
+        await tester.runAsync(loadBundledFonts);
+        await pumpScreen(tester, recording: recording);
+        await tester.pump(const Duration(seconds: 1));
+
+        await expectLater(tester, meetsGuideline(androidTapTargetGuideline));
+
+        await disposeTree(tester);
+        semantics.dispose();
+      });
+    }
   });
 }

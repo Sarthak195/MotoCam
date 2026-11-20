@@ -672,3 +672,105 @@ class RideCheckpointTracker {
     _lockedCount = 0;
   }
 }
+
+/// How warm the phone is, as the thermal chip of the recording screen shows
+/// it.
+enum ThermalLevel {
+  /// Neither the thermal status nor the battery temperature is known.
+  unknown,
+
+  /// No throttling, or light throttling.
+  normal,
+
+  /// Moderate throttling.
+  warm,
+
+  /// Severe throttling or worse, or a battery at
+  /// [thermalHotBatteryCelsius] or above.
+  hot,
+}
+
+/// Battery temperature (degrees Celsius) from which the phone counts as hot
+/// when the platform's thermal status does not say so; the same threshold as
+/// the START checklist's temperature row.
+const double thermalHotBatteryCelsius = 43.0;
+
+/// Maps the platform thermal status (`DeviceStatusSnapshot.thermalStatus`:
+/// none, light, moderate, severe, critical, emergency, shutdown, or unknown)
+/// and the battery temperature to a [ThermalLevel].
+///
+/// The battery temperature is the fallback where the status is missing (API
+/// 28 and older) and a floor everywhere: a battery at
+/// [thermalHotBatteryCelsius] or above is hot whatever the status says.
+ThermalLevel thermalLevelFor({
+  String? thermalStatus,
+  double? batteryTemperatureC,
+}) {
+  final fromStatus = switch (thermalStatus?.trim().toLowerCase()) {
+    'none' || 'light' => ThermalLevel.normal,
+    'moderate' => ThermalLevel.warm,
+    'severe' || 'critical' || 'emergency' || 'shutdown' => ThermalLevel.hot,
+    _ => ThermalLevel.unknown,
+  };
+  if (batteryTemperatureC == null || !batteryTemperatureC.isFinite) {
+    return fromStatus;
+  }
+  if (batteryTemperatureC >= thermalHotBatteryCelsius) {
+    return ThermalLevel.hot;
+  }
+  return fromStatus == ThermalLevel.unknown ? ThermalLevel.normal : fromStatus;
+}
+
+/// Lowest video bitrate (Mbps) the storage estimate assumes; the same floor
+/// as the camera's free-space check before each segment, because the
+/// encoder's real rate can run above a low target.
+const int storageEstimateMinBitrateMbps = 20;
+
+/// Hours of video that [freeBytes] holds at [bitrateMbps] (never below
+/// [storageEstimateMinBitrateMbps]), or null when the free space is unknown.
+///
+/// It is an upper bound for the screen to label "up to": the loop deletes
+/// old clips, so a looping ride can run longer, but a ride with locked clips
+/// or the storage budget off can run shorter.
+double? storageHoursLeft({required int? freeBytes, required int bitrateMbps}) {
+  if (freeBytes == null || freeBytes < 0) {
+    return null;
+  }
+  final mbps = math.max(bitrateMbps, storageEstimateMinBitrateMbps);
+  final bytesPerHour = mbps * 1000 * 1000 / 8 * 3600;
+  return freeBytes / bytesPerHour;
+}
+
+/// Hours below which the storage chip warns.
+const double storageLowHours = 1.0;
+
+/// The storage chip's number: one decimal below 10 h ("6.2"), whole hours
+/// up to 99 ("14"), then "99+".
+String storageHoursLabel(double hours) {
+  if (hours < 10) {
+    // Floors, so the chip never promises more than the estimate.
+    return ((hours * 10).floor() / 10).toStringAsFixed(1);
+  }
+  if (hours < 100) {
+    return hours.floor().toString();
+  }
+  return '99+';
+}
+
+/// The state band's clock: `MM:SS`, or `H:MM:SS` from one hour on.
+String formatBandElapsed(Duration duration) {
+  final safe = duration.isNegative ? Duration.zero : duration;
+  final hours = safe.inHours;
+  final minutes = safe.inMinutes.remainder(60).toString().padLeft(2, '0');
+  final seconds = safe.inSeconds.remainder(60).toString().padLeft(2, '0');
+  return hours > 0 ? '$hours:$minutes:$seconds' : '$minutes:$seconds';
+}
+
+/// Speed (km/h) below which the rider counts as parked: the recording
+/// screen then shows its details panel (warnings, battery, distance and,
+/// while recording, Settings).
+const double parkedSpeedKmh = 5;
+
+/// Whether [speedKmh] counts as parked.
+bool isParkedSpeed(double speedKmh) =>
+    !speedKmh.isFinite || speedKmh < parkedSpeedKmh;
