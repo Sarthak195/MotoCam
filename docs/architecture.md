@@ -36,7 +36,7 @@ Current limitations of the recording pipeline:
 
 [recording-pipeline.md](recording-pipeline.md) describes each of them.
 
-The UI is locked to portrait and always dark, in one look called Instrument (Material 3 with an explicit colour scheme built from the app's own tokens, the Barlow fonts bundled in the app; see [Theme and component kit](#theme-and-component-kit)). There is no localization; `intl` is used only for `DateFormat` in the rides list.
+The UI is locked to portrait and always dark, in one look called Instrument (Material 3 with an explicit colour scheme built from the app's own tokens, the Barlow fonts bundled in the app; see [Theme and component kit](#theme-and-component-kit)). The lock is no longer absolute: a build switch, `kLandscapeRecording` (`--dart-define=MOTOCAM_LANDSCAPE=true`, off by default, bench builds only until the UI redesign ships landscape layouts), lets the recording screen pin the UI to the orientation the phone is held in while idle and record each ride in the orientation it was started in; see [recording-pipeline.md](recording-pipeline.md#camera-initialization). With the switch off nothing changes: UI and capture stay portraitUp. There is no localization; `intl` is used only for `DateFormat` in the rides list.
 
 There is no backend, account system, analytics or crash reporting. The only network traffic is the route map's OpenStreetMap tile requests (`MapSourceConfig.tileUrlTemplate`). The map is built only while it is expanded on the playback screen, and only after a one-time consent; the expanded state is remembered between rides. Recordings, telemetry and settings stay on the device.
 
@@ -46,7 +46,7 @@ There is no backend, account system, analytics or crash reporting. The only netw
 
 | File | Responsibility |
 |---|---|
-| [main.dart](../lib/main.dart) | Entry point: error hooks for every build mode, a no-op `debugPrint` in release builds, the portrait lock, the root `MultiProvider` and the `MaterialApp` (theme `buildAppTheme()`), whose home is `RecordingScreen` |
+| [main.dart](../lib/main.dart) | Entry point: error hooks for every build mode, a no-op `debugPrint` in release builds, the portrait lock (the starting pin; with the landscape switch on the recording screen re-pins it), the root `MultiProvider` and the `MaterialApp` (theme `buildAppTheme()`), whose home is `RecordingScreen` |
 | [core/theme/](../lib/core/theme/) | `tokens.dart` (`MotoColors`, `MotoRadii`, `MotoSize`, `MotoFonts` and the contrast helper), `app_theme.dart` (`motoColorScheme`, `motoTextTheme`, `buildAppTheme`) and `font_licence.dart` (`registerFontLicence`). See [Theme and component kit](#theme-and-component-kit) |
 | [core/ui/](../lib/core/ui/) | The component kit, imported through `kit.dart`: `StateBand`, `StatusChip`, `ThumbButton`, `HoldButton`, `InstrumentRow`, `SegmentedRow`, `BigNumeral`, `DashedOutline` and `MotoGlyph` |
 | [core/build_flags.dart](../lib/core/build_flags.dart) | The compile-time switches of the redesign's reserved slots, all `false`. See [Build flags](#build-flags) |
@@ -365,7 +365,7 @@ While recording, the Rides button is replaced by the details panel's Pop-out but
 |---|---|
 | `lib/` | All Dart source, split into `core/` and `features/` (see [Module map](#module-map)) |
 | `assets/fonts/` | The bundled Barlow and Barlow Condensed fonts (six TrueType files) and their licence `OFL.txt`, declared in [pubspec.yaml](../pubspec.yaml) |
-| `test/` | Unit and widget tests under `test/core/` and `test/features/`, grouped by `lib/` area, plus `widget_test.dart` (app smoke test), the ride-file fixtures in `test/fixtures/ride_files/` and shared test helpers in `test/support/` (a P-256 key standing in for the phone's signing key): 1045 tests in 64 files, counted in [development.md](development.md#testing) |
+| `test/` | Unit and widget tests under `test/core/` and `test/features/`, grouped by `lib/` area, plus `widget_test.dart` (app smoke test), the ride-file fixtures in `test/fixtures/ride_files/` and shared test helpers in `test/support/` (a P-256 key standing in for the phone's signing key): 1118 tests in 69 files, counted in [development.md](development.md#testing) |
 | `android/` | Gradle project (`app/build.gradle.kts`), manifest, Kotlin `MainActivity` and `BackgroundRecordingService`, resources (themes, the monochrome notification icon, backup and data-extraction rules), ProGuard rules and `key.properties.template` |
 | `scripts/` | `release-security-precheck.ps1` (used by CI) and `generate-keystore.ps1` |
 | `release-notes/` | Per-release notes, `v0.1.8.md` through `v0.1.13.md` |

@@ -55,6 +55,19 @@ class PipService {
     return instance._enterPipMode();
   }
 
+  /// Sets the shape of the PiP window, manual or automatic, to the ride's
+  /// capture orientation: 16:9 when [landscape], else 9:16 (the default).
+  /// Also reshapes a window already open. Errors (no handler) are ignored.
+  static Future<void> setAspectRatio({required bool landscape}) async {
+    try {
+      await _platform.invokeMethod<void>('setPipAspectRatio', {
+        'landscape': landscape,
+      });
+    } catch (_) {
+      // PiP keeps its last shape.
+    }
+  }
+
   Future<bool> _enterPipMode() async {
     try {
       final bool result = await _platform.invokeMethod('enterPipMode');

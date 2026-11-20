@@ -49,4 +49,28 @@ void main() {
   test('enterPipMode returns false when the platform has no handler', () async {
     expect(await PipService.enterPipMode(), isFalse);
   });
+
+  test('setAspectRatio sends the ride orientation to the activity', () async {
+    final calls = <MethodCall>[];
+    messenger().setMockMethodCallHandler(_channel, (call) async {
+      calls.add(call);
+      return null;
+    });
+
+    await PipService.setAspectRatio(landscape: true);
+    await PipService.setAspectRatio(landscape: false);
+
+    expect(calls.map((c) => c.method), [
+      'setPipAspectRatio',
+      'setPipAspectRatio',
+    ]);
+    expect(calls.map((c) => c.arguments), [
+      {'landscape': true},
+      {'landscape': false},
+    ]);
+  });
+
+  test('setAspectRatio ignores a missing handler', () async {
+    await PipService.setAspectRatio(landscape: true);
+  });
 }

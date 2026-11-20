@@ -22,6 +22,7 @@ class RecordingPreview extends StatelessWidget {
     required this.initFailure,
     required this.previewKey,
     required this.thumbnail,
+    this.landscape = false,
     required this.onRetry,
     required this.onOpenSettings,
   });
@@ -45,6 +46,10 @@ class RecordingPreview extends StatelessWidget {
   /// Drawn as the small live thumbnail of a recording (no caption, smaller
   /// corners) instead of the large Ready preview.
   final bool thumbnail;
+
+  /// Landscape recording bench layout only: the preview takes the
+  /// landscape aspect ratio instead of the portrait one.
+  final bool landscape;
 
   /// Retries the camera setup.
   final VoidCallback onRetry;
@@ -80,6 +85,9 @@ class RecordingPreview extends StatelessWidget {
     final portraitAspectRatio = safeAspectRatio > 1
         ? (1 / safeAspectRatio)
         : safeAspectRatio;
+    final previewAspectRatio = landscape
+        ? 1 / portraitAspectRatio
+        : portraitAspectRatio;
 
     return Stack(
       key: previewKey,
@@ -91,7 +99,7 @@ class RecordingPreview extends StatelessWidget {
               color: MotoColors.surface,
               child: Center(
                 child: AspectRatio(
-                  aspectRatio: portraitAspectRatio,
+                  aspectRatio: previewAspectRatio,
                   child: CameraPreview(controller),
                 ),
               ),

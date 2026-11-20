@@ -21,10 +21,12 @@ import '../telemetry/providers/telemetry_provider.dart';
 import '../history/rides_list_screen.dart';
 import '../history/widgets/recordings_migration_banner.dart';
 import 'recording_screen_logic.dart';
+import 'ride_orientation.dart';
 import 'widgets/recording_settings_sheet.dart';
 import 'start_preflight_evaluator.dart';
 import 'widgets/start_preflight_sheet.dart';
 import '../../core/theme/tokens.dart';
+import '../../core/ui/thumb_button.dart';
 import 'widgets/recording_controls.dart';
 import 'widgets/recording_details_panel.dart';
 import 'widgets/recording_header.dart';
@@ -40,8 +42,15 @@ import 'widgets/recording_view_state.dart';
 /// [TelemetryProvider], [AppSettingsProvider], the Android foreground
 /// service and Picture-in-Picture.
 class RecordingScreen extends StatefulWidget {
-  /// Creates the recording screen.
-  const RecordingScreen({super.key});
+  /// Creates the recording screen. [landscapeRecording] defaults to the
+  /// build switch [kLandscapeRecording]; tests turn it on directly.
+  const RecordingScreen({
+    super.key,
+    @visibleForTesting this.landscapeRecording = kLandscapeRecording,
+  });
+
+  /// Whether the landscape recording engine runs (see ride_orientation.dart).
+  final bool landscapeRecording;
 
   @override
   State<RecordingScreen> createState() => _RecordingScreenState();
@@ -105,6 +114,19 @@ class _RecordingScreenState extends State<RecordingScreen>
   // Segment and lock state of the last ride checkpoint.
   final RideCheckpointTracker _checkpointTracker = RideCheckpointTracker();
   bool _isOfferingBatteryExemption = false;
+  // Landscape recording: pins the UI to the orientation the phone is held
+  // in while this screen is idle and visible; frozen from the START tap to
+  // the end of the ride (see _syncOrientationPin). Inert with the switch
+  // off: no sensor subscription and no pin beyond main.dart's portrait one.
+  late final RideOrientationPinner _orientationPinner = RideOrientationPinner(
+    enabled: widget.landscapeRecording,
+    gravity: () =>
+        _telemetryProvider?.gravitySamples ??
+        const Stream<({double x, double y, double z, DateTime at})>.empty(),
+    onPin: _applyPinnedOrientation,
+  );
+  AppLifecycleState? _appLifecycleState =
+      WidgetsBinding.instance.lifecycleState;
 
   @override
   void initState() {
@@ -131,6 +153,46 @@ class _RecordingScreenState extends State<RecordingScreen>
       _cameraProvider = camera;
       _cameraProvider?.addListener(_onCameraChanged);
     }
+    _syncOrientationPin();
+  }
+
+  /// Landscape recording: classifies gravity (and so may re-pin the UI)
+  /// only while the screen is idle and visible: no ride starting, running
+  /// or stopping, in the foreground, not in PiP and not covered by Ride
+  /// History. Otherwise the pin stays where it is, which freezes a ride's
+  /// orientation from the START tap to the end of its stop.
+  void _syncOrientationPin() {
+    if (!widget.landscapeRecording) {
+      return;
+    }
+    final camera = _cameraProvider;
+    final rideBusy =
+        camera == null ||
+        camera.isRecording ||
+        camera.isStartingRecording ||
+        camera.isStoppingRecording ||
+        _isStartingRecording ||
+        _isStoppingRecording;
+    final visible =
+        _appLifecycleState == null ||
+        _appLifecycleState == AppLifecycleState.resumed;
+    _orientationPinner.setWatching(
+      mounted && !rideBusy && visible && !_isInPipMode && !_isNavigatingHistory,
+    );
+  }
+
+  /// Applies a new pinned orientation: the UI follows it and the idle
+  /// camera locks its capture to it, so the preview stays upright.
+  Future<void> _applyPinnedOrientation(DeviceOrientation orientation) async {
+    if (mounted) {
+      setState(() {});
+    }
+    try {
+      await SystemChrome.setPreferredOrientations([orientation]);
+    } catch (e) {
+      debugPrint('Pinning the UI to ${orientation.name} failed: $e');
+    }
+    await _cameraProvider?.setIdleCaptureOrientation(orientation);
   }
 
   /// Reacts to camera-provider state that needs more than a rebuild: a
@@ -142,6 +204,7 @@ class _RecordingScreenState extends State<RecordingScreen>
     if (!mounted || camera == null) {
       return;
     }
+    _syncOrientationPin();
 
     final error = camera.lastRecordingError;
     if (error != null &&
@@ -547,6 +610,8 @@ class _RecordingScreenState extends State<RecordingScreen>
     if (!mounted) {
       return;
     }
+    _appLifecycleState = state;
+    _syncOrientationPin();
 
     final camera = context.read<CameraProvider>();
     if (_isBlackoutMode && leavesBlackoutOnLifecycle(state)) {
@@ -684,6 +749,7 @@ class _RecordingScreenState extends State<RecordingScreen>
           setState(() {
             _isInPipMode = false;
           });
+          _syncOrientationPin();
         });
         return;
       }
@@ -691,6 +757,7 @@ class _RecordingScreenState extends State<RecordingScreen>
       setState(() {
         _isInPipMode = inPip;
       });
+      _syncOrientationPin();
     });
   }
 
@@ -747,6 +814,8 @@ class _RecordingScreenState extends State<RecordingScreen>
     setState(() {
       _isStartingRecording = true;
     });
+    // Landscape recording: the orientation pinned now is the ride's.
+    _syncOrientationPin();
     try {
       await _runStartRecordingFlow(
         camera: camera,
@@ -758,6 +827,9 @@ class _RecordingScreenState extends State<RecordingScreen>
       if (mounted) {
         setState(() {});
       }
+      // A refused START resumes the classifier; a started ride keeps it
+      // frozen until it stops.
+      _syncOrientationPin();
     }
   }
 
@@ -821,7 +893,18 @@ class _RecordingScreenState extends State<RecordingScreen>
     camera.currentRideSessionIdSource = () => telemetry.rideSessionId;
     // A ride export waits while the ride file is still being written.
     camera.isPersistingRideSource = () => telemetry.isPersistingRide;
-    final started = await camera.startRecording();
+    final rideOrientation = _orientationPinner.pinned;
+    if (widget.landscapeRecording) {
+      await PipService.setAspectRatio(
+        landscape: isLandscapeOrientation(rideOrientation),
+      );
+      if (!mounted) {
+        return;
+      }
+    }
+    final started = await camera.startRecording(
+      captureOrientation: rideOrientation,
+    );
     var backgroundProtected = true;
     if (started && camera.isRecording) {
       if (!mounted) {
@@ -933,6 +1016,10 @@ class _RecordingScreenState extends State<RecordingScreen>
       'appliedSegmentDurationSeconds': camera.segmentDurationSeconds,
       'appliedLoopSegmentCount': camera.maxRollingSegments,
       'appliedCameraName': camera.activeCameraName,
+      // Landscape recording only (missing means portraitUp): the capture
+      // orientation the ride was locked to at START.
+      if (widget.landscapeRecording)
+        'appliedCaptureOrientation': camera.rideCaptureOrientation.name,
     };
   }
 
@@ -1281,6 +1368,7 @@ class _RecordingScreenState extends State<RecordingScreen>
     setState(() {
       _isStoppingRecording = true;
     });
+    _syncOrientationPin();
     String? telemetryPath;
     var persistAttempted = false;
     Object? stopError;
@@ -1352,6 +1440,10 @@ class _RecordingScreenState extends State<RecordingScreen>
       if (mounted) {
         setState(() {});
       }
+      if (widget.landscapeRecording) {
+        unawaited(PipService.setAspectRatio(landscape: false));
+      }
+      _syncOrientationPin();
     }
 
     final saveFailed =
@@ -1626,7 +1718,10 @@ class _RecordingScreenState extends State<RecordingScreen>
     }
 
     _isNavigatingHistory = true;
+    _syncOrientationPin();
     try {
+      // Ride History is portrait-only until the redesign.
+      await _orientationPinner.pinNow(DeviceOrientation.portraitUp);
       await camera.releaseCameraIfIdle();
       if (!mounted) {
         return;
@@ -1646,6 +1741,7 @@ class _RecordingScreenState extends State<RecordingScreen>
       await _initializeCamera();
     } finally {
       _isNavigatingHistory = false;
+      _syncOrientationPin();
       // The preview hides the camera-unavailable state while history is
       // open; rebuild so a failed re-initialization shows Retry.
       if (mounted) {
@@ -1834,6 +1930,7 @@ class _RecordingScreenState extends State<RecordingScreen>
     required RecordingViewState view,
   }) {
     final controller = camera.isInitialized ? camera.controller : null;
+    final bench = _showsLandscapeBenchLayout;
     final preview = RecordingPreview(
       isBlackoutMode: _isBlackoutMode,
       controller: controller,
@@ -1851,10 +1948,18 @@ class _RecordingScreenState extends State<RecordingScreen>
       previewKey: ValueKey(
         'camera-preview-${camera.resolutionPreset}-${camera.recordingFps}-${camera.activeCameraName}-${controller.hashCode}',
       ),
-      thumbnail: camera.isRecording,
+      thumbnail: camera.isRecording && !bench,
+      landscape: bench,
       onRetry: _retryCameraSetup,
       onOpenSettings: () => unawaited(_openAppSettingsAndRetry()),
     );
+    if (bench) {
+      return _buildLandscapeBenchLayout(
+        camera: camera,
+        view: view,
+        preview: preview,
+      );
+    }
     final panel = RecordingDetailsPanel(
       view: view,
       deviceStatus: _deviceStatus,
@@ -2041,6 +2146,84 @@ class _RecordingScreenState extends State<RecordingScreen>
           ),
         );
       },
+    );
+  }
+
+  /// Landscape recording: whether the bench layout replaces the portrait
+  /// one (the switch on and the UI pinned to landscape).
+  bool get _showsLandscapeBenchLayout =>
+      widget.landscapeRecording &&
+      isLandscapeOrientation(_orientationPinner.pinned);
+
+  /// BENCH LAYOUT FOR THE LANDSCAPE ENGINE, to be replaced by the redesign's
+  /// landscape recording screen (R2). Shown only with the MOTOCAM_LANDSCAPE
+  /// build switch on (bench builds) and the UI pinned to landscape. Bare on
+  /// purpose: the camera preview, in the landscape ratio, fills the left and
+  /// a right-hand column holds START or STOP and LOCK, fed by the same view
+  /// state and handlers as the portrait controls. The header, chips,
+  /// details, Settings and Ride History are reachable in portrait only.
+  Widget _buildLandscapeBenchLayout({
+    required CameraProvider camera,
+    required RecordingViewState view,
+    required Widget preview,
+  }) {
+    // Visible word of START or STOP (STARTING, SAVING and so on while
+    // busy); the accessibility label keeps the full wording.
+    final mainWord = view.mainControlLabel.split(' ').first.replaceAll('.', '');
+    final locked = view.isSegmentLocked;
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Expanded(
+          child: Padding(padding: const EdgeInsets.all(8), child: preview),
+        ),
+        SizedBox(
+          width: 200,
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.fromLTRB(0, 12, 12, 12),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Text(
+                  'LANDSCAPE BENCH LAYOUT',
+                  textAlign: TextAlign.center,
+                  style: MotoFonts.bodyStyle(10, color: MotoColors.amber),
+                ),
+                const SizedBox(height: MotoSize.gap),
+                ThumbButton(
+                  variant: view.isRecording
+                      ? ThumbButtonVariant.stop
+                      : ThumbButtonVariant.start,
+                  label: mainWord,
+                  labelSize: 32,
+                  semanticsLabel: view.mainControlLabel,
+                  height: 96,
+                  onPressed: view.isMainBusy
+                      ? null
+                      : (view.isRecording
+                            ? () => _onStopPressed(camera)
+                            : () => _onStartPressed(camera)),
+                ),
+                const SizedBox(height: MotoSize.gapWide),
+                ThumbButton(
+                  variant: locked
+                      ? ThumbButtonVariant.locked
+                      : ThumbButtonVariant.lock,
+                  label: locked ? 'LOCKED' : 'LOCK',
+                  labelSize: 32,
+                  semanticsLabel: 'LOCK',
+                  semanticsHint: locked ? 'The current clips are locked' : null,
+                  height: 96,
+                  onPressed: view.lockEnabled
+                      ? () => _onLockPressed(camera)
+                      : null,
+                ),
+              ],
+            ),
+          ),
+        ),
+      ],
     );
   }
 
@@ -2366,6 +2549,9 @@ class _RecordingScreenState extends State<RecordingScreen>
     _telemetryProvider?.removeListener(_onTelemetryChanged);
     _cameraProvider?.removeListener(_onCameraChanged);
     WidgetsBinding.instance.removeObserver(this);
+    if (widget.landscapeRecording) {
+      _orientationPinner.dispose();
+    }
     _blackoutExitHoldTimer?.cancel();
     _inAppNoticeTimer?.cancel();
     unawaited(_recordingTimerSubscription?.cancel());

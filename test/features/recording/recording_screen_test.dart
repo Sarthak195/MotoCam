@@ -111,7 +111,9 @@ class _FakeCameraProvider extends CameraProvider {
   }) async {}
 
   @override
-  Future<bool> startRecording() async {
+  Future<bool> startRecording({
+    DeviceOrientation captureOrientation = DeviceOrientation.portraitUp,
+  }) async {
     startCalls++;
     return false;
   }

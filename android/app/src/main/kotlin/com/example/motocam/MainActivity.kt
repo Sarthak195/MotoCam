@@ -42,6 +42,10 @@ class MainActivity: FlutterActivity() {
     private fun internalBroadcastPermission(): String =
         "$packageName.permission.INTERNAL_BROADCAST"
     private var pipMethodChannel: MethodChannel? = null
+    // The PiP window's shape: the ride's capture orientation, set from Dart
+    // with setPipAspectRatio (16:9 for a landscape ride). Portrait 9:16
+    // until then, which is all a build without landscape recording uses.
+    private var pipAspectRatio = Rational(9, 16)
     private var legacyRecordingsAccess: LegacyRecordingsAccess? = null
     private var galleryCopies: GalleryCopies? = null
     private var rideExport: RideExport? = null
@@ -421,7 +425,7 @@ class MainActivity: FlutterActivity() {
                     "enterPipMode" -> {
                         if (isPipSupported()) {
                             val params = PictureInPictureParams.Builder()
-                                .setAspectRatio(Rational(9, 16))
+                                .setAspectRatio(pipAspectRatio)
                                 .build()
                             // false when the system refuses PiP, for example
                             // when the rider has turned PiP off for the app.
@@ -434,6 +438,23 @@ class MainActivity: FlutterActivity() {
                         } else {
                             result.success(false)
                         }
+                    }
+                    "setPipAspectRatio" -> {
+                        // {landscape: Boolean}: 16:9 for a landscape ride,
+                        // 9:16 otherwise. Also updates an open PiP window.
+                        val landscape = call.argument<Boolean>("landscape") == true
+                        pipAspectRatio = if (landscape) Rational(16, 9) else Rational(9, 16)
+                        if (isPipSupported() && isInPictureInPictureMode) {
+                            try {
+                                setPictureInPictureParams(
+                                    PictureInPictureParams.Builder()
+                                        .setAspectRatio(pipAspectRatio)
+                                        .build()
+                                )
+                            } catch (_: Exception) {
+                            }
+                        }
+                        result.success(null)
                     }
                     else -> result.notImplemented()
                 }
@@ -781,7 +802,7 @@ class MainActivity: FlutterActivity() {
 
         try {
             val params = PictureInPictureParams.Builder()
-                .setAspectRatio(Rational(9, 16))
+                .setAspectRatio(pipAspectRatio)
                 .build()
             enterPictureInPictureMode(params)
         } catch (_: Exception) {

@@ -293,6 +293,45 @@ void main() {
         expect(ride.segmentTimeline.single.endMs, 60000);
       },
     );
+
+    test('a landscape ride\'s appliedCaptureOrientation is kept, hashed and '
+        'read back verified', () async {
+      final a = await createSegment('REC_a.mp4', 'video-a');
+
+      final path = await writeRide(
+        input: RideFileInput(
+          videoPath: a,
+          segmentPaths: <String>[a],
+          lockedSegmentPaths: const <String>[],
+          segmentTimeline: <Map<String, dynamic>>[
+            <String, dynamic>{'path': a, 'startMs': 0, 'endMs': 60000},
+          ],
+          recordingSettings: const <String, dynamic>{
+            'appliedFps': 30,
+            'appliedCaptureOrientation': 'landscapeLeft',
+          },
+        ),
+        ride: snapshot(),
+        sessionComplete: true,
+      );
+
+      final ride = await RideRecord.fromTelemetryFile(
+        File(path),
+        verifySegments: true,
+      );
+      expect(
+        ride!.integrity.status,
+        RideIntegrityStatus.verified,
+        reason: ride.integrity.issues.join(', '),
+      );
+      expect(ride.segmentPaths, <String>[a]);
+      final json = await readRideFileJson(File(path));
+      expect(json!['recordingSettings'], <String, dynamic>{
+        'appliedFps': 30,
+        'appliedCaptureOrientation': 'landscapeLeft',
+      });
+      expect(json['schemaVersion'], rideFileSchemaVersion);
+    });
   });
 
   group('declared path resolution', () {

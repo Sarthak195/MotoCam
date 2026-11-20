@@ -1,5 +1,7 @@
 // Synthetic sensor and GPS streams for TelemetryProvider incident tests.
 
+import 'dart:math' as math;
+
 import 'package:geolocator/geolocator.dart';
 import 'package:motocam/features/telemetry/providers/telemetry_provider.dart';
 
@@ -24,6 +26,24 @@ class RideSim {
   /// GPS speed of each fix in km/h; `null` means no fix.
   double? speedKmh;
 
+  /// How the phone sits in its mount, in degrees counterclockwise (seen
+  /// from the screen) from upright portrait: 0 portrait, 90 landscapeLeft
+  /// (right edge up), -90 landscapeRight. Every vector this sim feeds
+  /// (linear acceleration and [gravity], both given as for a portrait
+  /// mount) is turned into that device frame, so the same physical event
+  /// can be replayed on a sideways phone. 0 feeds the vectors unchanged.
+  double mountDegrees = 0;
+
+  List<double> _toDevice(double x, double y, double z) {
+    if (mountDegrees == 0) {
+      return [x, y, z];
+    }
+    final radians = mountDegrees * math.pi / 180;
+    final c = math.cos(radians);
+    final s = math.sin(radians);
+    return [x * c + y * s, -x * s + y * c, z];
+  }
+
   static const Duration _step = Duration(milliseconds: 20);
   static const Duration _orientationStep = Duration(milliseconds: 60);
   static const Duration _fixStep = Duration(seconds: 1);
@@ -35,15 +55,17 @@ class RideSim {
   int elapsedMsSince(DateTime since) => t.difference(since).inMilliseconds;
 
   void _tick(double x, double y, double z) {
-    provider.updateAccelerometerForTesting(x, y, z, timestamp: t);
+    final linear = _toDevice(x, y, z);
+    provider.updateAccelerometerForTesting(
+      linear[0],
+      linear[1],
+      linear[2],
+      timestamp: t,
+    );
     final nextOrientationAt = _nextOrientationAt;
     if (nextOrientationAt == null || !t.isBefore(nextOrientationAt)) {
-      provider.updateOrientationForTesting(
-        gravity[0],
-        gravity[1],
-        gravity[2],
-        timestamp: t,
-      );
+      final g = _toDevice(gravity[0], gravity[1], gravity[2]);
+      provider.updateOrientationForTesting(g[0], g[1], g[2], timestamp: t);
       _nextOrientationAt = t.add(_orientationStep);
     }
     final speed = speedKmh;
