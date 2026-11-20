@@ -195,6 +195,11 @@ if (-not $SkipTests) {
     Write-Host 'Running flutter test...' -ForegroundColor Cyan
     flutter test
     Assert-NativeSuccess 'flutter test'
+    # The landscape-off build (MOTOCAM_LANDSCAPE=false) takes other branches
+    # in the recording screen, so the suite runs that way too.
+    Write-Host 'Running flutter test with landscape recording off...' -ForegroundColor Cyan
+    flutter test --dart-define=MOTOCAM_LANDSCAPE=false
+    Assert-NativeSuccess 'flutter test --dart-define=MOTOCAM_LANDSCAPE=false'
 }
 
 Write-Host 'Release security precheck passed.' -ForegroundColor Green

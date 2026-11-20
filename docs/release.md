@@ -198,7 +198,7 @@ A new applicationId is a different app to Android and to Google Play. Existing i
 
 Item 11 reads `build/app/intermediates/merged_manifests/release/processReleaseManifest/AndroidManifest.xml`. It runs only when that file exists and is not older than the source manifest; otherwise the script prints a warning that the merged release manifest is missing or stale and continues. Item 12 runs only when `git` is available and the repository has a `.git` directory, and a failing `git ls-files` stops the script.
 
-Optional steps: `flutter analyze` unless `-SkipAnalyze`, then `flutter test` unless `-SkipTests`. A non-zero exit code from either throws `flutter analyze failed with exit code <n>.` (or the same for `flutter test`). Finally it prints `Release security precheck passed.`
+Optional steps: `flutter analyze` unless `-SkipAnalyze`, then, unless `-SkipTests`, `flutter test` and `flutter test --dart-define=MOTOCAM_LANDSCAPE=false` (the landscape-off build). A non-zero exit code from any of them throws `flutter analyze failed with exit code <n>.` (or the same for the test command). Finally it prints `Release security precheck passed.`
 
 Things to know when relying on it:
 

@@ -52,6 +52,11 @@ jobs:
       - name: Run tests
         run: flutter test --coverage
 
+      # The documented landscape-off build (MOTOCAM_LANDSCAPE=false) takes
+      # other branches in the recording screen; run the suite that way too.
+      - name: Run tests with landscape recording off
+        run: flutter test --dart-define=MOTOCAM_LANDSCAPE=false
+
       # Compiles the Kotlin bridges and Gradle scripts; a debug build needs no
       # signing secrets.
       - name: Build Android debug APK

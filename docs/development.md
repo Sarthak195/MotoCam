@@ -208,6 +208,7 @@ The `validate` job runs on `ubuntu-latest`:
 | Run analyzer | `flutter analyze` |
 | Run release security precheck | `./scripts/release-security-precheck.ps1 -SkipTests -SkipAnalyze` under `pwsh`. With both skip flags it runs only the file checks on the Gradle script, the manifest, the backup rules, tracked credential files and Android assets; see [release.md](release.md#release-security-precheck). |
 | Run tests | `flutter test --coverage` |
+| Run tests with landscape recording off | `flutter test --dart-define=MOTOCAM_LANDSCAPE=false`, without coverage. The documented portrait-only build takes other branches in the recording screen, and the recording screen and Blackout tests follow the build switch, so this run covers that build. |
 | Build Android debug APK | `flutter build apk --debug`. This compiles the Kotlin code and the Gradle scripts and needs no signing secrets. |
 | Check formatting | `dart format --output=none --set-exit-if-changed lib test`. It runs last, so a formatting failure does not hide analyzer, test or build results. |
 
