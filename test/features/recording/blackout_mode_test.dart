@@ -14,6 +14,7 @@ import 'package:motocam/core/providers/app_settings_provider.dart';
 import 'package:motocam/features/camera/providers/camera_provider.dart';
 import 'package:motocam/features/recording/recording_screen.dart';
 import 'package:motocam/features/recording/recording_screen_logic.dart';
+import 'package:motocam/features/recording/ride_orientation.dart';
 import 'package:motocam/features/telemetry/providers/telemetry_provider.dart';
 
 const _mockedChannels = [
@@ -160,10 +161,10 @@ void main() {
           ),
           ChangeNotifierProvider(create: (_) => TelemetryProvider()),
         ],
-        // The portrait screen these tests were written for, whatever the
-        // build's MOTOCAM_LANDSCAPE value (on by default).
+        // The build's MOTOCAM_LANDSCAPE switch (on by default), so plain
+        // flutter test covers landscape on and =false covers it off.
         child: const MaterialApp(
-          home: RecordingScreen(landscapeRecording: false),
+          home: RecordingScreen(landscapeRecording: kLandscapeRecording),
         ),
       ),
     );

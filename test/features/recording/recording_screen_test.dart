@@ -18,6 +18,7 @@ import 'package:motocam/core/theme/app_theme.dart';
 import 'package:motocam/core/ui/big_numeral.dart';
 import 'package:motocam/features/camera/providers/camera_provider.dart';
 import 'package:motocam/features/recording/recording_screen.dart';
+import 'package:motocam/features/recording/ride_orientation.dart';
 import 'package:motocam/features/recording/widgets/recording_settings_page.dart';
 import 'package:motocam/features/recording/widgets/start_preflight_sheet.dart';
 import 'package:motocam/features/telemetry/models/telemetry_data.dart';
@@ -270,10 +271,12 @@ void main() {
           home: MediaQuery.withClampedTextScaling(
             minScaleFactor: textScale,
             maxScaleFactor: textScale,
-            // The portrait screen these characterisation tests were
-            // written for, whatever the build's MOTOCAM_LANDSCAPE value
-            // (on by default); the landscape screen has its own tests.
-            child: const RecordingScreen(landscapeRecording: false),
+            // The build's MOTOCAM_LANDSCAPE switch (on by default), so plain
+            // flutter test covers landscape on and =false covers it off;
+            // the landscape layout has its own tests.
+            child: const RecordingScreen(
+              landscapeRecording: kLandscapeRecording,
+            ),
           ),
         ),
       ),
