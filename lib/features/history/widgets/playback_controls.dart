@@ -49,23 +49,27 @@ class PlaybackControls extends StatelessWidget {
         const SizedBox(width: 4),
         ValueListenableBuilder<PlaybackPosition>(
           valueListenable: position,
-          builder: (context, value, _) => Tooltip(
-            message: value.isPlaying ? 'Pause' : 'Play',
-            child: Material(
-              color: MotoColors.text,
-              shape: const CircleBorder(),
-              child: InkWell(
-                customBorder: const CircleBorder(),
-                onTap: onTogglePlay,
-                child: SizedBox(
-                  width: playSize,
-                  height: playSize,
-                  child: Icon(
-                    value.isPlaying
-                        ? Icons.pause_rounded
-                        : Icons.play_arrow_rounded,
-                    size: playSize * 0.55,
-                    color: MotoColors.bg,
+          builder: (context, value, _) => Semantics(
+            container: true,
+            button: true,
+            child: Tooltip(
+              message: value.isPlaying ? 'Pause' : 'Play',
+              child: Material(
+                color: MotoColors.text,
+                shape: const CircleBorder(),
+                child: InkWell(
+                  customBorder: const CircleBorder(),
+                  onTap: onTogglePlay,
+                  child: SizedBox(
+                    width: playSize,
+                    height: playSize,
+                    child: Icon(
+                      value.isPlaying
+                          ? Icons.pause_rounded
+                          : Icons.play_arrow_rounded,
+                      size: playSize * 0.55,
+                      color: MotoColors.bg,
+                    ),
                   ),
                 ),
               ),
