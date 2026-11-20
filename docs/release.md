@@ -47,10 +47,10 @@ A Google Play upload needs a different applicationId first; see [Application ID]
 
 | Stage | What happens | Source |
 |---|---|---|
-| pubspec | `version: 0.1.18+18` (build name `0.1.18`, build number `18`) | [pubspec.yaml](../pubspec.yaml) |
+| pubspec | `version: 0.1.19+19` (build name `0.1.19`, build number `19`) | [pubspec.yaml](../pubspec.yaml) |
 | Flutter tool | Writes `flutter.versionName` and `flutter.versionCode` into `android/local.properties` (git-ignored, machine-local) on each build | Flutter tooling |
 | Gradle | `flutterVersionCode` / `flutterVersionName` read those keys and feed `defaultConfig.versionCode` / `versionName`. If a key is missing, they fall back to `1` and `"1.0"` | [android/app/build.gradle.kts](../android/app/build.gradle.kts) |
-| Result (Android) | versionName `0.1.18`, versionCode `18` | |
+| Result (Android) | versionName `0.1.19`, versionCode `19` | |
 
 Reading the version from `local.properties` arrived in commit cd39097, first tagged as v0.1.13. From V0.1.1 to v0.1.12 the Gradle file hard-coded `versionCode = 1` and `versionName = "1.0"` (V0.1.0 still used the template's `flutter.versionCode` / `flutter.versionName`), and every tag before v0.1.13 set the release build to `signingConfig = signingConfigs.getByName("debug")` (for example `git show v0.1.12:android/app/build.gradle.kts`). The APKs published for v0.1.5 to v0.1.12 came from such trees, so they report version 1 / "1.0" and are debug-signed regardless of pubspec; the v0.1.5 asset, for example, reports `versionCode='1' versionName='1.0'` and is signed by `CN=Android Debug`. The consequences are described in [Signing of published APKs](#signing-of-published-apks).
 
@@ -68,7 +68,7 @@ Git tags are the release identifiers. The GitHub repository [Sarthak195/MotoCam]
 | `v0.1.10` to `v0.1.12` | annotated | ef2dfb5, 76974c1, 055b9e1 | 2026-04-02 to 2026-04-05 |
 | `v0.1.13` | lightweight | a33a583 | 2026-07-07 |
 
-Release notes live in [release-notes/](../release-notes/) as `vX.Y.Z.md` with a lowercase `v`. Files exist for v0.1.8 to v0.1.14 and for v0.1.18. v0.1.14.md is an earlier draft: v0.1.14 to v0.1.17 were published on 2026-11-19 as GitHub pre-releases (tags at their original commits) whose notes are in the GitHub release bodies only.
+Release notes live in [release-notes/](../release-notes/) as `vX.Y.Z.md` with a lowercase `v`. Files exist for v0.1.8 to v0.1.14, v0.1.18 and v0.1.19. v0.1.14.md is an earlier draft: v0.1.14 to v0.1.17 were published on 2026-11-19 as GitHub pre-releases (tags at their original commits) whose notes are in the GitHub release bodies only.
 
 ### Current inconsistencies
 
@@ -315,5 +315,6 @@ The pubspec line under Release Traceability is not in the existing notes; it mak
 | v0.1.13 | 2026-07-07 | Release-key signing and pubspec-driven version codes (uninstall required), recordings in app-specific storage, storage permissions removed, backups disabled, CI and release scripts, unit tests. No APK published | [v0.1.13.md](../release-notes/v0.1.13.md) |
 | v0.1.14 to v0.1.17 | 2026-10-28 to 2026-11-17 (published 2026-11-19) | Scan fixes and private storage, screen-off recording, Blackout overlay and crash confirm, no lost video after 2160p60 rolls. GitHub pre-releases; debug APK on v0.1.17 | GitHub release bodies |
 | v0.1.18 | 2026-11-19 | Lighter main thread while recording (sensor averaging off the main thread, fewer rebuilds), iOS removed (Android only). Pre-release, debug APK | [v0.1.18.md](../release-notes/v0.1.18.md) |
+| v0.1.19 | 2026-11-20 | Ride export to a folder and the share sheet, exact per-second sections, a diagnostic log with Share and Clear in Settings, fix for the red error screens in Recording Settings (duplicate dropdown keys). Pre-release, debug APK | [v0.1.19.md](../release-notes/v0.1.19.md) |
 
 Statements in older notes describe the code at their tag, not today. For example, the v0.1.11/v0.1.12 "public folder only" storage policy no longer applies; see [recording-pipeline.md](recording-pipeline.md) and [data-formats.md](data-formats.md) for current behaviour.
