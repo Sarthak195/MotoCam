@@ -47,10 +47,10 @@ A Google Play upload needs a different applicationId first; see [Application ID]
 
 | Stage | What happens | Source |
 |---|---|---|
-| pubspec | `version: 0.1.19+19` (build name `0.1.19`, build number `19`) | [pubspec.yaml](../pubspec.yaml) |
+| pubspec | `version: 0.1.20+20` (build name `0.1.20`, build number `20`) | [pubspec.yaml](../pubspec.yaml) |
 | Flutter tool | Writes `flutter.versionName` and `flutter.versionCode` into `android/local.properties` (git-ignored, machine-local) on each build | Flutter tooling |
 | Gradle | `flutterVersionCode` / `flutterVersionName` read those keys and feed `defaultConfig.versionCode` / `versionName`. If a key is missing, they fall back to `1` and `"1.0"` | [android/app/build.gradle.kts](../android/app/build.gradle.kts) |
-| Result (Android) | versionName `0.1.19`, versionCode `19` | |
+| Result (Android) | versionName `0.1.20`, versionCode `20` | |
 
 Reading the version from `local.properties` arrived in commit cd39097, first tagged as v0.1.13. From V0.1.1 to v0.1.12 the Gradle file hard-coded `versionCode = 1` and `versionName = "1.0"` (V0.1.0 still used the template's `flutter.versionCode` / `flutter.versionName`), and every tag before v0.1.13 set the release build to `signingConfig = signingConfigs.getByName("debug")` (for example `git show v0.1.12:android/app/build.gradle.kts`). The APKs published for v0.1.5 to v0.1.12 came from such trees, so they report version 1 / "1.0" and are debug-signed regardless of pubspec; the v0.1.5 asset, for example, reports `versionCode='1' versionName='1.0'` and is signed by `CN=Android Debug`. The consequences are described in [Signing of published APKs](#signing-of-published-apks).
 
@@ -68,7 +68,7 @@ Git tags are the release identifiers. The GitHub repository [Sarthak195/MotoCam]
 | `v0.1.10` to `v0.1.12` | annotated | ef2dfb5, 76974c1, 055b9e1 | 2026-04-02 to 2026-04-05 |
 | `v0.1.13` | lightweight | a33a583 | 2026-07-07 |
 
-Release notes live in [release-notes/](../release-notes/) as `vX.Y.Z.md` with a lowercase `v`. Files exist for v0.1.8 to v0.1.14, v0.1.18 and v0.1.19. v0.1.14.md is an earlier draft: v0.1.14 to v0.1.17 were published on 2026-11-19 as GitHub pre-releases (tags at their original commits) whose notes are in the GitHub release bodies only.
+Release notes live in [release-notes/](../release-notes/) as `vX.Y.Z.md` with a lowercase `v`. Files exist for v0.1.8 to v0.1.14, v0.1.18 and v0.1.19, and a draft for the coming v0.1.20. v0.1.14.md is an earlier draft: v0.1.14 to v0.1.17 were published on 2026-11-19 as GitHub pre-releases (tags at their original commits) whose notes are in the GitHub release bodies only.
 
 ### Current inconsistencies
 
