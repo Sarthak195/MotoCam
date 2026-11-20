@@ -365,7 +365,7 @@ While recording, the Rides button is replaced by the details panel's Pop-out but
 |---|---|
 | `lib/` | All Dart source, split into `core/` and `features/` (see [Module map](#module-map)) |
 | `assets/fonts/` | The bundled Barlow and Barlow Condensed fonts (six TrueType files) and their licence `OFL.txt`, declared in [pubspec.yaml](../pubspec.yaml) |
-| `test/` | Unit and widget tests under `test/core/` and `test/features/`, grouped by `lib/` area, plus `widget_test.dart` (app smoke test), the ride-file fixtures in `test/fixtures/ride_files/` and shared test helpers in `test/support/` (a P-256 key standing in for the phone's signing key): 1118 tests in 69 files, counted in [development.md](development.md#testing) |
+| `test/` | Unit and widget tests under `test/core/` and `test/features/`, grouped by `lib/` area, plus `widget_test.dart` (app smoke test), the ride-file fixtures in `test/fixtures/ride_files/` and shared test helpers in `test/support/` (a P-256 key standing in for the phone's signing key): 1160 tests in 70 files, counted in [development.md](development.md#testing) |
 | `android/` | Gradle project (`app/build.gradle.kts`), manifest, Kotlin `MainActivity` and `BackgroundRecordingService`, resources (themes, the monochrome notification icon, backup and data-extraction rules), ProGuard rules and `key.properties.template` |
 | `scripts/` | `release-security-precheck.ps1` (used by CI) and `generate-keystore.ps1` |
 | `release-notes/` | Per-release notes, `v0.1.8.md` through `v0.1.13.md` |
