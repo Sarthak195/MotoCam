@@ -6,6 +6,8 @@ MotoCam is a Flutter motorcycle dashcam. One home screen coordinates three app-w
 
 - [What the app is](#what-the-app-is)
 - [Module map](#module-map)
+- [Theme and component kit](#theme-and-component-kit)
+- [Build flags](#build-flags)
 - [State management](#state-management)
 - [Services and native bridges](#services-and-native-bridges)
 - [App startup sequence](#app-startup-sequence)
@@ -34,7 +36,7 @@ Current limitations of the recording pipeline:
 
 [recording-pipeline.md](recording-pipeline.md) describes each of them.
 
-The UI is locked to portrait and always dark (Material 3, seeded from blue). There is no localization; `intl` is used only for `DateFormat` in the rides list.
+The UI is locked to portrait and always dark, in one look called Instrument (Material 3 with an explicit colour scheme built from the app's own tokens, the Barlow fonts bundled in the app; see [Theme and component kit](#theme-and-component-kit)). There is no localization; `intl` is used only for `DateFormat` in the rides list.
 
 There is no backend, account system, analytics or crash reporting. The only network traffic is the route map's OpenStreetMap tile requests (`MapSourceConfig.tileUrlTemplate`). The map is built only while it is expanded on the playback screen, and only after a one-time consent; the expanded state is remembered between rides. Recordings, telemetry and settings stay on the device.
 
@@ -44,7 +46,10 @@ There is no backend, account system, analytics or crash reporting. The only netw
 
 | File | Responsibility |
 |---|---|
-| [main.dart](../lib/main.dart) | Entry point: error hooks for every build mode, a no-op `debugPrint` in release builds, the portrait lock, the root `MultiProvider` and the `MaterialApp`, whose home is `RecordingScreen` |
+| [main.dart](../lib/main.dart) | Entry point: error hooks for every build mode, a no-op `debugPrint` in release builds, the portrait lock, the root `MultiProvider` and the `MaterialApp` (theme `buildAppTheme()`), whose home is `RecordingScreen` |
+| [core/theme/](../lib/core/theme/) | `tokens.dart` (`MotoColors`, `MotoRadii`, `MotoSize`, `MotoFonts` and the contrast helper), `app_theme.dart` (`motoColorScheme`, `motoTextTheme`, `buildAppTheme`) and `font_licence.dart` (`registerFontLicence`). See [Theme and component kit](#theme-and-component-kit) |
+| [core/ui/](../lib/core/ui/) | The component kit, imported through `kit.dart`: `StateBand`, `StatusChip`, `ThumbButton`, `HoldButton`, `InstrumentRow`, `SegmentedRow`, `BigNumeral`, `DashedOutline` and `MotoGlyph` |
+| [core/build_flags.dart](../lib/core/build_flags.dart) | The compile-time switches of the redesign's reserved slots, all `false`. See [Build flags](#build-flags) |
 | [core/providers/app_settings_provider.dart](../lib/core/providers/app_settings_provider.dart) | `AppSettingsProvider`: rider settings stored in `SharedPreferences` (including the opt-in gallery export), plus quality presets, option lists, label helpers and the incident threshold and debounce derived from the sensitivity setting. See [settings.md](settings.md) |
 | [core/services/app_permission_service.dart](../lib/core/services/app_permission_service.dart) | `AppPermissionService.ensureRequiredPermissions(audioEnabled, galleryExportEnabled)`: requests the permissions and returns a `PermissionAuditResult` that separates required items from recommended ones and lists permanently denied required ones. It reports the battery-optimization exemption status but never requests it. Also holds the shared `isPermissionGranted` predicate |
 | [core/services/background_recording_service.dart](../lib/core/services/background_recording_service.dart) | Singleton bridge to the Android foreground service: start (returns whether the service started), update, stop, the battery-optimization exemption status and request, the offer-once flag and the `events` stream (`stopRequested`). Android only |
@@ -65,12 +70,16 @@ There is no backend, account system, analytics or crash reporting. The only netw
 | [features/camera/providers/recording_retention.dart](../lib/features/camera/providers/recording_retention.dart) | Pure retention rules used by `CameraProvider`: which unlocked segments the loop deletes, which segment sequences an incident lock still has to cover, which telemetry files no longer have any video (starting from the codec's segment-list rule), and whether the LOCKED badge applies (`isActiveSegmentLocked`) |
 | [features/camera/providers/recordings_migration.dart](../lib/features/camera/providers/recordings_migration.dart) | `RecordingsMigrator` (moves the rides of the Android legacy roots into the recordings directory: one-shot snapshot of the files to move, rename else verified staging copy, collisions, whole-ride free-space reserve, pause, split rides, atomic journal; no plugin code, tested with temporary directories and injected faults) and `RecordingsMigrationController` (progress, summary and the idle signal, owned by `CameraProvider`) |
 | [features/camera/providers/storage_budget.dart](../lib/features/camera/providers/storage_budget.dart) | The storage budget: `selectRidesForStorageBudget` (pure: which whole rides to delete, oldest first, and what is never deleted), `scanStorageBudgetInventory` (the recordings root's top level, through the ride index, off the UI isolate) and the notice text |
-| [features/recording/recording_screen.dart](../lib/features/recording/recording_screen.dart) | `RecordingScreen`, the home route and session coordinator. It runs the bootstrap, the start and stop flows, ride checkpoints, recording-fault handling, the incident auto-lock, blackout mode, the PiP layout, the settings apply step, the one-time battery-exemption offer, device-status polling, app lifecycle handling and navigation to history |
-| [features/recording/recording_screen_logic.dart](../lib/features/recording/recording_screen_logic.dart) | Pure helpers for `RecordingScreen`: button colours and the contrast-ratio check, the lock notice text, the preview-area mode and failure-panel text (`cameraPreviewMode`, `cameraInitPanelFor`), `BackgroundStallTracker`, which decides when to attempt stall recovery, and `RideCheckpointTracker`, which decides when the ride needs a new checkpoint |
-| [features/recording/widgets/recording_settings_sheet.dart](../lib/features/recording/widgets/recording_settings_sheet.dart) | `RecordingSettingsSheet`, a modal form that returns a `RecordingSettingsFormResult` and persists nothing itself |
+| [features/recording/recording_screen.dart](../lib/features/recording/recording_screen.dart) | `RecordingScreen`, the home route and session coordinator. It runs the bootstrap, the start and stop flows, ride checkpoints, recording-fault handling, the incident auto-lock, blackout mode, the PiP layout, the settings apply step, the one-time battery-exemption offer, device-status polling, app lifecycle handling and navigation to history. Its State keeps every flag, flow and `Selector`; each piece of the screen is a stateless widget under `recording/widgets/` fed by one `RecordingViewState` snapshot and callbacks (the next rows) |
+| [features/recording/recording_screen_logic.dart](../lib/features/recording/recording_screen_logic.dart) | Pure helpers for `RecordingScreen`: button colours and the contrast-ratio check, the lock notice text, the preview-area mode and failure-panel text (`cameraPreviewMode`, `cameraInitPanelFor`), `BackgroundStallTracker`, which decides when to attempt stall recovery, `RideCheckpointTracker`, which decides when the ride needs a new checkpoint, and the numbers behind the chips: `thermalLevelFor` (platform thermal status plus the 43 C battery floor), `storageHoursLeft` and `storageHoursLabel` (free bytes at the applied bitrate, never below 20 Mbps), `formatBandElapsed` and `isParkedSpeed` (under 5 km/h the details panel shows) |
+| [features/recording/widgets/recording_view_state.dart](../lib/features/recording/widgets/recording_view_state.dart) | `RecordingViewState`, the immutable snapshot of what the screen shows (flags, requested and applied profile, warnings), and its derived values: the band state, the busy words' accessibility labels, which controls are enabled |
+| [features/recording/widgets/](../lib/features/recording/widgets/) (`recording_header`, `recording_profile_bar`, `recording_preview`, `recording_stats`, `recording_details_panel`, `recording_controls`) | `RecordingHeader` (state band), `RecordingProfileBar` with `ThermalChip`, `StorageChip` and `AppliedChip` (and the Blackout button), `RecordingPreview`, `RecordingSpeed`, `RecordingDetailsPanel` and `RecordingControls`. Polled values and the speed have their own listeners, so a tick rebuilds only its widget |
+| [features/recording/widgets/recording_settings_page.dart](../lib/features/recording/widgets/recording_settings_page.dart) | The Settings page and its sub-pages (Advanced, Storage, Safety, Privacy and data), pushed full-screen by `showRecordingSettingsPage`, which completes with a `RecordingSettingsFormResult` on SAVE; it persists nothing itself |
+| [features/recording/widgets/recording_settings_form.dart](../lib/features/recording/widgets/recording_settings_form.dart) | `RecordingSettingsForm`, the page's editable state (the saved values until SAVE), `appliedStatusText` (the "Applied X" lines) and `storageBudgetHours` |
+| [features/recording/widgets/recording_settings_sheet.dart](../lib/features/recording/widgets/recording_settings_sheet.dart) | `RecordingSettingsFormResult` and `resolveInitialFps`; it re-exports the page, so older imports keep working |
 | [features/camera/providers/camera_init_status.dart](../lib/features/camera/providers/camera_init_status.dart) | `CameraInitState`, `CameraInitFailure` and `cameraInitFailureForPermissions`: why a camera initialization failed |
-| [features/recording/start_preflight_evaluator.dart](../lib/features/recording/start_preflight_evaluator.dart) | `StartPreflightEvaluator` and `StartPreflightInputs`: the pure pass, warn or fail logic of every start checklist row |
-| [features/recording/widgets/start_preflight_sheet.dart](../lib/features/recording/widgets/start_preflight_sheet.dart) | `StartPreflightSheet` and `StartPreflightCheck`, which present the start checklist |
+| [features/recording/start_preflight_evaluator.dart](../lib/features/recording/start_preflight_evaluator.dart) | `StartPreflightEvaluator` and `StartPreflightInputs`: the pure pass, warn or fail logic of every start check, and `layout`, which groups the checks into the rows of the checklist page (`StartPreflightRow`, `StartPreflightLayout`) |
+| [features/recording/widgets/start_preflight_sheet.dart](../lib/features/recording/widgets/start_preflight_sheet.dart) | `StartPreflightSheet`, `StartPreflightCheck` and `showStartPreflightPage`: the full-screen "Ready to record?" checklist, with Fix buttons that run the recording screen's handlers and a recheck after each fix |
 | [features/telemetry/providers/telemetry_provider.dart](../lib/features/telemetry/providers/telemetry_provider.dart) | `TelemetryProvider`: GPS stream with a fallback poll and location-off handling, speed filtering, gated distance, accelerometer incident detection (with a raw-accelerometer fallback), pausing while idle, the ride sample timer, checkpoints and the final per-ride telemetry JSON with its integrity envelope, and a retry queue for failed saves |
 | [features/telemetry/models/telemetry_data.dart](../lib/features/telemetry/models/telemetry_data.dart) | `TelemetryData`, one immutable telemetry sample with fix validity (`hasFix`, `fixAgeMs`), with JSON conversion (a sample read from JSON parses its timestamp on first access) |
 | [features/history/models/ride_record.dart](../lib/features/history/models/ride_record.dart) | `RideRecord`: the ride model built from a telemetry JSON through the ride-file codec (segment paths resolved against the telemetry file's directory, the rest quarantined, integrity verified), with or without its samples (`samplesLoaded`, `loadSamples`); rewrites lock state after a full re-check and interpolates samples for playback. Re-exports the codec's ride model types |
@@ -82,10 +91,12 @@ There is no backend, account system, analytics or crash reporting. The only netw
 | [features/history/services/gallery_links.dart](../lib/features/history/services/gallery_links.dart) | The gallery-link store: `GalleryLink`, `PendingGalleryExport`, `GalleryLinkData`, `galleryLinkKey`, `galleryKeysOfRide` and `GalleryLinkStore`, its one writer on the UI isolate (`<application support>/gallery_links/gallery_links.json`) |
 | [features/history/services/gallery_copy_removal.dart](../lib/features/history/services/gallery_copy_removal.dart) | `removeGalleryCopies` (delete without a prompt, the storage permission on Android 9 and lower, the system prompt for the rest, then the store update) and `galleryRemovalSummary` |
 | [features/history/services/legacy_ride_import.dart](../lib/features/history/services/legacy_ride_import.dart) | `LegacyRideImporter` (imports the rides of the v0.1.11/v0.1.12 public folder through a `LegacyRideDocumentSource`: staging, size checks, rename, journal, collisions, JSON last), `deleteImportedOriginals` and `LegacyRideImportController` (progress and idle signal, owned by `CameraProvider`) |
-| [features/history/rides_list_screen.dart](../lib/features/history/rides_list_screen.dart) | `RidesListScreen`: discovers files, loads the history through the ride index in an isolate, lists rides with integrity, video check, incomplete, simulated-GPS and lock badges, unlocks and deletes rides after confirmation, imports rides from the old public folder (Android), and opens playback |
+| [features/history/rides_list_screen.dart](../lib/features/history/rides_list_screen.dart) | `RidesListScreen`: discovers files, loads the history through the ride index in an isolate, shows the filter chips and the list (Locked Clips, then All Rides by month) with integrity stamps and the amber incomplete-ride row, unlocks and deletes rides after confirmation, imports rides from the old public folder (Android), and opens playback |
+| [features/history/widgets/ride_list_model.dart](../lib/features/history/widgets/ride_list_model.dart) and [ride_list_widgets.dart](../lib/features/history/widgets/ride_list_widgets.dart) | The pure decisions of the list (filters, stamps, the order and headers, the actions menu entries and the busy slot, the row texts) and the widgets that draw them (`RideFilterBar`, `RideRow`, `IncompleteRideRow`, `RideActionsMenu`, `RideProgressRing`) |
+| [features/history/services/ride_integrity_text.dart](../lib/features/history/services/ride_integrity_text.dart) | `rideIntegrityText`, `rideIntegrityTextFor` and `rideIntegrityLine`: the integrity sentence of a ride, shared by Ride History and the playback strip |
 | [features/history/ride_playback_screen.dart](../lib/features/history/ride_playback_screen.dart) | `RidePlaybackScreen`: orchestration of playback (controller lifecycle, segment loading, seeking, scrubbing) as one timeline, with per-segment, cancellable hash verification off the UI isolate and a 'Check videos again' action. It publishes a `PlaybackPosition` through a `ValueNotifier` and builds `RidePlaybackBody`; it has no `ValueListenableBuilder` over the whole body |
 | [features/history/widgets/playback_timeline.dart](../lib/features/history/widgets/playback_timeline.dart) | Pure playback timeline logic: segment order, the effective timeline, missing, failed-check and no-video ranges, seek targets, incident and lock marker offsets, position clamping, the nearest sample and speed-graph page rules, and speed-graph tap and drag targets |
-| [features/history/widgets/ride_playback_body.dart](../lib/features/history/widgets/ride_playback_body.dart) and siblings | The playback body, split into widgets that take values, callbacks and a `ValueListenable<PlaybackPosition>` (`playback_position.dart`): `playback_video_area.dart` (the only widget holding the `VideoPlayerController`), `playback_telemetry_overlay.dart`, `playback_speed_graph.dart` with `speed_graph_painter.dart` (a cached curve page plus a cursor), `playback_seek_bar.dart`, `playback_legend.dart`, `playback_controls.dart` and `route_map_panel.dart`. A position tick rebuilds only the slider and time label, the overlay, the graph cursor and the map marker |
+| [features/history/widgets/ride_playback_body.dart](../lib/features/history/widgets/ride_playback_body.dart) and siblings | The playback body, split into widgets that take values, callbacks and a `ValueListenable<PlaybackPosition>` (`playback_position.dart`): `playback_video_area.dart` (the only widget holding the `VideoPlayerController`), `playback_telemetry_overlay.dart`, `playback_speed_graph.dart` with `speed_graph_painter.dart` (a cached curve page plus a cursor), `playback_seek_bar.dart`, `playback_legend.dart`, `playback_controls.dart`, `playback_ride_panel.dart` (the header, the integrity badge and strip and the ride actions) and `route_map_panel.dart`. The body lays itself out as a portrait stack or, when wider than tall, a landscape split. A position tick rebuilds only the slider, the time label and the play button, the overlay, the graph cursor and the map marker |
 | [features/history/widgets/playback_seekbar_track_shape.dart](../lib/features/history/widgets/playback_seekbar_track_shape.dart) | `PlaybackSeekbarTrackShape`, the seekbar's slider track, which paints the timeline ranges and the incident and lock markers |
 | [features/history/widgets/route_map_view.dart](../lib/features/history/widgets/route_map_view.dart) | `RouteMapView`, a `flutter_map` route on OSM tiles, fitted to the route bounds. It falls back to `StaticMapViewer` when fewer than two GPS fixes remain |
 | [features/map/map_source_config.dart](../lib/features/map/map_source_config.dart) | `MapSourceConfig`, the tile URL, attribution, licence text, user agent with contact URL, zoom and tile-cache constants |
@@ -114,15 +125,74 @@ Native code (Android only):
 - `map` depends on `telemetry/models`.
 - `CameraProvider` and `TelemetryProvider` do not know about each other. `RecordingScreen` is the only place that coordinates them (it also hands `CameraProvider` a callback that returns the telemetry ride's `rideSessionId`, for the storage budget).
 
+## Theme and component kit
+
+The whole app is drawn in the dark "Instrument" look (redesign A). It is code, not a mock-up: widgets read named values instead of literals, so the look can change in one place.
+
+**Tokens** ([core/theme/tokens.dart](../lib/core/theme/tokens.dart)).
+
+| Class | Holds |
+|---|---|
+| `MotoColors` | Page background `bg` (`0xFF0B0C0B`) and the text colours `text`, `dim`, `muted` and `disabled`; the surfaces `surface`, `surfaceRaised`, `surfaceHigh` and `surfaceTop`; the `hairline` and `hairlineStrong` outlines; and the signal colours: `rec` (REC band, STOP outline, errors, missing footage), `recDot`, `amber` (advisory: warm phone, low storage, incomplete ride, incident markers), `stalled` (reserved) and `lock` (LOCK, LOCKED, lock markers) |
+| `MotoRadii` | `xs` 4, `segment` 9, `sm` 12, `md` 14, `lg` 16, `stop` 20, `dialog` 22 and `xl` 28 |
+| `MotoSize` | `gutter` 16, `gap` 8, `gapWide` 12, `minTarget` 48 (the smallest tap target), `row` 64, `tray` 50, `start` 170 (the checklist's START) and `chip` 52 |
+| `MotoFonts` | The family names, the tabular-figures feature (timers and speeds do not jitter) and `condensedStyle` and `bodyStyle`, which take letter spacing in em as the boards give it |
+
+The tests check the text and accent pairs against WCAG AA (4.5:1 for text) and the outlines against 3:1 ([tokens_test.dart](../test/core/theme/tokens_test.dart)). `tokens.dart` still holds the old recording button colours (`recordingStartButtonColor` and its siblings) and `contrastRatio`, which only tests use.
+
+**Theme** ([core/theme/app_theme.dart](../lib/core/theme/app_theme.dart)). `buildAppTheme()` is the one call `MaterialApp` makes. It builds `motoColorScheme`, a `ColorScheme.dark` with every role set explicitly from the tokens (no seeded or default Material colour leaks into a screen), `motoTextTheme` (Barlow Condensed for the display, headline and large title styles, Barlow for the rest, sizes from the boards) and the component themes for filled and outlined buttons, segmented buttons, switches, list tiles, dialogs, bottom sheets, popup menus and snackbars, which set colour, shape and type only. It also calls `registerFontLicence()`.
+
+**Fonts and their licence.** Barlow (Regular, Medium, SemiBold) and Barlow Condensed (Medium, SemiBold, Bold) are bundled as TrueType files in `assets/fonts/` and declared as the families `Barlow` and `Barlow Condensed` in [pubspec.yaml](../pubspec.yaml), so the app needs no network for its type (the source is the google/fonts repository, `ofl/barlow` and `ofl/barlowcondensed`). Both are under the SIL Open Font License 1.1; the licence text ships as the asset `assets/fonts/OFL.txt`, and `registerFontLicence()` ([font_licence.dart](../lib/core/theme/font_licence.dart)) adds it to Flutter's licence page (Settings, About and licences) next to the OpenStreetMap notice. The text is read only when the licence page asks for it, and the function registers once. [fonts_and_licence_test.dart](../test/core/theme/fonts_and_licence_test.dart) checks that the files are TrueType, that both families load, that the pubspec declares the weights and that the licence is bundled and registered once.
+
+**Component kit** ([core/ui/](../lib/core/ui/), one import: `kit.dart`). Stateless, token-based widgets; each differs by shape and outline as well as by colour, and carries its own screen-reader label.
+
+| Component | What it is |
+|---|---|
+| `StateBand` | The band at the top of the recording screen: READY (outlined, open ring), STARTING (outlined in the REC colour), REC (solid, filled dot), SAVING (grey, square) and LOCKED (solid blue, padlock), with an optional time at the right |
+| `StatusChip` | A 52 dp chip: an icon and a value, or a caption over a value. Variants neutral (grey outline), amber (outlined), warning (filled amber) and reserved (dashed grey; for a slot whose flag is on) |
+| `ThumbButton` | A large button, at least 48 dp each way, with a visible press state, and a visible label separate from its accessibility label: START, STOP, LOCK, LOCKED, secondary (Rides, Settings, Pop-out) and quiet |
+| `HoldButton` | Press and hold for 1 s before an action runs; a short tap shows a hint, sliding off or disabling cancels, and it has a long-press action for TalkBack. Built for hold-to-stop (`kHoldToStop`); nothing uses it yet |
+| `InstrumentRow` | A list row for the parked screens: a leading icon, a title over a dim subtitle, and a trailing status word or button; optional tap and an amber attention outline. Used by the checklist and the Settings links |
+| `SegmentedRow` | A settings row: a label with an optional status, over a 50 dp tray of equal segments, the selected one filled light; disabled choices ignore taps |
+| `BigNumeral` | A large reading in Barlow Condensed with tabular figures and a small unit at its baseline; it scales down to fit its width (the speed) |
+| `DashedOutline`, `MotoGlyph` | The dashed rounded outline of the boards (the profile chip when the camera chose another profile), and the simple drawn marks (ring, ring and dot, dot, square, the START mark) |
+
+[kit_test.dart](../test/core/ui/kit_test.dart) checks the variants on every surface at text scale 1 and 1.3 with the real fonts: no overflow, 48 dp targets, text contrast, the harness labels and the hold timing. The screens built on the kit are tested at 390 x 844 and 844 x 390 (text scale 1 and 1.3) for overflow.
+
+## Build flags
+
+[core/build_flags.dart](../lib/core/build_flags.dart) holds compile-time `const bool` switches for the slots that the redesign's boards show but the app does not have yet, or that wait for an owner decision. **All of them are `false`**, and a slot whose flag is `false` is left out of the widget tree: nothing is drawn in its place, and nothing promises the feature. A flag is turned on only when the feature behind it is built and approved.
+
+| Flag | Reserved slot | Read by |
+|---|---|---|
+| `kShowStalled` | The yellow NOT WRITING state band | nothing yet |
+| `kShowWriteAge` | `Writing, last 0.4 s ago` under the REC band | nothing yet |
+| `kLockUndo` | The 8 s Undo after LOCK (needs an unlock API mid-ride) | nothing yet |
+| `kLockTone` | A tone when LOCK is pressed | nothing yet |
+| `kOrientationChip` | The orientation chip on the recording screen | nothing yet |
+| `kNotificationLock` | A LOCK action on the recording notification (the Kotlin side has `BuildConfig.NOTIFICATION_LOCK`, set in `android/app/build.gradle.kts`) | nothing yet |
+| `kTripReport` | A trip report after STOP | the playback body |
+| `kCheckReceivedExport` | "Check a received export" on the Rides screen | the Rides top bar |
+| `kControlsRow` | The Controls row in Settings (buttons and key learning) | the Settings page |
+| `kBackupRow` | The Backup row in Settings | the Settings page |
+| `kRideKeep` | Keep on the recovery card of an incomplete ride | the incomplete-ride row |
+| `kRecoverLastClip` | Recover last clip on the recovery card | the incomplete-ride row |
+| `kOpenExportFolder` | Open folder after an export finishes | the export summary |
+| `kPlaybackUnlock` | Unlock from the Playback screen (it stays in the Rides menu) | the playback ride actions |
+| `kResolutionChips` | Resolution chips on the recording screen | nothing yet |
+| `kHoldToStop` | Press and hold (1 s) to STOP; waits for the owner's decision | nothing yet (`HoldButton` exists) |
+
+The landscape recording flag belongs to the landscape engine branch and is deliberately not defined here. The flags marked "nothing yet" have no widget that reads them: the widgets for those slots do not exist, so the app shows no placeholder.
+
 ## State management
 
-State uses `provider` 6. [main.dart](../lib/main.dart) builds a `MultiProvider` above `MaterialApp`. Every pushed route and modal sheet can therefore read the providers.
+State uses `provider` 6. [main.dart](../lib/main.dart) builds a `MultiProvider` above `MaterialApp`. Every pushed route (the Settings page, the checklist page, Ride History, playback) and modal dialog can therefore read the providers.
 
 | Provider | Created by (`MotoCamApp.build`) | First created when | Watched by (rebuilds) | Read without listening |
 |---|---|---|---|---|
-| `AppSettingsProvider` | `AppSettingsProvider()`, then `unawaited(settings.load())` | `context.read` at the start of `RecordingScreen`'s bootstrap, inside `initState` | `RecordingScreen` profile chip bar (`Consumer2<AppSettingsProvider, CameraProvider>`), controls (`Consumer2<CameraProvider, AppSettingsProvider>`) | `RecordingScreen` bootstrap, start, stop, camera init and settings apply; `RecordingSettingsSheet` |
+| `AppSettingsProvider` | `AppSettingsProvider()`, then `unawaited(settings.load())` | `context.read` at the start of `RecordingScreen`'s bootstrap, inside `initState` | `RecordingScreen`'s `Consumer<AppSettingsProvider>` inside its `Consumer<CameraProvider>`, which build the `RecordingViewState` for the band, the chips, the details panel and the controls | `RecordingScreen` bootstrap, start, stop, camera init and settings apply; the Settings page |
 | `TelemetryProvider` | `TelemetryProvider()` (sample interval 1 s) | `RecordingScreen.didChangeDependencies` | `Selector`s for speed, distance, the location-off and detection-unavailable banners, and the ride-saving state. `RecordingScreen` also adds a raw listener (`_onTelemetryChanged`) that drives the incident auto-lock | Camera init, start, stop, checkpoints and history navigation in `RecordingScreen` |
-| `CameraProvider` | `CameraProvider(enableDebugLogging: kDebugMode)` | `RecordingScreen.didChangeDependencies`, right after `TelemetryProvider` | Root `Consumer` (back/PiP handling), camera preview, timer, controls, PiP view. `RecordingScreen` also adds a raw listener (`_onCameraChanged`) that reacts to recording faults and gallery-export results | `RecordingScreen` flows; `RidesListScreen` (`getRecordings`); `RecordingSettingsSheet` (FPS options, camera labels) |
+| `CameraProvider` | `CameraProvider(enableDebugLogging: kDebugMode)` | `RecordingScreen.didChangeDependencies`, right after `TelemetryProvider` | Root `Consumer` (back/PiP handling), camera preview, timer, controls, PiP view. `RecordingScreen` also adds a raw listener (`_onCameraChanged`) that reacts to recording faults and gallery-export results | `RecordingScreen` flows; `RidesListScreen` (`getRecordings`); the Settings page (FPS options, camera labels, the applied values) |
 
 Notes:
 
@@ -179,7 +249,7 @@ sequenceDiagram
     RS->>T: initialize() starts GPS stream, poll timer, accelerometer
 ```
 
-In code, `_bootstrapRuntimePrerequisites` calls `_initializeCamera`. The permission recovery dialog offers Later, Request Again and Open Settings; Open Settings waits until the app is resumed (at most two minutes) before it checks again. The camera may negotiate a lower resolution or FPS than the rider chose, but the saved settings are never overwritten with the negotiated values; the profile bar shows the applied values when they differ. `TelemetryProvider.initialize` returns without starting anything if location services are off or permission is denied. It runs again on the next camera init or START. Until the camera is initialized, the preview area shows a spinner or, after a failed attempt, a camera-unavailable panel with Retry and Open Settings.
+In code, `_bootstrapRuntimePrerequisites` calls `_initializeCamera`. The permission recovery dialog offers Later, Request Again and Open Settings; Open Settings waits until the app is resumed (at most two minutes) before it checks again. The camera may negotiate a lower resolution or FPS than the rider chose, but the saved settings are never overwritten with the negotiated values; the profile chip shows the applied values and a dashed amber outline when they differ. `TelemetryProvider.initialize` returns without starting anything if location services are off or permission is denied. It runs again on the next camera init or START. Until the camera is initialized, the preview area shows a spinner or, after a failed attempt, a camera-unavailable panel with Retry and Open Settings.
 
 ## Core flow: recording a ride
 
@@ -228,11 +298,11 @@ Deep dives: [recording-pipeline.md](recording-pipeline.md) covers segments, roll
 
 ```mermaid
 flowchart TD
-    H["HISTORY button (idle only)"] --> R["releaseCameraIfIdle, TelemetryProvider.pauseTracking"]
+    H["Rides button (idle only)"] --> R["releaseCameraIfIdle, TelemetryProvider.pauseTracking"]
     R --> L["RidesListScreen: CameraProvider.getRecordings"]
     L --> F["Isolate.run(loadRideHistoryIndexed): ride index hits, fromTelemetryFile for misses, fromVideoFile for orphan videos"]
     F --> W["RideIndexStore (UI isolate) writes the refreshed index"]
-    F --> List["Locked Clips / All Rides cards with integrity, video check and lock badges"]
+    F --> List["Locked Clips / All Rides rows with integrity and lock stamps, filter chips"]
     List -->|unlock| U["confirm, RideRecord.changeLockState(false): re-verify (stored segment hashes reused), rewrite JSON + envelope, reload"]
     List -->|delete| D["confirm, delete segments and JSON, reload"]
     List -->|tap| P["RidePlaybackScreen"]
@@ -243,7 +313,7 @@ flowchart TD
     List -->|back to recording| C["RecordingScreen re-runs _initializeCamera"]
 ```
 
-While recording, the HISTORY button reads MINIMISE, and both it and system back try to enter PiP instead of navigating. A locked ride must be unlocked before it can be deleted, unless its lock cannot be removed because it failed the integrity check. Deep dives: [playback-and-history.md](playback-and-history.md) for the list and the player, and [data-formats.md](data-formats.md) for the telemetry JSON, the integrity envelope and the quarantine rules.
+While recording, the Rides button is replaced by the details panel's Pop-out button (shown only while parked), and both it and system back try to enter PiP instead of navigating. A locked ride must be unlocked before it can be deleted, unless its lock cannot be removed because it failed the integrity check. Deep dives: [playback-and-history.md](playback-and-history.md) for the list and the player, and [data-formats.md](data-formats.md) for the telemetry JSON, the integrity envelope and the quarantine rules.
 
 ## Concurrency model
 
@@ -294,7 +364,8 @@ While recording, the HISTORY button reads MINIMISE, and both it and system back 
 | Path | Contents |
 |---|---|
 | `lib/` | All Dart source, split into `core/` and `features/` (see [Module map](#module-map)) |
-| `test/` | Unit and widget tests under `test/core/` and `test/features/`, grouped by `lib/` area, plus `widget_test.dart` (app smoke test), the ride-file fixtures in `test/fixtures/ride_files/` and shared test helpers in `test/support/` (a P-256 key standing in for the phone's signing key): 700 tests in 52 files |
+| `assets/fonts/` | The bundled Barlow and Barlow Condensed fonts (six TrueType files) and their licence `OFL.txt`, declared in [pubspec.yaml](../pubspec.yaml) |
+| `test/` | Unit and widget tests under `test/core/` and `test/features/`, grouped by `lib/` area, plus `widget_test.dart` (app smoke test), the ride-file fixtures in `test/fixtures/ride_files/` and shared test helpers in `test/support/` (a P-256 key standing in for the phone's signing key): 1045 tests in 64 files, counted in [development.md](development.md#testing) |
 | `android/` | Gradle project (`app/build.gradle.kts`), manifest, Kotlin `MainActivity` and `BackgroundRecordingService`, resources (themes, the monochrome notification icon, backup and data-extraction rules), ProGuard rules and `key.properties.template` |
 | `scripts/` | `release-security-precheck.ps1` (used by CI) and `generate-keystore.ps1` |
 | `release-notes/` | Per-release notes, `v0.1.8.md` through `v0.1.13.md` |
@@ -320,4 +391,4 @@ Build, test and tooling details are in [development.md](development.md). Signing
 | **Retention** | Deletion of recordings by `CameraProvider`. The per-session loop limit (`maxRollingSegments`, from the `loopSegmentCount` setting) counts and deletes only the session's unlocked segments. About 2 s after a stop, a background isolate finds telemetry files with no locked segments whose videos are all gone, and those files are deleted. Earlier rides are never deleted automatically; the rider can delete a ride in Ride History |
 | **Blackout mode** | A recording-only mode that covers the screen in black (a Flutter overlay; the camera's use cases are not changed), while still showing notices, the REC indicator with the elapsed time and an exit hint. A 2 s hold anywhere exits it, as does the app going `hidden` or `paused`, and every stop |
 | **PiP** | Android Picture-in-Picture. While recording, the activity enters PiP on leave/pause (native) or on back/MINIMISE (Dart via `PipService`), and `RecordingScreen` switches to a compact layout. Android only |
-| **Preflight** | The checklist that START runs before recording (rows decided by `StartPreflightEvaluator`, shown by `StartPreflightSheet`). Blocking checks: camera, microphone (when audio is on) and location permissions, location services, camera readiness and media write access. Advisory checks: the foreground notification and the battery-optimization exemption (both Android only), incident detection availability, battery level and temperature. When every check passes, no sheet is shown. A failed blocking check or any warning opens it, except the battery-optimization warning once its one-time offer has been shown; that row is then listed only when another check opens the sheet |
+| **Preflight** | The checklist that START runs before recording (checks decided by `StartPreflightEvaluator`, grouped into rows and shown by `StartPreflightSheet` as the full-screen "Ready to record?" page). Blocking checks: camera, microphone (when audio is on) and location permissions, location services, camera readiness and media write access. Advisory checks: the foreground notification and the battery-optimization exemption (both Android only), incident detection availability, battery level and temperature. When every check passes, no page is shown. A failed blocking check opens it, and so does a warning whose check opens it by itself (the foreground notification, and the battery-optimization exemption until its one-time offer has been shown); incident detection, battery level and temperature are listed only when the page opens for another check. Rows have Fix buttons, and the checks run again after each fix |
