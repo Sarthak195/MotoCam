@@ -44,7 +44,9 @@ There is no backend, account system, analytics or crash reporting. The only netw
 
 | File | Responsibility |
 |---|---|
-| [main.dart](../lib/main.dart) | Entry point: error hooks for every build mode, a no-op `debugPrint` in release builds, the portrait lock, the root `MultiProvider` and the `MaterialApp`, whose home is `RecordingScreen` |
+| [main.dart](../lib/main.dart) | Entry point: a no-op `debugPrint` in release builds, the diagnostic log and its error hooks for every build mode, the portrait lock, the root `MultiProvider` and the `MaterialApp`, whose home is `RecordingScreen` |
+| [core/diagnostics/diagnostic_log.dart](../lib/core/diagnostics/diagnostic_log.dart) | `DiagnosticLog`: the persistent diagnostic log (`<filesDir>/diagnostics/app.log`, rotated to `app.log.1` at about 1 MiB, two files kept), one line per event (UTC time, level, source, message), buffered and written off the hot path, web addresses cut to their host, repeated lines counted. `DiagnosticLog.instance` (disabled until `main` installs one) and `debugPrintError` |
+| [core/diagnostics/diagnostics.dart](../lib/core/diagnostics/diagnostics.dart) | Wiring of the log: `installErrorHooks` (`FlutterError.onError`, `PlatformDispatcher.instance.onError`), `flushDiagnosticsOnPause`, the session header and the process exits from the `diagnostics` channel (`DiagnosticsChannel`, `startDiagnosticSession`), and the share and clear actions of the settings sheet |
 | [core/providers/app_settings_provider.dart](../lib/core/providers/app_settings_provider.dart) | `AppSettingsProvider`: rider settings stored in `SharedPreferences` (including the opt-in gallery export), plus quality presets, option lists, label helpers and the incident threshold and debounce derived from the sensitivity setting. See [settings.md](settings.md) |
 | [core/services/app_permission_service.dart](../lib/core/services/app_permission_service.dart) | `AppPermissionService.ensureRequiredPermissions(audioEnabled, galleryExportEnabled)`: requests the permissions and returns a `PermissionAuditResult` that separates required items from recommended ones and lists permanently denied required ones. It reports the battery-optimization exemption status but never requests it. Also holds the shared `isPermissionGranted` predicate |
 | [core/services/background_recording_service.dart](../lib/core/services/background_recording_service.dart) | Singleton bridge to the Android foreground service: start (returns whether the service started), update, stop, the battery-optimization exemption status and request, the offer-once flag and the `events` stream (`stopRequested`). Android only |
@@ -144,10 +146,11 @@ Notes:
 | `PipService` | `pip` | Not gated. Failures are caught and return `false` | `enterPipMode` | `onPipModeChanged` |
 | `CameraProvider.platform` | `media` | Gallery export runs only on Android; a failed free-space query returns `null` | `getAvailableStorageBytes`, `exportVideoToGallery` | none |
 | `GalleryCopies` | `gallery` | Not gated; Ride History offers it only on Android. Errors report `failed` | `galleryItemsExist`, `deleteGalleryItems`, `requestDeleteGalleryItems` | none |
+| `DiagnosticsChannel` | `diagnostics` | Not gated. Errors and a missing handler return an empty map or list | `getSessionInfo`, `takeExitReasons` | none |
 | `RideExportChannel` | `ride_export` | Not gated; Ride History and playback offer the export only on Android. A cancel is `RideExportCancelled`, other errors are a `RideExportFailure` with the native code, and a missing handler is `UNAVAILABLE` | `pickExportFolder`, `prepareFolder`, `exportFile`, `hashFile`, `cancel`, `shareFiles`, `setKeepScreenOn` | none |
 | `AppPermissionService` | none (uses `permission_handler`) | Android-only extras: notifications, legacy storage (gallery export on, Android 9 and lower), the battery-exemption status | n/a | n/a |
 
-Every Kotlin handler is registered in `MainActivity.configureFlutterEngine` (the `integrity`, `legacy_recordings`, `gallery` and `ride_export` ones through their own classes). Channel contracts, manifest permissions, and the foreground service are covered in [platform-integration.md](platform-integration.md).
+Every Kotlin handler is registered in `MainActivity.configureFlutterEngine` (the `integrity`, `diagnostics`, `legacy_recordings`, `gallery` and `ride_export` ones through their own classes). `MainActivity.onCreate` installs the native crash handler (`Diagnostics.installCrashHandler`) before `super.onCreate`. Channel contracts, manifest permissions, and the foreground service are covered in [platform-integration.md](platform-integration.md).
 
 ## App startup sequence
 
@@ -161,7 +164,8 @@ sequenceDiagram
     participant C as CameraProvider
     participant T as TelemetryProvider
     M->>M: ensureInitialized, release: debugPrint no-op
-    M->>M: set FlutterError.onError, PlatformDispatcher.onError
+    M->>M: DiagnosticLog.instance, set FlutterError.onError, PlatformDispatcher.onError
+    M->>M: flush on pause; session header and exit reasons (unawaited)
     M->>M: await setPreferredOrientations(portraitUp)
     M->>App: runApp(MotoCamApp)
     App->>RS: MultiProvider (lazy) > MaterialApp > home
@@ -273,8 +277,9 @@ While recording, the HISTORY button reads MINIMISE, and both it and system back 
 
 ## Error handling as practised
 
-- **Global handlers.** In release builds `main` replaces `debugPrint` with a no-op. `FlutterError.onError` keeps Flutter's default reporting in debug and profile builds; in release it logs the error and stack with `debugPrintSynchronously` and skips errors reported as silent. `PlatformDispatcher.instance.onError` logs uncaught asynchronous errors in every build mode and keeps the app running. There is no crash reporter.
-- **Catch, log, fall back.** Broad `catch (e)` blocks are the norm; `lib/` has a few typed clauses (`on CameraException`, `on PlatformException`, `on FileSystemException`). `CameraProvider` logs verbose messages through `_log`, which prints only when `enableDebugLogging` (`kDebugMode`) is true, and warnings and errors through `_logError` in every build mode. Other code uses `debugPrint` or silent `catch (_)`.
+- **Global handlers.** In release builds `main` replaces `debugPrint` with a no-op. `FlutterError.onError` keeps Flutter's default reporting in debug and profile builds; in release it logs the error and stack with `debugPrintSynchronously` and skips errors reported as silent. `PlatformDispatcher.instance.onError` logs uncaught asynchronous errors in every build mode and keeps the app running. Both also write to the diagnostic log (below). No zone is used, and every isolate the app starts is an `Isolate.run`, which rethrows its error to the caller.
+- **Diagnostic log.** `DiagnosticLog` keeps app errors on the phone so a tester can hand them over (Share diagnostic log in the recording settings sheet); there is no crash reporter and nothing is uploaded. It records framework errors (not silent ones), uncaught asynchronous errors, `CameraProvider._logError`, the error `debugPrint` paths (through `debugPrintError`, which still prints as before), uncaught JVM exceptions (`Diagnostics.kt`, written synchronously before the previous handler kills the process), a session header at each start (version, build mode and switches, phone, Android release and SDK) and, on Android 11 and later, every process exit the system recorded since the last start (crash, native crash, ANR with the head of its main-thread trace, low memory and so on). Writes never throw: lines are buffered, errors flushed at once, info lines within 2 s, everything on pause. It never holds a position, speed or route: callers log error text only and web addresses lose their path (a map tile address reveals the ride area).
+- **Catch, log, fall back.** Broad `catch (e)` blocks are the norm; `lib/` has a few typed clauses (`on CameraException`, `on PlatformException`, `on FileSystemException`). `CameraProvider` logs verbose messages through `_log`, which prints only when `enableDebugLogging` (`kDebugMode`) is true, and warnings and errors through `_logError` in every build mode. Other code uses `debugPrintError` for errors, `debugPrint` for the rest, or silent `catch (_)`.
 - **Failure as a return value.** Most APIs report failure through their return value:
   - `CameraProvider.startRecording` and `applyRecordingSettings` return `false`; a refused start because of low storage also sets `lastRecordingError`.
   - `stopRecording` returns `null` or the best available path.
