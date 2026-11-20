@@ -273,6 +273,37 @@ void main() {
       expect(await Directory(stagingPath()).exists(), isFalse);
     });
 
+    test('clear logs the session header again', () async {
+      await startDiagnosticSession(
+        log,
+        _FakeNative(
+          info: const {'versionName': '0.1.19', 'versionCode': 19},
+          exits: const [
+            {'timestamp': 1, 'reason': 'CRASH', 'description': 'boom'},
+          ],
+        ),
+        buildMode: 'debug',
+        switches: const {},
+      );
+      log.error('camera', 'old error');
+      final cleared = await clearDiagnosticLog(
+        log: log,
+        cacheDirectory: () async => cache,
+      );
+      expect(cleared, isTrue);
+      log.error('camera', 'new error');
+      final lines = await logLines();
+      expect(lines, hasLength(2));
+      expect(
+        lines[0],
+        contains('INFO [session] Log cleared. Session start: MotoCam 0.1.19'),
+      );
+      expect(lines[0], contains('debug'));
+      expect(lines[1], contains('new error'));
+      expect(lines.join(' '), isNot(contains('old error')));
+      expect(lines.join(' '), isNot(contains('boom')));
+    });
+
     test('the confirm text says there is no location', () {
       expect(diagnosticShareConfirmText, contains('no location'));
     });

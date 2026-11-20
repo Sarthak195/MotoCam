@@ -10,6 +10,7 @@
 // (a map tile address reveals the ride area).
 
 import 'dart:async';
+import 'dart:collection';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
@@ -37,9 +38,12 @@ enum DiagnosticLogLevel {
 /// appended by [flush], which runs at once for warnings and errors, after
 /// [flushDelay] for info lines and repeats, and on app pause (see
 /// `flushDiagnosticsOnPause`). Any I/O failure drops the batch quietly.
-/// A line equal to the one before (same level, source and text, as a
-/// build error repeated every frame) is counted instead of written, so it
-/// cannot rotate the rest of the log away.
+/// A line (same level, source and text) seen [repeatWriteLimit] times
+/// among the last [recentKeyLimit] distinct lines is then counted instead
+/// of written, so build errors repeated every frame, even two that
+/// alternate, cannot rotate the rest of the log away. The counts are
+/// written, with the head of their line, by the next [flush] that another
+/// line, a pause or a share causes, or when the line leaves the window.
 class DiagnosticLog {
   /// Creates the log under `<directory>/diagnostics`, where [resolveDirectory]
   /// returns the app's private files directory.
@@ -81,6 +85,15 @@ class DiagnosticLog {
   /// Longest message (stack trace included) kept on one line.
   static const int maxMessageChars = 8000;
 
+  /// Times a line is written before further copies are only counted.
+  static const int repeatWriteLimit = 2;
+
+  /// Distinct recent lines whose copies are counted.
+  static const int recentKeyLimit = 16;
+
+  /// Characters of a counted line quoted in its count line.
+  static const int repeatHeadChars = 200;
+
   /// Size the current file may reach: a batch that would take it past this
   /// rotates it first.
   final int maxBytes;
@@ -100,11 +113,16 @@ class DiagnosticLog {
   Directory? _resolvedDirectory;
   Timer? _timer;
   int _dropped = 0;
-  String? _lastKey;
-  int _repeats = 0;
+  // Recent distinct lines, oldest first.
+  final LinkedHashMap<String, _Recent> _recent =
+      LinkedHashMap<String, _Recent>();
 
   /// Whether this log records anything.
   bool get enabled => _enabled;
+
+  /// The session header logged at this start (set by
+  /// `startDiagnosticSession`), kept so a clear can log it again.
+  String? sessionHeader;
 
   /// Lines waiting for [flush] (for tests).
   @visibleForTesting
@@ -176,13 +194,18 @@ class DiagnosticLog {
       }
       final text = parts.join(' | ');
       final key = '${level.label} $source $text';
-      if (key == _lastKey) {
-        _repeats++;
-        _scheduleFlush();
+      final seen = _recent.remove(key) ?? _Recent(source, text);
+      _recent[key] = seen;
+      if (seen.written >= repeatWriteLimit) {
+        // Counted only: written by the next flush something else causes.
+        seen.suppressed++;
         return;
       }
-      _emitRepeats();
-      _lastKey = key;
+      seen.written++;
+      while (_recent.length > recentKeyLimit) {
+        final oldest = _recent.remove(_recent.keys.first)!;
+        _emitCount(oldest);
+      }
       _push(formatLine(_clock(), level, source, text));
       if (level == DiagnosticLogLevel.info) {
         _scheduleFlush();
@@ -231,22 +254,33 @@ class DiagnosticLog {
     });
   }
 
-  // Writes the count of lines equal to the last one, if any.
-  void _emitRepeats() {
-    if (_repeats == 0) {
+  // Writes the copies of [recent] counted since its last count line.
+  void _emitCount(_Recent recent) {
+    final count = recent.suppressed;
+    if (count == 0) {
       return;
     }
-    final count = _repeats;
-    _repeats = 0;
+    recent.suppressed = 0;
+    var head = redact(recent.text);
+    if (head.length > repeatHeadChars) {
+      head = '${head.substring(0, repeatHeadChars)}...';
+    }
     _push(
       formatLine(
         _clock(),
         DiagnosticLogLevel.info,
         'diagnostics',
-        'The previous line repeated $count more '
-            '${count == 1 ? 'time' : 'times'}',
+        'A line from [${recent.source}] repeated $count more '
+            '${count == 1 ? 'time' : 'times'}: $head',
       ),
     );
+  }
+
+  // Writes the counts of every recent line.
+  void _emitRepeats() {
+    for (final recent in _recent.values) {
+      _emitCount(recent);
+    }
   }
 
   /// Appends the buffered lines to the file, rotating it first when the
@@ -355,8 +389,7 @@ class DiagnosticLog {
     }
     _buffer.clear();
     _dropped = 0;
-    _repeats = 0;
-    _lastKey = null;
+    _recent.clear();
     final done = Completer<bool>();
     _chain = _chain
         .then((_) async {
@@ -384,6 +417,16 @@ class DiagnosticLog {
         });
     return done.future;
   }
+}
+
+/// A recent distinct line: how often it was written and counted.
+class _Recent {
+  _Recent(this.source, this.text);
+
+  final String source;
+  final String text;
+  int written = 0;
+  int suppressed = 0;
 }
 
 /// Prints [message] with `debugPrint`, as the error paths did before (so it

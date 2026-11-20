@@ -165,14 +165,13 @@ Future<void> startDiagnosticSession(
 }) async {
   try {
     final info = await native.sessionInfo();
-    log.info(
-      'session',
-      diagnosticSessionHeader(
-        info,
-        buildMode: buildMode ?? diagnosticBuildMode,
-        switches: switches,
-      ),
+    final header = diagnosticSessionHeader(
+      info,
+      buildMode: buildMode ?? diagnosticBuildMode,
+      switches: switches,
     );
+    log.sessionHeader = header;
+    log.info('session', header);
     final exits = await native.takeExitReasons();
     for (final exit in exits) {
       final reason = '${exit['reason'] ?? '?'}';
@@ -334,13 +333,20 @@ Future<DiagnosticShareResult> shareDiagnosticLog({
 }
 
 /// Deletes the log files, the buffered lines and the staged share copies
-/// (`<cacheDirectory>/ride_export/diagnostics`); returns whether the log
-/// files are gone. Never throws.
+/// (`<cacheDirectory>/ride_export/diagnostics`), then logs this session's
+/// header again (when one was logged), so a log shared later still names
+/// the build and phone; returns whether the old log files are gone. Never
+/// throws.
 Future<bool> clearDiagnosticLog({
   required DiagnosticLog log,
   required Future<Directory> Function() cacheDirectory,
 }) async {
   final cleared = await log.clear();
+  final header = log.sessionHeader;
+  if (header != null) {
+    log.info('session', 'Log cleared. $header');
+    await log.flush();
+  }
   try {
     final sep = Platform.pathSeparator;
     final staging = Directory(

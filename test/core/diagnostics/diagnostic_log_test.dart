@@ -118,7 +118,7 @@ void main() {
     expect(await logFile().readAsLines(), hasLength(3));
   });
 
-  test('a repeated line is counted, not written again', () async {
+  test('a repeated line is written twice, then counted', () async {
     final log = newLog();
     for (var i = 0; i < 5; i++) {
       log.error('flutter', 'same error');
@@ -126,10 +126,55 @@ void main() {
     log.error('flutter', 'other error');
     await log.flush();
     final lines = await logFile().readAsLines();
-    expect(lines, hasLength(3));
+    expect(lines, hasLength(4));
     expect(lines[0], contains('same error'));
-    expect(lines[1], contains('The previous line repeated 4 more times'));
+    expect(lines[1], contains('same error'));
     expect(lines[2], contains('other error'));
+    expect(
+      lines[3],
+      contains('A line from [flutter] repeated 3 more times: same error'),
+    );
+  });
+
+  test('two alternating errors do not rotate the header away', () async {
+    final log = newLog(maxBytes: 4000);
+    log.info('session', 'Session start: header');
+    await log.flush();
+    final stack = StackTrace.fromString('#0 build ${'s' * 500}');
+    for (var round = 0; round < 50; round++) {
+      log.error('flutter', 'Null check A', stack: stack);
+      log.error('flutter', 'Null check B', stack: stack);
+      // Past flushDelay: a counted copy must not cause a write.
+      await Future<void>.delayed(const Duration(milliseconds: 15));
+    }
+    await log.flush();
+    expect(await logFile(DiagnosticLog.rotatedFileName).exists(), isFalse);
+    final lines = await logFile().readAsLines();
+    expect(lines.first, contains('Session start: header'));
+    expect(lines.where((l) => l.contains('ERROR [flutter]')), hasLength(4));
+    final counts = lines.where((l) => l.contains('repeated')).toList();
+    expect(counts, hasLength(2));
+    expect(counts[0], contains('repeated 48 more times: Null check A'));
+    expect(counts[1], contains('repeated 48 more times: Null check B'));
+    expect(counts[0].length, lessThan(400));
+  });
+
+  test('a line leaving the recent window writes its count', () async {
+    final log = newLog();
+    for (var i = 0; i < 3; i++) {
+      log.error('flutter', 'first');
+    }
+    for (var i = 0; i < DiagnosticLog.recentKeyLimit; i++) {
+      log.error('other', 'line $i');
+    }
+    expect(
+      log.bufferedLines.where((l) => l.contains('repeated 1 more time:')),
+      hasLength(1),
+    );
+    log.error('flutter', 'first');
+    await log.flush();
+    final lines = await logFile().readAsLines();
+    expect(lines.where((l) => l.contains('[flutter] first')), hasLength(3));
   });
 
   test('rotates to app.log.1 and keeps two files', () async {
