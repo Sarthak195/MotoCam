@@ -17,6 +17,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:isolate';
+import 'dart:math' as math;
 
 import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
@@ -879,7 +880,8 @@ class RideExportFileEntry {
   /// copy, the keyframe the trim snapped back to), else `null`.
   final int? clipFromMs;
 
-  /// For a section: where the file ends in its clip (ms), else `null`.
+  /// For a section: where the file ends in its clip (ms; for a trimmed
+  /// copy, the last sample written), else `null`.
   final int? clipToMs;
 
   /// How the exported bytes compare with [recordedSha256].
@@ -1347,7 +1349,9 @@ class RideExporter {
 
   /// The entry of [item] exported (or hashed) as [bytes] with [sha256];
   /// for a section it carries the clip-local range: the whole clip, or
-  /// from the keyframe [trimmed] started at to the part's end.
+  /// from the keyframe [trimmed] started at to the last sample it wrote
+  /// (never past the part's end; the part's end when the trim reports no
+  /// sample time).
   RideExportFileEntry _entryOf(
     RideExportItem item,
     int bytes,
@@ -1368,7 +1372,11 @@ class RideExporter {
           : trimmed == null
           ? part.clipFromMs
           : trimmed.firstUs ~/ 1000,
-      clipToMs: part?.clipToMs,
+      clipToMs: part == null
+          ? null
+          : trimmed == null || trimmed.lastUs < 0
+          ? part.clipToMs
+          : math.min(part.clipToMs, trimmed.lastUs ~/ 1000),
     );
   }
 

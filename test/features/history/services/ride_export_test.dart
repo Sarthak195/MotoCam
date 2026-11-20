@@ -40,6 +40,10 @@ class _FakeNative implements RideExportNative {
   /// Trims made so far; each trim writes different bytes, like MediaMuxer.
   int trims = 0;
 
+  /// Clip name -> the `lastUs` its trim reports (default: `endUs`, a
+  /// sample on the end).
+  final Map<String, int> lastUs = <String, int>{};
+
   /// Error code thrown by [prepareFolder], if any.
   String? failPrepare;
 
@@ -221,7 +225,7 @@ class _FakeNative implements RideExportNative {
     return RideTrimmedClip(
       bytes: target.lengthSync(),
       firstUs: startUs ~/ 700000 * 700000,
-      lastUs: endUs - 1,
+      lastUs: lastUs[name] ?? endUs,
     );
   }
 
@@ -1201,6 +1205,31 @@ void main() {
       expect(
         File('$folder${_sep}a.mp4').readAsStringSync(),
         'trim6:30000000-59800000:aaaa',
+      );
+    });
+
+    test('a trimmed clip ends at the last sample written, or at the '
+        'requested end when the trim reports none', () async {
+      // a is cut at its start and runs to its timeline end (59.8 s), but
+      // its media ends at 58.6 s; c's trim reports no sample time.
+      final p = await sectionPlan('t7', 30000, 150000);
+      final native = _FakeNative(tree)
+        ..lastUs['a.mp4'] = 58633333
+        ..lastUs['c.mp4'] = -1;
+      final result = await exporter(
+        native,
+      ).exportToFolder(p, treeUri: tree.path);
+      expect(result.outcome, RideExportOutcome.done);
+      expect(result.clips.map((c) => c.clipToMs), <int>[58633, 59800, 30000]);
+      final folder = exportFolder(p).path;
+      final manifest =
+          jsonDecode(File('$folder${_sep}manifest.json').readAsStringSync())
+              as Map<String, dynamic>;
+      final files = (manifest['files'] as List).cast<Map<String, dynamic>>();
+      expect(files.map((f) => f['clipToMs']), <int>[58633, 59800, 30000]);
+      expect(
+        File('$folder${_sep}MOTOCAM-EXPORT.txt').readAsStringSync(),
+        contains('  In the clip: 00:29.400 to 00:58.633\n'),
       );
     });
 
