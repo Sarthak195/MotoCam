@@ -17,6 +17,7 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:isolate';
 import 'dart:math' as math;
+import '../../../core/diagnostics/diagnostic_log.dart';
 
 /// Collects and manages real-time ride telemetry (GPS, speed, acceleration)
 /// and persists ride sessions as JSON alongside video segments.
@@ -404,7 +405,7 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
       }
       _isLocationServiceEnabled = await Geolocator.isLocationServiceEnabled();
     } catch (error) {
-      debugPrint('Telemetry: resume check failed: $error');
+      debugPrintError('telemetry', 'Telemetry: resume check failed: $error');
       return;
     }
     if (_isTrackingStarted || _isBackgroundState(_lifecycleState)) {
@@ -446,12 +447,19 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
       _serviceStatusSubscription = Geolocator.getServiceStatusStream().listen(
         _onServiceStatusChanged,
         onError: (Object error) {
-          debugPrint('Telemetry: service status stream error: $error');
+          debugPrintError(
+            'telemetry',
+            'Telemetry: service status stream error: $error',
+          );
         },
       );
     } catch (error) {
       // Not supported on every platform; polling still detects outages.
-      debugPrint('Telemetry: service status stream unavailable: $error');
+      debugPrintError(
+        'telemetry',
+        'Telemetry: service status stream unavailable: $error',
+        level: DiagnosticLogLevel.warning,
+      );
     }
 
     _resetFallbackBackoff();
@@ -469,7 +477,7 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   void _onPositionStreamError(Object error) {
-    debugPrint('Telemetry: position stream error: $error');
+    debugPrintError('telemetry', 'Telemetry: position stream error: $error');
     if (error is LocationServiceDisabledException) {
       // The platform removed its updates; the service-status listener
       // re-subscribes when location is switched back on.
@@ -844,7 +852,11 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
             );
           },
           onError: (Object error) {
-            debugPrint('Telemetry: orientation stream unavailable: $error');
+            debugPrintError(
+              'telemetry',
+              'Telemetry: orientation stream unavailable: $error',
+              level: DiagnosticLogLevel.warning,
+            );
             unawaited(_orientationSubscription?.cancel());
             _orientationSubscription = null;
           },
@@ -864,7 +876,10 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   void _onLinearAccelerationStreamError(Object error) {
-    debugPrint('Telemetry: linear acceleration stream error: $error');
+    debugPrintError(
+      'telemetry',
+      'Telemetry: linear acceleration stream error: $error',
+    );
     // Android reports a missing sensor as NO_SENSOR; UNAVAILABLE is treated
     // the same.
     if (!_isUsingGravityFallback &&
@@ -892,7 +907,11 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
             _onRawAcceleration(event.x, event.y, event.z, at: event.timestamp);
           },
           onError: (Object error) {
-            debugPrint('Telemetry: accelerometer unavailable: $error');
+            debugPrintError(
+              'telemetry',
+              'Telemetry: accelerometer unavailable: $error',
+              level: DiagnosticLogLevel.warning,
+            );
             unawaited(_accelerometerSubscription?.cancel());
             _accelerometerSubscription = null;
             _isIncidentDetectionAvailable = false;
@@ -1166,7 +1185,7 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
       await _enqueueWrite(telemetryPath, sealed);
       return telemetryPath;
     } catch (error) {
-      debugPrint('Telemetry: checkpoint failed: $error');
+      debugPrintError('telemetry', 'Telemetry: checkpoint failed: $error');
       return null;
     }
   }
@@ -1263,7 +1282,7 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
       }
       return path;
     } catch (error) {
-      debugPrint('Telemetry: ride save failed: $error');
+      debugPrintError('telemetry', 'Telemetry: ride save failed: $error');
       _lastPersistError = error.toString();
       _pendingPersists.add(persist);
       return null;
@@ -1460,7 +1479,10 @@ class TelemetryProvider extends ChangeNotifier with WidgetsBindingObserver {
       try {
         await _hashSegments(paths);
       } catch (error) {
-        debugPrint('Telemetry: background segment hashing failed: $error');
+        debugPrintError(
+          'telemetry',
+          'Telemetry: background segment hashing failed: $error',
+        );
       }
     }();
   }

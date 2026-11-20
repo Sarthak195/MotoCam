@@ -15,6 +15,7 @@ import 'dart:math' as math;
 import 'package:flutter/foundation.dart';
 
 import 'crash_detector.dart';
+import '../../core/diagnostics/diagnostic_log.dart';
 
 /// The speed side of one GPS fix, as the crash detector was fed it. Never
 /// holds a position.
@@ -452,6 +453,10 @@ class CrashDebugLog implements CrashDetectorObserver {
     _timer?.cancel();
     _timer = null;
     _pending.clear();
-    debugPrint('Telemetry: crash debug log disabled for this ride: $error');
+    debugPrintError(
+      'telemetry',
+      'Telemetry: crash debug log disabled for this ride: $error',
+      level: DiagnosticLogLevel.warning,
+    );
   }
 }

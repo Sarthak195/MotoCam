@@ -30,6 +30,7 @@ import '../../../core/utils/path_utils.dart' as path_utils;
 import '../models/ride_index.dart';
 import '../models/ride_record.dart';
 import 'ride_export_text.dart';
+import '../../../core/diagnostics/diagnostic_log.dart';
 
 export '../../../core/services/ride_export_channel.dart'
     show RideExportCancelled, RideExportFailure, RideExportNative;
@@ -1229,7 +1230,7 @@ class RideExporter {
       run.fail(e.code, current);
       return run.result(RideExportOutcome.failed);
     } catch (e) {
-      debugPrint('Ride export failed: $e');
+      debugPrintError('export', 'Ride export failed: $e');
       run.fail('FAILED', current);
       return run.result(RideExportOutcome.failed);
     } finally {
@@ -1337,7 +1338,7 @@ class RideExporter {
       run.fail(e.code, current);
       return run.result(RideExportOutcome.failed);
     } catch (e) {
-      debugPrint('Ride share failed: $e');
+      debugPrintError('export', 'Ride share failed: $e');
       run.fail('FAILED', current);
       return run.result(RideExportOutcome.failed);
     } finally {
