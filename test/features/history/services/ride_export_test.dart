@@ -1445,12 +1445,41 @@ void main() {
         ),
       );
       expect(
-        flat,
+        readme,
         contains(
-          'A payloadHash mismatch caused by another language\'s JSON encoder '
-          'is not by itself evidence of tampering.',
+          "check.py:\n\n"
+          "import hashlib, json, sys\n"
+          "d = json.load(open(sys.argv[1], encoding='utf-8'))\n"
+          "i = dict(d['integrity'])\n"
+          "stored = i.pop('payloadHash')\n"
+          "v = i.get('envelopeVersion')\n"
+          "if v == 3: i.pop('signature', None)\n"
+          "if v in (2, 3): d['integrity'] = i\n"
+          "else: del d['integrity']\n"
+          "s = json.dumps(d, sort_keys=True, separators=(',', ':'), "
+          "ensure_ascii=False)\n"
+          "h = hashlib.sha256(s.encode('utf-8')).hexdigest()\n"
+          "print(h, 'MATCH' if h == stored else 'MISMATCH')\n\n",
         ),
       );
+      expect(readme, contains('\n  python3 check.py RIDEDATA '));
+      expect(readme, contains('\n  py check.py RIDEDATA '));
+      expect(
+        flat,
+        contains(
+          'so a MISMATCH from this recipe or another JSON encoder alone is '
+          'not proof of tampering.',
+        ),
+      );
+      expect(
+        flat,
+        contains(
+          '3. Verify the signature (SIGNED rides) in a POSIX shell (Linux, '
+          'macOS, or Git Bash or WSL on Windows):',
+        ),
+      );
+      expect(readme, contains('\n  Verified OK\n  Verification failure\n'));
+      expect(readme, isNot(contains('another language')));
       expect(
         flat,
         contains(
@@ -1476,7 +1505,9 @@ void main() {
         if (line.contains(' ') &&
             !line.startsWith('  ') &&
             !line.startsWith('Ride data:') &&
-            !line.startsWith('Clips:')) {
+            !line.startsWith('Clips:') &&
+            // A line of the Python recipe, never wrapped.
+            !line.startsWith('s = json.dumps(')) {
           expect(line.length, lessThanOrEqualTo(72), reason: line);
         }
       }
