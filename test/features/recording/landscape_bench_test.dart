@@ -1,6 +1,6 @@
 // Landscape recording engine on the recording screen: the switch off
 // changes nothing; on, gravity pins the UI and the idle capture, and the
-// landscape bench layout fits a landscape phone; a ride keeps the pin
+// landscape recording layout fits a landscape phone; a ride keeps the pin
 // frozen from the START tap to the end of STOP.
 
 import 'dart:async';
@@ -18,6 +18,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:motocam/core/providers/app_settings_provider.dart';
 import 'package:motocam/features/camera/providers/camera_provider.dart';
 import 'package:motocam/features/recording/recording_screen.dart';
+import 'package:motocam/features/recording/widgets/recording_landscape.dart';
 import 'package:motocam/features/telemetry/providers/telemetry_provider.dart';
 
 const _mockedChannels = [
@@ -345,12 +346,12 @@ void main() {
     expect(uiPins, isEmpty);
     expect(camera.idleLocks, isEmpty);
     expect(find.bySemanticsLabel('HISTORY'), findsOneWidget);
-    expect(find.text('LANDSCAPE BENCH LAYOUT'), findsNothing);
+    expect(find.byType(RecordingLandscapeRail), findsNothing);
     await disposeTree(tester);
   });
 
   testWidgets('switch on: gravity pins the UI and the idle capture, and the '
-      'bench layout fits a landscape phone', (tester) async {
+      'landscape layout fits a landscape phone', (tester) async {
     final camera = await pumpScreen(tester, landscapeRecording: true);
     expect(gravityOpened, [SensorInterval.uiInterval]);
     expect(find.bySemanticsLabel('HISTORY'), findsOneWidget);
@@ -370,10 +371,11 @@ void main() {
     addTearDown(tester.view.reset);
     await tester.pump();
 
-    expect(find.text('LANDSCAPE BENCH LAYOUT'), findsOneWidget);
+    expect(find.byType(RecordingLandscapeRail), findsOneWidget);
+    expect(find.byType(RecordingLandscapeThumbColumn), findsOneWidget);
     expect(find.bySemanticsLabel('START RECORDING'), findsOneWidget);
-    expect(find.text('LOCK'), findsOneWidget);
-    expect(find.bySemanticsLabel('HISTORY'), findsNothing);
+    // Ride History is reachable in landscape too, from the rail.
+    expect(find.bySemanticsLabel('HISTORY'), findsOneWidget);
     expect(find.byKey(const ValueKey('fake-camera-texture')), findsOneWidget);
     // The preview takes the landscape ratio on this path.
     final ratio = tester.widget<AspectRatio>(

@@ -52,8 +52,8 @@ class RecordingControls extends StatelessWidget {
   /// Locks the current clips.
   final VoidCallback onLock;
 
-  /// Smaller START and LOCK for a short window (a landscape or split
-  /// screen before the landscape layouts exist).
+  /// Smaller START and LOCK for a short window (a split screen, or a
+  /// landscape window without the landscape recording layout).
   final bool compact;
 
   /// Height (dp, up to [maxBigTargetCut]) taken off START and LOCK on a
@@ -71,26 +71,8 @@ class RecordingControls extends StatelessWidget {
     return view.isRecording ? _buildLive(unscale) : _buildReady(unscale);
   }
 
-  /// Short visible text of a busy START or STOP; the accessibility label
-  /// keeps the full wording.
-  String? get _busyWord {
-    if (view.isApplyingSettings) {
-      return 'APPLYING';
-    }
-    if (view.isSaving) {
-      return 'SAVING';
-    }
-    if (view.isStarting) {
-      return 'STARTING';
-    }
-    if (view.isPreparingCamera) {
-      return 'PREPARING';
-    }
-    return null;
-  }
-
   Widget _buildReady(double unscale) {
-    final busyWord = _busyWord;
+    final busyWord = view.mainBusyWord;
     return Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -143,7 +125,7 @@ class RecordingControls extends StatelessWidget {
       children: [
         ThumbButton(
           variant: ThumbButtonVariant.stop,
-          label: _busyWord ?? 'STOP',
+          label: view.mainBusyWord ?? 'STOP',
           semanticsLabel: view.mainControlLabel,
           height: compact ? 56 : 72,
           onPressed: view.isMainBusy ? null : onStop,

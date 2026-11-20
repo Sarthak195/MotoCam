@@ -192,6 +192,16 @@ void main() {
       expect(_view().isMainBusy, isFalse);
     });
 
+    test('the busy word of START or STOP is short and matches the label', () {
+      expect(_view().mainBusyWord, isNull);
+      expect(_view(isRecording: true).mainBusyWord, isNull);
+      expect(_view(isApplyingSettings: true).mainBusyWord, 'APPLYING');
+      expect(_view(isRecording: true, isStopping: true).mainBusyWord, 'SAVING');
+      expect(_view(isPersistingRide: true).mainBusyWord, 'SAVING');
+      expect(_view(isStarting: true).mainBusyWord, 'STARTING');
+      expect(_view(isPreparingCamera: true).mainBusyWord, 'PREPARING');
+    });
+
     test('the applied chip shows the applied profile and flags a resolution '
         'or frame rate the camera changed', () {
       final same = _view();

@@ -11,6 +11,10 @@ import 'recording_view_state.dart';
 /// or SAVING with the recording time) and, while the clip being recorded is
 /// locked, the LOCKED band under it.
 ///
+/// The landscape layout leaves the LOCKED band out ([showLockedBand]): its
+/// 390 dp height keeps the room for the speed, and the big LOCK button
+/// under the rider's thumb turns into LOCKED there.
+///
 /// The time has its own [StreamBuilder], so a tick rebuilds only the band.
 /// The boards' "Writing, last 0.4 s ago" line (kShowWriteAge) and the
 /// locked time range need data the app does not have yet, so neither is
@@ -22,6 +26,7 @@ class RecordingHeader extends StatelessWidget {
     required this.view,
     required this.timerStream,
     required this.elapsed,
+    this.showLockedBand = true,
   });
 
   /// What the screen shows.
@@ -32,6 +37,9 @@ class RecordingHeader extends StatelessWidget {
 
   /// The recording time now.
   final Duration elapsed;
+
+  /// Whether a locked clip adds the LOCKED band under the state band.
+  final bool showLockedBand;
 
   @override
   Widget build(BuildContext context) {
@@ -50,7 +58,7 @@ class RecordingHeader extends StatelessWidget {
       },
     );
 
-    if (!(view.isRecording && view.isSegmentLocked)) {
+    if (!(showLockedBand && view.isRecording && view.isSegmentLocked)) {
       return band;
     }
     return Column(

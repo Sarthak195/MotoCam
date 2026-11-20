@@ -47,8 +47,8 @@ class RecordingPreview extends StatelessWidget {
   /// corners) instead of the large Ready preview.
   final bool thumbnail;
 
-  /// Landscape recording bench layout only: the preview takes the
-  /// landscape aspect ratio instead of the portrait one.
+  /// Landscape recording layout only: the preview takes the landscape
+  /// aspect ratio instead of the portrait one.
   final bool landscape;
 
   /// Retries the camera setup.

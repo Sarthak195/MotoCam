@@ -26,10 +26,10 @@ import 'widgets/recording_settings_sheet.dart';
 import 'start_preflight_evaluator.dart';
 import 'widgets/start_preflight_sheet.dart';
 import '../../core/theme/tokens.dart';
-import '../../core/ui/thumb_button.dart';
 import 'widgets/recording_controls.dart';
 import 'widgets/recording_details_panel.dart';
 import 'widgets/recording_header.dart';
+import 'widgets/recording_landscape.dart';
 import 'widgets/recording_preview.dart';
 import 'widgets/recording_profile_bar.dart';
 import 'widgets/recording_stats.dart';
@@ -1929,9 +1929,39 @@ class _RecordingScreenState extends State<RecordingScreen>
     required CameraProvider camera,
     required RecordingViewState view,
   }) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        // The landscape layout needs the switch on, the UI pinned to
+        // landscape and a window that has turned (wider than tall), so the
+        // frame before the platform rotates keeps the portrait layout.
+        final landscape =
+            _pinnedToLandscape && constraints.maxWidth > constraints.maxHeight;
+        final preview = _buildPreview(camera: camera, landscape: landscape);
+        return landscape
+            ? _buildLandscapeLayout(
+                camera: camera,
+                view: view,
+                preview: preview,
+                constraints: constraints,
+              )
+            : _buildPortraitLayout(
+                camera: camera,
+                view: view,
+                preview: preview,
+                constraints: constraints,
+              );
+      },
+    );
+  }
+
+  /// The camera preview: the full Ready preview, or the small live
+  /// thumbnail while recording.
+  Widget _buildPreview({
+    required CameraProvider camera,
+    required bool landscape,
+  }) {
     final controller = camera.isInitialized ? camera.controller : null;
-    final bench = _showsLandscapeBenchLayout;
-    final preview = RecordingPreview(
+    return RecordingPreview(
       isBlackoutMode: _isBlackoutMode,
       controller: controller,
       mode: cameraPreviewMode(
@@ -1948,18 +1978,19 @@ class _RecordingScreenState extends State<RecordingScreen>
       previewKey: ValueKey(
         'camera-preview-${camera.resolutionPreset}-${camera.recordingFps}-${camera.activeCameraName}-${controller.hashCode}',
       ),
-      thumbnail: camera.isRecording && !bench,
-      landscape: bench,
+      thumbnail: camera.isRecording,
+      landscape: landscape,
       onRetry: _retryCameraSetup,
       onOpenSettings: () => unawaited(_openAppSettingsAndRetry()),
     );
-    if (bench) {
-      return _buildLandscapeBenchLayout(
-        camera: camera,
-        view: view,
-        preview: preview,
-      );
-    }
+  }
+
+  Widget _buildPortraitLayout({
+    required CameraProvider camera,
+    required RecordingViewState view,
+    required Widget preview,
+    required BoxConstraints constraints,
+  }) {
     final panel = RecordingDetailsPanel(
       view: view,
       deviceStatus: _deviceStatus,
@@ -2052,178 +2083,309 @@ class _RecordingScreenState extends State<RecordingScreen>
         ? null
         : RecordingsMigrationBanner(migration: camera.recordingsMigration);
 
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        // The portrait layout needs about 640 dp of height. A shorter
-        // window (split screen, or landscape before its own layout exists)
-        // gets smaller thumb controls and scrolls.
-        final compact = constraints.maxHeight < _minPortraitHeight;
-        // Below the boards' 844 dp, START and LOCK give up height first, so
-        // the speed keeps its room on a shorter phone.
-        final bigTargetCut = compact
-            ? 0.0
-            : (_boardHeight - constraints.maxHeight).clamp(
-                0.0,
-                RecordingControls.maxBigTargetCut,
-              );
-        final controls = RecordingControls(
-          view: view,
-          compact: compact,
-          bigTargetCut: bigTargetCut,
-          onStart: () => _onStartPressed(camera),
-          onStop: () => _onStopPressed(camera),
-          onRides: () => unawaited(_openRideHistory(camera: camera)),
-          onSettings: () => unawaited(_openSettingsSheet()),
-          onLock: () => _onLockPressed(camera),
-        );
-        if (compact) {
-          return SingleChildScrollView(
-            padding: const EdgeInsets.all(MotoSize.gutter),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                header,
-                const SizedBox(height: MotoSize.gapWide),
-                chips,
-                ?banner,
-                const SizedBox(height: MotoSize.gapWide),
-                _ParkedGate(
-                  isRecording: camera.isRecording,
-                  builder: (showPanel) => showPanel
-                      ? Padding(
-                          padding: const EdgeInsets.only(
-                            bottom: MotoSize.gapWide,
-                          ),
-                          child: panel,
-                        )
-                      : const SizedBox.shrink(),
-                ),
-                SizedBox(
-                  height: _compactMiddleHeight,
-                  child: middle(parkedPanel: false),
-                ),
-                const SizedBox(height: MotoSize.gapWide),
-                controls,
-              ],
-            ),
+    // The portrait layout needs about 640 dp of height. A shorter window
+    // (split screen, or a landscape window without the landscape layout)
+    // gets smaller thumb controls and scrolls.
+    final compact = constraints.maxHeight < _minPortraitHeight;
+    // Below the boards' 844 dp, START and LOCK give up height first, so the
+    // speed keeps its room on a shorter phone.
+    final bigTargetCut = compact
+        ? 0.0
+        : (_boardHeight - constraints.maxHeight).clamp(
+            0.0,
+            RecordingControls.maxBigTargetCut,
           );
-        }
-        return Padding(
-          padding: const EdgeInsets.all(MotoSize.gutter),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              header,
-              const SizedBox(height: MotoSize.gapWide),
-              chips,
-              ?banner,
-              const SizedBox(height: MotoSize.gapWide),
-              Expanded(
-                key: const ValueKey('recording-middle'),
-                child: _ParkedGate(
-                  isRecording: camera.isRecording,
-                  builder: (showPanel) => Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      // Idle, the panel sits above the Ready preview.
-                      if (showPanel && !camera.isRecording) ...[
-                        Flexible(child: SingleChildScrollView(child: panel)),
-                        const SizedBox(height: MotoSize.gapWide),
-                      ],
-                      Expanded(
-                        key: const ValueKey('recording-preview-slot'),
-                        child: middle(
-                          parkedPanel: showPanel && camera.isRecording,
-                        ),
-                      ),
-                    ],
+    final controls = RecordingControls(
+      view: view,
+      compact: compact,
+      bigTargetCut: bigTargetCut,
+      onStart: () => _onStartPressed(camera),
+      onStop: () => _onStopPressed(camera),
+      onRides: () => unawaited(_openRideHistory(camera: camera)),
+      onSettings: () => unawaited(_openSettingsSheet()),
+      onLock: () => _onLockPressed(camera),
+    );
+    if (compact) {
+      return SingleChildScrollView(
+        padding: const EdgeInsets.all(MotoSize.gutter),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            header,
+            const SizedBox(height: MotoSize.gapWide),
+            chips,
+            ?banner,
+            const SizedBox(height: MotoSize.gapWide),
+            _ParkedGate(
+              isRecording: camera.isRecording,
+              builder: (showPanel) => showPanel
+                  ? Padding(
+                      padding: const EdgeInsets.only(bottom: MotoSize.gapWide),
+                      child: panel,
+                    )
+                  : const SizedBox.shrink(),
+            ),
+            SizedBox(
+              height: _compactMiddleHeight,
+              child: middle(parkedPanel: false),
+            ),
+            const SizedBox(height: MotoSize.gapWide),
+            controls,
+          ],
+        ),
+      );
+    }
+    return Padding(
+      padding: const EdgeInsets.all(MotoSize.gutter),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          header,
+          const SizedBox(height: MotoSize.gapWide),
+          chips,
+          ?banner,
+          const SizedBox(height: MotoSize.gapWide),
+          Expanded(
+            key: const ValueKey('recording-middle'),
+            child: _ParkedGate(
+              isRecording: camera.isRecording,
+              builder: (showPanel) => Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  // Idle, the panel sits above the Ready preview.
+                  if (showPanel && !camera.isRecording) ...[
+                    Flexible(child: SingleChildScrollView(child: panel)),
+                    const SizedBox(height: MotoSize.gapWide),
+                  ],
+                  Expanded(
+                    key: const ValueKey('recording-preview-slot'),
+                    child: middle(parkedPanel: showPanel && camera.isRecording),
                   ),
-                ),
+                ],
               ),
-              const SizedBox(height: MotoSize.gapWide),
-              controls,
-            ],
+            ),
           ),
-        );
-      },
+          const SizedBox(height: MotoSize.gapWide),
+          controls,
+        ],
+      ),
     );
   }
 
-  /// Landscape recording: whether the bench layout replaces the portrait
-  /// one (the switch on and the UI pinned to landscape).
-  bool get _showsLandscapeBenchLayout =>
+  /// Landscape recording: whether the UI is pinned to landscape with the
+  /// switch on (the landscape layout then replaces the portrait one once
+  /// the window has turned).
+  bool get _pinnedToLandscape =>
       widget.landscapeRecording &&
       isLandscapeOrientation(_orientationPinner.pinned);
 
-  /// BENCH LAYOUT FOR THE LANDSCAPE ENGINE, to be replaced by the redesign's
-  /// landscape recording screen (R2). Shown only with the MOTOCAM_LANDSCAPE
-  /// build switch on (bench builds) and the UI pinned to landscape. Bare on
-  /// purpose: the camera preview, in the landscape ratio, fills the left and
-  /// a right-hand column holds START or STOP and LOCK, fed by the same view
-  /// state and handlers as the portrait controls. The header, chips,
-  /// details, Settings and Ride History are reachable in portrait only.
-  Widget _buildLandscapeBenchLayout({
+  /// The landscape recording screen of redesign A (boards
+  /// A-Land-Record-Ready and A-Land-Record-Live), shown with the
+  /// MOTOCAM_LANDSCAPE switch on while the UI is pinned to landscape.
+  ///
+  /// A Row: the rail (Rides and Settings idle, Dark and Pop-out while
+  /// recording), the middle column and the thumb column. Idle, the middle
+  /// holds the chips, the details panel and the live view filling the
+  /// rest, and the thumb column the READY band above START. Recording, the
+  /// middle holds the REC band, the chips and the speed beside the live
+  /// thumbnail (the details panel in place of the speed while parked), and
+  /// the thumb column STOP above the big LOCK. The same view state,
+  /// handlers and harness labels as the portrait layout; the flagged slots
+  /// (orientation chip, write age, stalled, LOCK Undo, lock tone,
+  /// hold-to-stop) stay out as there.
+  Widget _buildLandscapeLayout({
     required CameraProvider camera,
     required RecordingViewState view,
     required Widget preview,
+    required BoxConstraints constraints,
   }) {
-    // Visible word of START or STOP (STARTING, SAVING and so on while
-    // busy); the accessibility label keeps the full wording.
-    final mainWord = view.mainControlLabel.split(' ').first.replaceAll('.', '');
-    final locked = view.isSegmentLocked;
-    return Row(
+    final recording = camera.isRecording;
+    final panel = RecordingDetailsPanel(
+      view: view,
+      deviceStatus: _deviceStatus,
+      freeStorageBytes: _freeStorageBytes,
+      onSettings: () => unawaited(_openSettingsSheet()),
+      onPop: () => unawaited(_handleBackPressWhileRecording()),
+      // The rail carries Pop-out.
+      showPopOut: false,
+    );
+    final header = RecordingHeader(
+      view: view,
+      timerStream: camera.timerStream,
+      elapsed: camera.elapsedTime,
+      showLockedBand: false,
+    );
+    final chips = RecordingProfileBar(
+      view: view,
+      deviceStatus: _deviceStatus,
+      freeStorageBytes: _freeStorageBytes,
+      onBlackout: () => _onBlackoutPressed(camera),
+      // The rail carries Dark.
+      showBlackout: false,
+    );
+    final banner = recording
+        ? null
+        : RecordingsMigrationBanner(migration: camera.recordingsMigration);
+    // The boards' 260 dp at 844 dp wide; a narrower phone gives the middle
+    // its share first.
+    final thumbColumnWidth = (constraints.maxWidth * 0.31).clamp(
+      200.0,
+      landscapeThumbColumnWidth,
+    );
+
+    // One Stack slot for the preview in every state, as in portrait: the
+    // full Ready preview, or the live thumbnail at its top right while
+    // recording, so START, STOP and parking never rebuild the preview.
+    Widget slot({required bool parkedPanel}) => LayoutBuilder(
+      builder: (context, slotConstraints) {
+        var thumbWidth = (slotConstraints.maxWidth * 0.45).clamp(
+          0.0,
+          _landscapeThumbnailWidth,
+        );
+        var thumbHeight =
+            thumbWidth * _landscapeThumbnailHeight / _landscapeThumbnailWidth;
+        if (thumbHeight > slotConstraints.maxHeight) {
+          thumbHeight = slotConstraints.maxHeight;
+          thumbWidth =
+              thumbHeight *
+              _landscapeThumbnailWidth /
+              _landscapeThumbnailHeight;
+        }
+        final besideThumbnail = thumbWidth + MotoSize.gapWide;
+        final underThumbnail =
+            slotConstraints.maxHeight - thumbHeight - MotoSize.gap;
+        return Stack(
+          fit: StackFit.expand,
+          children: [
+            if (recording)
+              Positioned(
+                top: 0,
+                right: 0,
+                width: thumbWidth,
+                height: thumbHeight,
+                child: DecoratedBox(
+                  position: DecorationPosition.foreground,
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(color: MotoColors.hairlineStrong),
+                  ),
+                  child: preview,
+                ),
+              )
+            else
+              Positioned(
+                top: 0,
+                right: 0,
+                bottom: 0,
+                left: 0,
+                child: DecoratedBox(
+                  position: DecorationPosition.foreground,
+                  decoration: const BoxDecoration(),
+                  child: preview,
+                ),
+              ),
+            if (recording && !parkedPanel)
+              Positioned(
+                left: 0,
+                top: 0,
+                bottom: 0,
+                right: besideThumbnail,
+                child: const Align(
+                  alignment: Alignment.bottomLeft,
+                  child: RecordingSpeed(size: _landscapeSpeedSize),
+                ),
+              ),
+            if (recording && parkedPanel) ...[
+              Positioned(
+                left: 0,
+                top: 0,
+                bottom: 0,
+                right: besideThumbnail,
+                child: SingleChildScrollView(child: panel),
+              ),
+              if (underThumbnail >= _landscapeParkedSpeedMinHeight)
+                Positioned(
+                  right: 0,
+                  width: thumbWidth,
+                  top: thumbHeight + MotoSize.gap,
+                  bottom: 0,
+                  child: const Align(
+                    alignment: Alignment.bottomRight,
+                    child: RecordingSpeed(size: _thumbnailHeight),
+                  ),
+                ),
+            ],
+          ],
+        );
+      },
+    );
+
+    final middle = Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
+        if (recording) ...[header, const SizedBox(height: MotoSize.gapWide)],
+        chips,
+        const SizedBox(height: MotoSize.gapWide),
         Expanded(
-          child: Padding(padding: const EdgeInsets.all(8), child: preview),
-        ),
-        SizedBox(
-          width: 200,
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.fromLTRB(0, 12, 12, 12),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
+          key: const ValueKey('recording-middle'),
+          child: _ParkedGate(
+            isRecording: recording,
+            builder: (showPanel) => Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                Text(
-                  'LANDSCAPE BENCH LAYOUT',
-                  textAlign: TextAlign.center,
-                  style: MotoFonts.bodyStyle(10, color: MotoColors.amber),
-                ),
-                const SizedBox(height: MotoSize.gap),
-                ThumbButton(
-                  variant: view.isRecording
-                      ? ThumbButtonVariant.stop
-                      : ThumbButtonVariant.start,
-                  label: mainWord,
-                  labelSize: 32,
-                  semanticsLabel: view.mainControlLabel,
-                  height: 96,
-                  onPressed: view.isMainBusy
-                      ? null
-                      : (view.isRecording
-                            ? () => _onStopPressed(camera)
-                            : () => _onStartPressed(camera)),
-                ),
-                const SizedBox(height: MotoSize.gapWide),
-                ThumbButton(
-                  variant: locked
-                      ? ThumbButtonVariant.locked
-                      : ThumbButtonVariant.lock,
-                  label: locked ? 'LOCKED' : 'LOCK',
-                  labelSize: 32,
-                  semanticsLabel: 'LOCK',
-                  semanticsHint: locked ? 'The current clips are locked' : null,
-                  height: 96,
-                  onPressed: view.lockEnabled
-                      ? () => _onLockPressed(camera)
-                      : null,
+                // Idle, the banner and the panel sit above the Ready
+                // preview and scroll in at most two fifths of the height.
+                if (showPanel && !recording) ...[
+                  Flexible(
+                    flex: 2,
+                    child: SingleChildScrollView(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [?banner, panel],
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: MotoSize.gapWide),
+                ],
+                Expanded(
+                  key: const ValueKey('recording-preview-slot'),
+                  flex: 3,
+                  child: slot(parkedPanel: showPanel && recording),
                 ),
               ],
             ),
           ),
         ),
       ],
+    );
+
+    return Padding(
+      padding: const EdgeInsets.all(MotoSize.gutter),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          RecordingLandscapeRail(
+            view: view,
+            onRides: () => unawaited(_openRideHistory(camera: camera)),
+            onSettings: () => unawaited(_openSettingsSheet()),
+            onBlackout: () => _onBlackoutPressed(camera),
+            onPop: () => unawaited(_handleBackPressWhileRecording()),
+          ),
+          const SizedBox(width: MotoSize.gapWide),
+          Expanded(child: middle),
+          const SizedBox(width: MotoSize.gapWide),
+          SizedBox(
+            width: thumbColumnWidth,
+            child: RecordingLandscapeThumbColumn(
+              view: view,
+              band: header,
+              onStart: () => _onStartPressed(camera),
+              onStop: () => _onStopPressed(camera),
+              onLock: () => _onLockPressed(camera),
+            ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -2632,6 +2794,16 @@ const double _thumbnailHeight = 68;
 
 // Height of the preview and speed area when the screen scrolls.
 const double _compactMiddleHeight = 220;
+
+// The landscape layout's live thumbnail and speed, as on the
+// A-Land-Record-Live board.
+const double _landscapeThumbnailWidth = 196;
+const double _landscapeThumbnailHeight = 110;
+const double _landscapeSpeedSize = 176;
+
+// Least room under the landscape thumbnail for the parked speed; less and
+// the parked speed is left out (the details panel beside it stays).
+const double _landscapeParkedSpeedMinHeight = 32;
 
 /// Shows the details panel while parked: always while idle, and while
 /// recording only below [parkedSpeedKmh]. Its [Selector] rebuilds only when

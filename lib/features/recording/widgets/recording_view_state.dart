@@ -147,6 +147,25 @@ class RecordingViewState {
     return isRecording ? 'STOP RECORDING' : 'START RECORDING';
   }
 
+  /// Short visible word of a busy START or STOP (APPLYING, SAVING,
+  /// STARTING or PREPARING), or null when it is not busy; the accessibility
+  /// label ([mainControlLabel]) keeps the full wording.
+  String? get mainBusyWord {
+    if (isApplyingSettings) {
+      return 'APPLYING';
+    }
+    if (isSaving) {
+      return 'SAVING';
+    }
+    if (isStarting) {
+      return 'STARTING';
+    }
+    if (isPreparingCamera) {
+      return 'PREPARING';
+    }
+    return null;
+  }
+
   /// Settings can be opened (they apply to the next START while recording).
   bool get settingsEnabled => !isApplyingSettings && !isStarting && !isStopping;
 
