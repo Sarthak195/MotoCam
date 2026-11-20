@@ -18,6 +18,8 @@ import 'package:motocam/core/theme/app_theme.dart';
 import 'package:motocam/core/ui/big_numeral.dart';
 import 'package:motocam/features/camera/providers/camera_provider.dart';
 import 'package:motocam/features/recording/recording_screen.dart';
+import 'package:motocam/features/recording/widgets/recording_settings_page.dart';
+import 'package:motocam/features/recording/widgets/start_preflight_sheet.dart';
 import 'package:motocam/features/telemetry/models/telemetry_data.dart';
 import 'package:motocam/features/telemetry/providers/telemetry_provider.dart';
 
@@ -461,6 +463,76 @@ void main() {
 
     expect(find.bySemanticsLabel('HISTORY'), findsOneWidget);
     expect(harnessLabel('Settings'), findsWidgets);
+
+    await disposeTree(tester);
+    semantics.dispose();
+  });
+
+  testWidgets(
+    'Settings pushes the Settings page; system back leaves the settings '
+    'as they were',
+    (tester) async {
+      final semantics = tester.ensureSemantics();
+      await pumpScreen(tester);
+
+      final settings = Provider.of<AppSettingsProvider>(
+        tester.element(find.byType(RecordingScreen)),
+        listen: false,
+      );
+      final resolutionBefore = settings.recordingResolution;
+
+      await tester.tap(find.bySemanticsLabel('Settings'));
+      for (var i = 0; i < 10; i++) {
+        await tester.pump(const Duration(milliseconds: 100));
+      }
+
+      expect(find.byType(RecordingSettingsPage), findsOneWidget);
+      expect(find.byType(BottomSheet), findsNothing);
+      expect(find.bySemanticsLabel('SAVE SETTINGS'), findsOneWidget);
+
+      // The system back gesture.
+      await tester.binding.handlePopRoute();
+      for (var i = 0; i < 10; i++) {
+        await tester.pump(const Duration(milliseconds: 100));
+      }
+
+      expect(find.byType(RecordingSettingsPage), findsNothing);
+      expect(settings.recordingResolution, resolutionBefore);
+      expect(find.bySemanticsLabel('START RECORDING'), findsOneWidget);
+
+      await disposeTree(tester);
+      semantics.dispose();
+    },
+  );
+
+  testWidgets('START with a blocking check open pushes the checklist page; '
+      'Close returns without recording', (tester) async {
+    final semantics = tester.ensureSemantics();
+    // The fake camera has no recordings folder, so Media Write Access fails
+    // and blocks START.
+    final camera = await pumpScreen(tester);
+
+    await tester.tap(find.bySemanticsLabel('START RECORDING'));
+    for (var i = 0; i < 20; i++) {
+      await tester.pump(const Duration(milliseconds: 100));
+    }
+
+    expect(find.byType(StartPreflightSheet), findsOneWidget);
+    expect(find.byType(BottomSheet), findsNothing);
+    expect(find.bySemanticsLabel('Ready To Record?'), findsOneWidget);
+    expect(
+      find.text('Unable to write to app recording storage'),
+      findsOneWidget,
+    );
+
+    await tester.tap(find.bySemanticsLabel('Close'));
+    for (var i = 0; i < 10; i++) {
+      await tester.pump(const Duration(milliseconds: 100));
+    }
+
+    expect(find.byType(StartPreflightSheet), findsNothing);
+    expect(camera.startCalls, 0);
+    expect(find.bySemanticsLabel('START RECORDING'), findsOneWidget);
 
     await disposeTree(tester);
     semantics.dispose();

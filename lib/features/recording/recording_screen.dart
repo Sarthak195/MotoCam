@@ -1056,29 +1056,40 @@ class _RecordingScreenState extends State<RecordingScreen>
       return false;
     }
 
-    final hasBlockingIssue = StartPreflightEvaluator.hasBlockingIssue(checks);
     if (!startPreflightNeedsSheet(checks)) {
       return true;
     }
 
-    final proceed =
-        await showModalBottomSheet<bool>(
-          context: context,
-          isScrollControlled: true,
-          backgroundColor: const Color(0xFF111111),
-          shape: const RoundedRectangleBorder(
-            borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-          ),
-          builder: (context) {
-            return StartPreflightSheet(
-              checks: checks,
-              hasBlockingIssue: hasBlockingIssue,
-            );
-          },
-        ) ??
-        false;
+    // The page completes true only when START was tapped while its current
+    // checks (rechecked after each fix) have no blocking failure.
+    return showStartPreflightPage(
+      context,
+      checks: checks,
+      onFix: _runStartPreflightFix,
+      onRecheck: () =>
+          _buildStartPreflightChecks(camera: camera, settings: settings),
+    );
+  }
 
-    return proceed && !hasBlockingIssue;
+  /// Runs a checklist Fix and completes when the rider is back in the app.
+  /// The battery exemption is requested only on the rider's tap.
+  /// [StartPreflightFix.retryCamera] needs no action here: the recheck
+  /// initializes the camera again when it is not ready.
+  Future<void> _runStartPreflightFix(StartPreflightFix fix) async {
+    switch (fix) {
+      case StartPreflightFix.appSettings:
+        await _openSystemSettingsAndWaitForReturn(openAppSettings);
+      case StartPreflightFix.locationServices:
+        await _openSystemSettingsAndWaitForReturn(
+          Geolocator.openLocationSettings,
+        );
+      case StartPreflightFix.batteryExemption:
+        await _openSystemSettingsAndWaitForReturn(
+          _backgroundRecordingService.requestIgnoreBatteryOptimizations,
+        );
+      case StartPreflightFix.retryCamera:
+        break;
+    }
   }
 
   Future<List<StartPreflightCheck>> _buildStartPreflightChecks({
@@ -2230,20 +2241,11 @@ class _RecordingScreenState extends State<RecordingScreen>
       return;
     }
 
-    final result = await showModalBottomSheet<RecordingSettingsFormResult>(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: const Color(0xFF111111),
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-      ),
-      builder: (context) {
-        return RecordingSettingsSheet(
-          initialFpsOptions: initialFpsOptions,
-          initialCameraOptions: initialCameraOptions,
-          initialUnsupportedPresets: initialUnsupportedPresets,
-        );
-      },
+    final result = await showRecordingSettingsPage(
+      context,
+      initialFpsOptions: initialFpsOptions,
+      initialCameraOptions: initialCameraOptions,
+      initialUnsupportedPresets: initialUnsupportedPresets,
     );
 
     if (result == null || !mounted) {
