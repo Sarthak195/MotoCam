@@ -88,5 +88,7 @@ class RecordingSettingsSheet extends RecordingSettingsPage {
     required super.initialFpsOptions,
     required super.initialCameraOptions,
     required super.initialUnsupportedPresets,
+    super.onShareDiagnosticLog,
+    super.onClearDiagnosticLog,
   });
 }

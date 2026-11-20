@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../ride_file/ride_telemetry_codec.dart';
+import '../diagnostics/diagnostic_log.dart';
 
 /// This phone's ride signing key as the native side reports it.
 @immutable
@@ -111,13 +112,13 @@ class RideSigningService {
     } on MissingPluginException {
       return null;
     } on PlatformException catch (error) {
-      debugPrint('Ride signing: $method failed: ${error.code}');
+      debugPrintError('signing', 'Ride signing: $method failed: ${error.code}');
       return null;
     } on TimeoutException {
-      debugPrint('Ride signing: $method timed out');
+      debugPrintError('signing', 'Ride signing: $method timed out');
       return null;
     } catch (error) {
-      debugPrint('Ride signing: $method failed: $error');
+      debugPrintError('signing', 'Ride signing: $method failed: $error');
       return null;
     }
   }
@@ -242,7 +243,10 @@ class SignedRideRegistry {
           }),
         );
       } catch (error) {
-        debugPrint('Signed ride registry: update failed: $error');
+        debugPrintError(
+          'signing',
+          'Signed ride registry: update failed: $error',
+        );
       }
     });
     _queue = next;

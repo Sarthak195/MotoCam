@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import '../diagnostics/diagnostic_log.dart';
 
 /// Events broadcast by [BackgroundRecordingService] to the Flutter side.
 enum BackgroundRecordingEvent {
@@ -173,7 +174,10 @@ class BackgroundRecordingService {
         'elapsedMs': elapsed.inMilliseconds,
       });
     } on PlatformException catch (error) {
-      debugPrint('[MotoCam] updateForegroundRecording failed: $error');
+      debugPrintError(
+        'service',
+        '[MotoCam] updateForegroundRecording failed: $error',
+      );
     }
   }
 
@@ -193,9 +197,13 @@ class BackgroundRecordingService {
         'enabled': enabled,
       });
     } on PlatformException catch (error) {
-      debugPrint('[MotoCam] setKeepScreenOn failed: $error');
+      debugPrintError('service', '[MotoCam] setKeepScreenOn failed: $error');
     } on MissingPluginException catch (error) {
-      debugPrint('[MotoCam] setKeepScreenOn unavailable: $error');
+      debugPrintError(
+        'service',
+        '[MotoCam] setKeepScreenOn unavailable: $error',
+        level: DiagnosticLogLevel.warning,
+      );
     }
   }
 
@@ -211,9 +219,13 @@ class BackgroundRecordingService {
     try {
       await _channel.invokeMethod<void>('releaseCameraHold');
     } on PlatformException catch (error) {
-      debugPrint('[MotoCam] releaseCameraHold failed: $error');
+      debugPrintError('service', '[MotoCam] releaseCameraHold failed: $error');
     } on MissingPluginException catch (error) {
-      debugPrint('[MotoCam] releaseCameraHold unavailable: $error');
+      debugPrintError(
+        'service',
+        '[MotoCam] releaseCameraHold unavailable: $error',
+        level: DiagnosticLogLevel.warning,
+      );
     }
   }
 

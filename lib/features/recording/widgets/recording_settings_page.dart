@@ -11,9 +11,11 @@ import 'dart:async';
 import 'package:camera/camera.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:provider/provider.dart';
 
 import '../../../core/build_flags.dart';
+import '../../../core/diagnostics/diagnostics.dart';
 import '../../../core/providers/app_settings_provider.dart';
 import '../../../core/theme/tokens.dart';
 import '../../../core/ui/kit.dart';
@@ -41,6 +43,8 @@ Future<RecordingSettingsFormResult?> showRecordingSettingsPage(
   required List<CameraDescription> initialCameraOptions,
   required Set<ResolutionPreset> initialUnsupportedPresets,
   bool settingsPending = false,
+  Future<DiagnosticShareResult> Function()? onShareDiagnosticLog,
+  Future<bool> Function()? onClearDiagnosticLog,
 }) {
   return Navigator.of(context).push<RecordingSettingsFormResult>(
     MaterialPageRoute<RecordingSettingsFormResult>(
@@ -49,6 +53,8 @@ Future<RecordingSettingsFormResult?> showRecordingSettingsPage(
         initialCameraOptions: initialCameraOptions,
         initialUnsupportedPresets: initialUnsupportedPresets,
         settingsPending: settingsPending,
+        onShareDiagnosticLog: onShareDiagnosticLog,
+        onClearDiagnosticLog: onClearDiagnosticLog,
       ),
     ),
   );
@@ -67,6 +73,8 @@ class RecordingSettingsPage extends StatefulWidget {
     required this.initialCameraOptions,
     required this.initialUnsupportedPresets,
     this.settingsPending = false,
+    this.onShareDiagnosticLog,
+    this.onClearDiagnosticLog,
   });
 
   /// Frame rates offered for the saved resolution.
@@ -81,6 +89,14 @@ class RecordingSettingsPage extends StatefulWidget {
   /// Settings saved during a ride still wait for the next START, so saved
   /// values the camera does not run yet apply from the next recording.
   final bool settingsPending;
+
+  /// Shares the diagnostic log; defaults to [shareDiagnosticLog] on
+  /// [DiagnosticLog.instance] (tests pass a fake).
+  final Future<DiagnosticShareResult> Function()? onShareDiagnosticLog;
+
+  /// Clears the diagnostic log; defaults to [clearDiagnosticLog] on
+  /// [DiagnosticLog.instance] (tests pass a fake).
+  final Future<bool> Function()? onClearDiagnosticLog;
 
   @override
   State<RecordingSettingsPage> createState() => _RecordingSettingsPageState();
@@ -118,6 +134,96 @@ class _RecordingSettingsPageState extends State<RecordingSettingsPage> {
       Navigator.of(
         context,
       ).push<void>(MaterialPageRoute<void>(builder: (_) => builder())),
+    );
+  }
+
+  Future<bool> _confirm(String title, String message, String action) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text(title),
+        content: Text(message),
+        actions: [
+          _DialogButton(
+            label: 'CANCEL',
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+          ),
+          _DialogButton(
+            label: action,
+            primary: true,
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+          ),
+        ],
+      ),
+    );
+    return confirmed ?? false;
+  }
+
+  // A dialog, not a SnackBar: the outcome stays until the rider reads it.
+  Future<void> _showDiagnosticMessage(String message) => showDialog<void>(
+    context: context,
+    builder: (dialogContext) => AlertDialog(
+      content: Text(message),
+      actions: [
+        _DialogButton(
+          label: 'OK',
+          primary: true,
+          onPressed: () => Navigator.of(dialogContext).pop(),
+        ),
+      ],
+    ),
+  );
+
+  Future<void> _shareDiagnosticLog() async {
+    if (!await _confirm(
+      'Share diagnostic log?',
+      diagnosticShareConfirmText,
+      'SHARE',
+    )) {
+      return;
+    }
+    final share =
+        widget.onShareDiagnosticLog ??
+        () => shareDiagnosticLog(
+          log: DiagnosticLog.instance,
+          cacheDirectory: getTemporaryDirectory,
+        );
+    final result = await share();
+    if (!mounted) {
+      return;
+    }
+    switch (result) {
+      case DiagnosticShareResult.shared:
+        break;
+      case DiagnosticShareResult.empty:
+        await _showDiagnosticMessage('The diagnostic log is empty.');
+      case DiagnosticShareResult.failed:
+        await _showDiagnosticMessage('Could not share the diagnostic log.');
+    }
+  }
+
+  Future<void> _clearDiagnosticLog() async {
+    if (!await _confirm(
+      'Clear diagnostic log?',
+      'This deletes the recorded app errors and crash reports.',
+      'CLEAR',
+    )) {
+      return;
+    }
+    final clear =
+        widget.onClearDiagnosticLog ??
+        () => clearDiagnosticLog(
+          log: DiagnosticLog.instance,
+          cacheDirectory: getTemporaryDirectory,
+        );
+    final cleared = await clear();
+    if (!mounted) {
+      return;
+    }
+    await _showDiagnosticMessage(
+      cleared
+          ? 'Diagnostic log cleared.'
+          : 'Could not clear the diagnostic log.',
     );
   }
 
@@ -181,6 +287,12 @@ class _RecordingSettingsPageState extends State<RecordingSettingsPage> {
                 ),
                 if (kBackupRow)
                   const _NavRowData(title: 'Backup', subtitle: 'Backup'),
+              ],
+            ),
+            const SizedBox(height: MotoSize.gapWide),
+            const _SectionLabel('ABOUT'),
+            _NavGroup(
+              rows: [
                 _NavRowData(
                   title: 'About and licences',
                   subtitle: 'Open-source licences',
@@ -188,6 +300,16 @@ class _RecordingSettingsPageState extends State<RecordingSettingsPage> {
                     context: context,
                     applicationName: 'MotoCam',
                   ),
+                ),
+                _NavRowData(
+                  title: 'Share diagnostic log',
+                  subtitle: 'App errors and crash reports, no location',
+                  onTap: () => unawaited(_shareDiagnosticLog()),
+                ),
+                _NavRowData(
+                  title: 'Clear diagnostic log',
+                  subtitle: 'Deletes the recorded errors and crash reports',
+                  onTap: () => unawaited(_clearDiagnosticLog()),
                 ),
               ],
             ),
@@ -1024,6 +1146,43 @@ class _NavGroup extends StatelessWidget {
           ),
         ],
       ],
+    );
+  }
+}
+
+/// A dialog action styled as the export dialog's: a plain text action, or
+/// the primary one filled.
+class _DialogButton extends StatelessWidget {
+  const _DialogButton({
+    required this.label,
+    required this.onPressed,
+    this.primary = false,
+  });
+
+  final String label;
+  final VoidCallback onPressed;
+  final bool primary;
+
+  @override
+  Widget build(BuildContext context) {
+    return TextButton(
+      style: primary
+          ? TextButton.styleFrom(
+              backgroundColor: MotoColors.text,
+              foregroundColor: MotoColors.bg,
+              minimumSize: const Size(0, MotoSize.minTarget),
+              padding: const EdgeInsets.symmetric(horizontal: 26),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(MotoRadii.sm),
+              ),
+            )
+          : TextButton.styleFrom(
+              foregroundColor: MotoColors.text,
+              minimumSize: const Size(0, MotoSize.minTarget),
+              padding: const EdgeInsets.symmetric(horizontal: 20),
+            ),
+      onPressed: onPressed,
+      child: Text(label),
     );
   }
 }

@@ -22,6 +22,7 @@ import 'widgets/playback_video_area.dart';
 import 'widgets/ride_export_flow.dart';
 import 'widgets/ride_list_model.dart';
 import 'widgets/ride_playback_body.dart';
+import '../../core/diagnostics/diagnostic_log.dart';
 
 /// Plays back a recorded ride: its video segments as one continuous timeline,
 /// with a telemetry overlay, a speed graph, a timeline that marks missing
@@ -555,9 +556,11 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
       if (isTrailingSegment) {
         unreadableTrailingSegmentsCount++;
       }
-      debugPrint(
+      debugPrintError(
+        'playback',
         'Ride playback: skipped unreadable segment ${index + 1} '
-        '(${probe.error ?? 'unknown-error'})',
+            '(${probe.error ?? 'unknown-error'})',
+        level: DiagnosticLogLevel.warning,
       );
     }
     if (_isDisposing || !mounted) {
@@ -796,7 +799,10 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
         await controller.initialize();
         return controller;
       } catch (e) {
-        debugPrint('Ride playback: failed loading segment ($e)');
+        debugPrintError(
+          'playback',
+          'Ride playback: failed loading segment ($e)',
+        );
         await _stopAndDisposeController(controller);
         return null;
       }
@@ -952,9 +958,10 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
     }
     _erroredController = controller;
     final index = _activeSegmentIndex;
-    debugPrint(
+    debugPrintError(
+      'playback',
       'Ride playback: segment ${index + 1} failed during playback '
-      '(${controller.value.errorDescription})',
+          '(${controller.value.errorDescription})',
     );
     _markSegmentFailed(index);
 
@@ -1118,7 +1125,7 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
           await current.play();
         }
       } catch (e) {
-        debugPrint('Ride playback: seek failed ($e)');
+        debugPrintError('playback', 'Ride playback: seek failed ($e)');
       }
       return;
     }

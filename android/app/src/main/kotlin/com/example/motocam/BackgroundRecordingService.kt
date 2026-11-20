@@ -128,6 +128,8 @@ class BackgroundRecordingService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        // Idempotent; covers a process the system started for this service.
+        Diagnostics.installCrashHandler(this)
         createNotificationChannelIfNeeded()
     }
 

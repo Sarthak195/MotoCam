@@ -29,6 +29,7 @@ import 'package:flutter/foundation.dart';
 import '../utils/path_utils.dart' as path_utils;
 import 'ride_integrity.dart';
 import 'ride_signature.dart';
+import '../diagnostics/diagnostic_log.dart';
 
 export 'ride_integrity.dart';
 export 'ride_signature.dart';
@@ -1300,12 +1301,15 @@ Future<SealedRidePayload> sealAndSignRidePayload(
         payloadHash,
       );
       if (!valid) {
-        debugPrint('Ride signing: the phone returned an invalid signature.');
+        debugPrintError(
+          'signing',
+          'Ride signing: the phone returned an invalid signature.',
+        );
         signature = null;
       }
     }
   } catch (error) {
-    debugPrint('Ride signing failed: $error');
+    debugPrintError('signing', 'Ride signing failed: $error');
     signature = null;
   }
   if (signature == null) {

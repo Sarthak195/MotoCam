@@ -1,10 +1,13 @@
 // The ride capture lock at START (landscape recording): strict for
 // landscape, tolerant for portrait, no extra call when already locked.
 
+import 'dart:io';
+
 import 'package:camera/camera.dart';
 import 'package:camera_platform_interface/camera_platform_interface.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:motocam/core/diagnostics/diagnostic_log.dart';
 import 'package:motocam/features/camera/providers/camera_provider.dart';
 
 class _LockPlatform extends CameraPlatform {
@@ -74,6 +77,32 @@ void main() {
     platform.fail = true;
     expect(await lock(DeviceOrientation.landscapeLeft), isFalse);
     expect(logs.single, contains('landscapeLeft'));
+  });
+
+  test('a ride refused at START writes the lock failure to the diagnostic '
+      'log', () async {
+    final temp = await Directory.systemTemp.createTemp('motocam_lock_');
+    addTearDown(() => temp.delete(recursive: true));
+    final previous = DiagnosticLog.instance;
+    final log = DiagnosticLog(resolveDirectory: () async => temp);
+    DiagnosticLog.instance = log;
+    addTearDown(() => DiagnosticLog.instance = previous);
+    final provider = CameraProvider();
+    addTearDown(provider.dispose);
+
+    // The ride orientation is portrait; a landscape-locked controller must
+    // relock, and that relock fails.
+    await controller.lockCaptureOrientation(DeviceOrientation.landscapeLeft);
+    platform.fail = true;
+    expect(await provider.lockRideCapture(controller), isFalse);
+    await log.flush();
+    final file = File(
+      '${temp.path}${Platform.pathSeparator}${DiagnosticLog.directoryName}'
+      '${Platform.pathSeparator}${DiagnosticLog.fileName}',
+    );
+    final text = await file.exists() ? await file.readAsString() : '';
+    expect(text, contains('ERROR [camera] Capture orientation lock to '));
+    expect(text, contains('refused'));
   });
 
   test('portrait keeps the tolerant path: no retry when the init lock '

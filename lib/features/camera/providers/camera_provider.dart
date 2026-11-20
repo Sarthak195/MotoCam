@@ -27,6 +27,7 @@ import '../../../core/services/legacy_recordings_access.dart';
 import 'dart:io';
 import 'dart:async';
 import 'dart:isolate';
+import '../../../core/diagnostics/diagnostic_log.dart';
 
 /// Lifecycle state of the segmented recording session.
 enum RecordingState {
@@ -531,8 +532,9 @@ class CameraProvider extends ChangeNotifier {
 
   // Warnings and errors: logged in every build mode. Uses
   // debugPrintSynchronously, which the release-mode debugPrint no-op in
-  // main.dart does not silence.
+  // main.dart does not silence, and goes to the diagnostic log.
   void _logError(String message) {
+    DiagnosticLog.instance.error('camera', message);
     if (enableDebugLogging) {
       debugPrint('[MotoCam] $message');
     } else {
@@ -1658,12 +1660,7 @@ class CameraProvider extends ChangeNotifier {
 
       // A controller lost meanwhile fails in the fallback below, as before.
       final rideController = _controller;
-      if (rideController != null &&
-          !await lockCaptureForRide(
-            rideController,
-            _rideCaptureOrientation,
-            log: _log,
-          )) {
+      if (rideController != null && !await lockRideCapture(rideController)) {
         _lastRecordingError = captureOrientationLockFailedMessage;
         _state = RecordingState.idle;
         return false;
@@ -1809,6 +1806,12 @@ class CameraProvider extends ChangeNotifier {
       orientation == DeviceOrientation.landscapeLeft ||
       orientation == DeviceOrientation.landscapeRight;
 
+  /// [lockCaptureForRide] for this ride's orientation, as START calls it;
+  /// a refusal's exception goes to the diagnostic log.
+  @visibleForTesting
+  Future<bool> lockRideCapture(CameraController controller) =>
+      lockCaptureForRide(controller, _rideCaptureOrientation, log: _logError);
+
   /// Locks [controller]'s capture to a ride's [orientation] before its first
   /// segment. Returns `false` when the ride must not start: a landscape
   /// lock failed, or a portrait lock failed on a controller still locked to
@@ -1869,7 +1872,9 @@ class CameraProvider extends ChangeNotifier {
     try {
       await controller.lockCaptureOrientation(orientation);
     } catch (e) {
-      _log('Idle capture orientation lock to ${orientation.name} failed: $e');
+      _logError(
+        'Idle capture orientation lock to ${orientation.name} failed: $e',
+      );
     }
   }
 

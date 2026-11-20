@@ -16,6 +16,7 @@ This guide describes what a rider can do in MotoCam and what the code does behin
 - [Export to gallery](#export-to-gallery)
 - [Export to folder and share](#export-to-folder-and-share)
 - [Settings overview](#settings-overview)
+- [Diagnostic log](#diagnostic-log)
 - [Permissions](#permissions)
 - [Platform availability](#platform-availability)
 
@@ -369,6 +370,17 @@ The **Settings** button of the recording screen pushes the Settings page, [recor
 - Camera settings are applied by re-initializing the camera, and only when idle. The outcome is a SnackBar: `Settings applied: ...`, `Requested <n>p is not supported on this device. Applied <m>p ...` when the camera fell back, or `Unable to initialize camera with the selected settings on this device.`
 - Saved while recording, settings are persisted and the profile chip reads `NEXT START`, the camera keeps its current configuration, and the SnackBar reads `Camera settings saved. They apply to the next recording.` They are applied before the next START's preflight. Telemetry settings (speed refresh, incident sensitivity) apply at once.
 - The saved values are never overwritten with what the camera negotiated.
+- At the foot of the main Settings page, the ABOUT group holds **About and licences**, **Share diagnostic log** and **Clear diagnostic log** (see [Diagnostic log](#diagnostic-log)).
+
+## Diagnostic log
+
+MotoCam keeps a log of app errors on the phone, so a tester can send it when something goes wrong. Nothing is uploaded; it leaves the phone only when the rider shares it.
+
+- **What it holds.** One line per event, with its UTC time: errors the app caught (camera, recording, saving, signing, export, playback, telemetry streams), framework errors (such as the red error screen of a debug build) and uncaught errors, with their stack traces (capped), Android crashes of the app's own code, and a header at each start with the app version and build (including whether the landscape switch is on), the phone's maker and model and the Android version. On Android 11 and later, each start also records why the app's process ended before (crash, native crash, freeze (ANR) with part of its trace, low memory, the rider swiping it away and so on).
+- **What it never holds.** No position, speed, route or anything about other people. Web addresses are cut to their host, so a map tile address does not reveal where the ride was, and the piece of file text a parse error quotes is removed. Error text can name app-private file names, such as a clip's date-stamped file name.
+- **Size.** About 1 MB, then it starts a new file and keeps the previous one: at most two files, about 2 MB.
+- **Share diagnostic log** asks first ("It holds app errors, crash and freeze reports, the app version and the phone model, and no location, speed or route.") and then opens the Android share sheet with the two text files. With no log yet it says `The diagnostic log is empty.`
+- **Clear diagnostic log** asks first, then deletes the log and any copy staged for sharing, and starts the new log with this start's header (app version, build, phone), so a log shared later still names the build.
 
 ## Permissions
 
