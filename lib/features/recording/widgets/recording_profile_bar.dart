@@ -16,8 +16,7 @@ import 'recording_view_state.dart';
 /// Blackout button.
 ///
 /// Temperature and storage listen to their own polled values, so a poll
-/// rebuilds only its chip. The landscape layout leaves the Blackout button
-/// out ([showBlackout]), because its rail carries Dark. The orientation chip (kOrientationChip) waits for
+/// rebuilds only its chip. The orientation chip (kOrientationChip) waits for
 /// the landscape engine and is left out.
 class RecordingProfileBar extends StatelessWidget {
   /// Creates the chip row.
@@ -27,7 +26,6 @@ class RecordingProfileBar extends StatelessWidget {
     required this.deviceStatus,
     required this.freeStorageBytes,
     required this.onBlackout,
-    this.showBlackout = true,
   });
 
   /// What the screen shows.
@@ -41,9 +39,6 @@ class RecordingProfileBar extends StatelessWidget {
 
   /// Toggles Blackout.
   final VoidCallback onBlackout;
-
-  /// Whether the row ends with the Blackout button while recording.
-  final bool showBlackout;
 
   @override
   Widget build(BuildContext context) {
@@ -75,7 +70,7 @@ class RecordingProfileBar extends StatelessWidget {
           const SizedBox(width: MotoSize.gap),
           Expanded(child: AppliedChip(view: view)),
           // Blackout exists only while recording; idle it is left out.
-          if (view.isRecording && showBlackout) ...[
+          if (view.isRecording) ...[
             const SizedBox(width: MotoSize.gap),
             _BlackoutButton(
               active: view.isBlackoutMode,

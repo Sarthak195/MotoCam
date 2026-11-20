@@ -2200,12 +2200,13 @@ class _RecordingScreenState extends State<RecordingScreen>
   /// A-Land-Record-Ready and A-Land-Record-Live), shown with the
   /// MOTOCAM_LANDSCAPE switch on while the UI is pinned to landscape.
   ///
-  /// A Row: the rail (Rides and Settings idle, Dark and Pop-out while
-  /// recording), the middle column and the thumb column. Idle, the middle
-  /// holds the chips, the details panel and the live view filling the
-  /// rest, and the thumb column the READY band above START. Recording, the
-  /// middle holds the REC band, the chips and the speed beside the live
-  /// thumbnail (the details panel in place of the speed while parked), and
+  /// A Row: the rail (Rides and Settings, idle only), the middle column
+  /// and the thumb column. Idle, the middle holds the chips, the details
+  /// panel and the live view filling the rest, and the thumb column the
+  /// READY band above START. Recording, there is no rail: the middle holds
+  /// the REC band, the chips ending in Blackout and the speed beside the
+  /// live thumbnail (the details panel, with Settings and Pop-out, in place
+  /// of the speed while parked), and
   /// the thumb column STOP above the big LOCK. The same view state,
   /// handlers and harness labels as the portrait layout; the flagged slots
   /// (orientation chip, write age, stalled, LOCK Undo, lock tone,
@@ -2223,8 +2224,6 @@ class _RecordingScreenState extends State<RecordingScreen>
       freeStorageBytes: _freeStorageBytes,
       onSettings: () => unawaited(_openSettingsSheet()),
       onPop: () => unawaited(_handleBackPressWhileRecording()),
-      // The rail carries Pop-out.
-      showPopOut: false,
     );
     final header = RecordingHeader(
       view: view,
@@ -2237,8 +2236,6 @@ class _RecordingScreenState extends State<RecordingScreen>
       deviceStatus: _deviceStatus,
       freeStorageBytes: _freeStorageBytes,
       onBlackout: () => _onBlackoutPressed(camera),
-      // The rail carries Dark.
-      showBlackout: false,
     );
     final banner = recording
         ? null
@@ -2381,14 +2378,17 @@ class _RecordingScreenState extends State<RecordingScreen>
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          RecordingLandscapeRail(
-            view: view,
-            onRides: () => unawaited(_openRideHistory(camera: camera)),
-            onSettings: () => unawaited(_openSettingsSheet()),
-            onBlackout: () => _onBlackoutPressed(camera),
-            onPop: () => unawaited(_handleBackPressWhileRecording()),
-          ),
-          const SizedBox(width: MotoSize.gapWide),
+          // Idle only: board A-Land-Record-Live has no rail, so while
+          // recording Blackout is in the chip row and Pop-out in the
+          // parked details panel, as in portrait.
+          if (!recording) ...[
+            RecordingLandscapeRail(
+              view: view,
+              onRides: () => unawaited(_openRideHistory(camera: camera)),
+              onSettings: () => unawaited(_openSettingsSheet()),
+            ),
+            const SizedBox(width: MotoSize.gapWide),
+          ],
           Expanded(child: middle),
           const SizedBox(width: MotoSize.gapWide),
           SizedBox(

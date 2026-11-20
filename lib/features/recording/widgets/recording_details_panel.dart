@@ -18,9 +18,6 @@ import 'recording_view_state.dart';
 /// and, while recording, Settings (they apply to the next START) and
 /// Pop-out.
 ///
-/// The landscape layout leaves Pop-out out ([showPopOut]), because its
-/// rail carries it.
-///
 /// Distance keeps its own [Selector] and the polled readings their own
 /// listeners, so a tick never rebuilds the screen.
 class RecordingDetailsPanel extends StatelessWidget {
@@ -32,7 +29,6 @@ class RecordingDetailsPanel extends StatelessWidget {
     required this.freeStorageBytes,
     required this.onSettings,
     required this.onPop,
-    this.showPopOut = true,
   });
 
   /// What the screen shows.
@@ -49,9 +45,6 @@ class RecordingDetailsPanel extends StatelessWidget {
 
   /// Leaves the screen into Picture-in-Picture.
   final VoidCallback onPop;
-
-  /// Whether the recording actions include Pop-out next to Settings.
-  final bool showPopOut;
 
   @override
   Widget build(BuildContext context) {
@@ -195,20 +188,18 @@ class RecordingDetailsPanel extends StatelessWidget {
                       onPressed: view.settingsEnabled ? onSettings : null,
                     ),
                   ),
-                  if (showPopOut) ...[
-                    const SizedBox(width: MotoSize.gap),
-                    Expanded(
-                      child: ThumbButton(
-                        variant: ThumbButtonVariant.secondary,
-                        label: 'Pop-out',
-                        semanticsLabel: 'Pop-out',
-                        icon: Icons.picture_in_picture_alt_outlined,
-                        height: MotoSize.minTarget,
-                        labelSize: 22,
-                        onPressed: view.secondaryEnabled ? onPop : null,
-                      ),
+                  const SizedBox(width: MotoSize.gap),
+                  Expanded(
+                    child: ThumbButton(
+                      variant: ThumbButtonVariant.secondary,
+                      label: 'Pop-out',
+                      semanticsLabel: 'Pop-out',
+                      icon: Icons.picture_in_picture_alt_outlined,
+                      height: MotoSize.minTarget,
+                      labelSize: 22,
+                      onPressed: view.secondaryEnabled ? onPop : null,
                     ),
-                  ],
+                  ),
                 ],
               ),
             ],

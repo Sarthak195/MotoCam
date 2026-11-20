@@ -1,10 +1,10 @@
 // The landscape recording screen of redesign A (boards A-Land-Record-Ready
 // and A-Land-Record-Live): with the landscape switch on and the UI pinned
-// to landscape by gravity, the screen is a Row of the rail, the middle
-// column and the thumb column. It fits 844 x 390 and 800 x 360 at text
-// scale 1 and 1.3 in every state, keeps the harness labels and the tap
-// targets, reaches Blackout and Picture-in-Picture, and keeps one preview
-// element across START and parking. A portrait window, or the UI pinned
+// to landscape by gravity, the screen is a Row of the rail (idle only),
+// the middle column and the thumb column. It fits 844 x 390 and
+// 800 x 360 at text scale 1 and 1.3 in every state, keeps the harness
+// labels and the tap targets, reaches Blackout and Picture-in-Picture, and
+// keeps one preview element across START and parking. A portrait window, or the UI pinned
 // to portrait, keeps the portrait layout.
 
 import 'dart:async';
@@ -23,7 +23,9 @@ import 'package:motocam/core/theme/app_theme.dart';
 import 'package:motocam/core/ui/big_numeral.dart';
 import 'package:motocam/features/camera/providers/camera_provider.dart';
 import 'package:motocam/features/recording/recording_screen.dart';
+import 'package:motocam/features/recording/widgets/recording_details_panel.dart';
 import 'package:motocam/features/recording/widgets/recording_landscape.dart';
+import 'package:motocam/features/recording/widgets/recording_profile_bar.dart';
 import 'package:motocam/features/telemetry/models/telemetry_data.dart';
 import 'package:motocam/features/telemetry/providers/telemetry_provider.dart';
 
@@ -356,28 +358,37 @@ void main() {
   });
 
   testWidgets('Live: the REC band, single-tap STOP above the big LOCK, the '
-      'speed beside the thumbnail, Dark and Pop-out in the rail; flagged '
-      'slots stay out', (tester) async {
+      'speed beside the thumbnail, no rail (Blackout in the chip row); '
+      'flagged slots stay out', (tester) async {
     final semantics = tester.ensureSemantics();
     await tester.runAsync(loadBundledFonts);
     final camera = await pumpScreen(tester, recording: true);
     telemetry.setSpeed(62);
     await tester.pump();
 
-    expect(rail, findsOneWidget);
+    // Board A-Land-Record-Live has no rail.
+    expect(rail, findsNothing);
+    expect(find.text('Dark'), findsNothing);
     expect(find.text('REC'), findsOneWidget);
     expect(find.text('STOP'), findsOneWidget);
     expect(find.text('LOCK'), findsOneWidget);
     expect(find.text('62'), findsOneWidget);
     expect(find.bySemanticsLabel('STOP RECORDING'), findsOneWidget);
     expect(find.bySemanticsLabel('LOCK'), findsOneWidget);
-    // One node per harness label: the rail carries Dark and Pop-out, so
-    // the chip row and the details panel do not.
-    expect(find.bySemanticsLabel('Enter blackout'), findsOneWidget);
+    // One node per harness label: Blackout ends the chip row; Pop-out is
+    // in the parked details panel only, so riding it is not there.
+    final blackout = find.bySemanticsLabel('Enter blackout');
+    expect(blackout, findsOneWidget);
     expect(find.byTooltip('Enter blackout'), findsOneWidget);
-    expect(find.bySemanticsLabel('Pop-out'), findsOneWidget);
-    expect(find.text('Dark'), findsOneWidget);
-    expect(find.text('Pop-out'), findsOneWidget);
+    expect(
+      find.descendant(
+        of: find.byType(RecordingProfileBar),
+        matching: find.byTooltip('Enter blackout'),
+      ),
+      findsOneWidget,
+    );
+    expect(tester.getSize(blackout).width, 56);
+    expect(find.bySemanticsLabel('Pop-out'), findsNothing);
     // Rides is idle only; Settings is in the parked panel only.
     expect(find.text('Rides'), findsNothing);
     expect(find.bySemanticsLabel('HISTORY'), findsNothing);
@@ -439,7 +450,7 @@ void main() {
     semantics.dispose();
   });
 
-  testWidgets('Blackout is reachable from the rail while recording and '
+  testWidgets('Blackout is reachable from the chip row while recording and '
       'hides the preview', (tester) async {
     await pumpScreen(tester, recording: true);
     expect(preview, findsOneWidget);
@@ -453,12 +464,18 @@ void main() {
     await disposeTree(tester);
   });
 
-  testWidgets('Pop-out in the rail asks for Picture-in-Picture while '
-      'recording', (tester) async {
+  testWidgets('Pop-out in the parked details panel asks for '
+      'Picture-in-Picture while recording', (tester) async {
     await pumpScreen(tester, recording: true);
     pipCalls.clear();
 
-    await tester.tap(find.text('Pop-out'));
+    final popOut = find.descendant(
+      of: find.byType(RecordingDetailsPanel),
+      matching: find.text('Pop-out'),
+    );
+    expect(popOut, findsOneWidget);
+    expect(find.text('Pop-out'), findsOneWidget);
+    await tester.tap(popOut);
     await tester.pump();
 
     expect(pipCalls, contains('enterPipMode'));
@@ -534,7 +551,8 @@ void main() {
               telemetry.setSpeed(62);
             }
             await tester.pump();
-            expect(rail, findsOneWidget);
+            // The rail is idle only (board A-Land-Record-Live has none).
+            expect(rail, state == 'ready' ? findsOneWidget : findsNothing);
             expect(tester.takeException(), isNull);
 
             await disposeTree(tester);

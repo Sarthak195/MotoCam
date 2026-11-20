@@ -20,11 +20,11 @@ const double landscapeThumbColumnWidth = 260;
 
 /// The rail at the left edge of the landscape recording screen.
 ///
-/// Idle: Rides and Settings. Recording: Dark (Blackout) and Pop-out
-/// (Picture-in-Picture), which do not exist idle. Settings stays reachable
-/// during a ride from the parked details panel, as in portrait. Each button
-/// keeps the accessibility label the phone harness reads (HISTORY,
-/// Settings, Enter blackout, Pop-out).
+/// Idle only: Rides and Settings. Board A-Land-Record-Live has no rail, so
+/// the screen leaves it out while recording: Blackout is in the chip row,
+/// and Settings and Pop-out are in the parked details panel, as in
+/// portrait. Each button keeps the accessibility label the phone harness
+/// reads (HISTORY, Settings).
 class RecordingLandscapeRail extends StatelessWidget {
   /// Creates the rail.
   const RecordingLandscapeRail({
@@ -32,8 +32,6 @@ class RecordingLandscapeRail extends StatelessWidget {
     required this.view,
     required this.onRides,
     required this.onSettings,
-    required this.onBlackout,
-    required this.onPop,
   });
 
   /// What the screen shows.
@@ -45,75 +43,34 @@ class RecordingLandscapeRail extends StatelessWidget {
   /// Opens the recording settings.
   final VoidCallback onSettings;
 
-  /// Toggles Blackout.
-  final VoidCallback onBlackout;
-
-  /// Leaves the screen into Picture-in-Picture.
-  final VoidCallback onPop;
-
   @override
   Widget build(BuildContext context) {
     // The rail is as narrow as the boards draw it; a larger system text
     // size would only fade its words, so they keep the board size (the
     // accessibility labels are unchanged).
     final unscale = 1 / MediaQuery.textScalerOf(context).scale(1).clamp(1, 3);
-    final List<Widget> buttons;
-    if (view.isRecording) {
-      final blackoutLabel = view.isBlackoutMode
-          ? 'Exit blackout'
-          : 'Enter blackout';
-      buttons = [
-        // The tooltip is for tests and long presses only; the phone
-        // harness reads the semantics label.
-        Tooltip(
-          message: blackoutLabel,
-          excludeFromSemantics: true,
-          child: ThumbButton(
-            variant: ThumbButtonVariant.quiet,
-            label: 'Dark',
-            labelSize: 14 * unscale,
-            semanticsLabel: blackoutLabel,
-            icon: view.isBlackoutMode
-                ? Icons.light_mode_outlined
-                : Icons.dark_mode_outlined,
-            height: MotoSize.minTarget,
-            onPressed: view.blackoutEnabled ? onBlackout : null,
-          ),
-        ),
-        ThumbButton(
-          variant: ThumbButtonVariant.quiet,
-          label: 'Pop-out',
-          labelSize: 14 * unscale,
-          semanticsLabel: 'Pop-out',
-          icon: Icons.picture_in_picture_alt_outlined,
-          height: MotoSize.minTarget,
-          onPressed: view.secondaryEnabled ? onPop : null,
-        ),
-      ];
-    } else {
-      buttons = [
-        ThumbButton(
-          variant: ThumbButtonVariant.secondary,
-          label: 'Rides',
-          labelSize: 17 * unscale,
-          semanticsLabel: 'HISTORY',
-          icon: Icons.format_list_bulleted_rounded,
-          direction: Axis.vertical,
-          height: MotoSize.minTarget,
-          onPressed: view.secondaryEnabled ? onRides : null,
-        ),
-        ThumbButton(
-          variant: ThumbButtonVariant.secondary,
-          label: 'Settings',
-          labelSize: 17 * unscale,
-          semanticsLabel: 'Settings',
-          icon: Icons.tune_rounded,
-          direction: Axis.vertical,
-          height: MotoSize.minTarget,
-          onPressed: view.settingsEnabled ? onSettings : null,
-        ),
-      ];
-    }
+    final buttons = [
+      ThumbButton(
+        variant: ThumbButtonVariant.secondary,
+        label: 'Rides',
+        labelSize: 17 * unscale,
+        semanticsLabel: 'HISTORY',
+        icon: Icons.format_list_bulleted_rounded,
+        direction: Axis.vertical,
+        height: MotoSize.minTarget,
+        onPressed: view.secondaryEnabled ? onRides : null,
+      ),
+      ThumbButton(
+        variant: ThumbButtonVariant.secondary,
+        label: 'Settings',
+        labelSize: 17 * unscale,
+        semanticsLabel: 'Settings',
+        icon: Icons.tune_rounded,
+        direction: Axis.vertical,
+        height: MotoSize.minTarget,
+        onPressed: view.settingsEnabled ? onSettings : null,
+      ),
+    ];
     return SizedBox(
       width: landscapeRailWidth,
       child: Column(
