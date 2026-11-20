@@ -154,6 +154,27 @@ PlaybackIntegrityBadge playbackIntegrityBadge({
   required RideRecord ride,
   required int failedVideoCount,
   required bool rideReadFailed,
+}) => playbackIntegrityBadgeFor(
+  hasTelemetry: ride.telemetryPath != null,
+  status: ride.integrity.status,
+  signedBy: ride.integrity.signedBy,
+  mockLocation: ride.mockLocationDetected,
+  failedVideoCount: failedVideoCount,
+  rideReadFailed: rideReadFailed,
+  integrityLine: rideIntegrityLine(ride),
+);
+
+/// [playbackIntegrityBadge] from plain values, so every case can be checked
+/// without a signed ride file. [integrityLine] is the ride's sentence from
+/// `rideIntegrityLine`.
+PlaybackIntegrityBadge playbackIntegrityBadgeFor({
+  required bool hasTelemetry,
+  required RideIntegrityStatus status,
+  required RideSignedBy signedBy,
+  required bool mockLocation,
+  required int failedVideoCount,
+  required bool rideReadFailed,
+  required String integrityLine,
 }) {
   final videoNote = failedVideoCount <= 0
       ? ''
@@ -161,16 +182,18 @@ PlaybackIntegrityBadge playbackIntegrityBadge({
       ? ' 1 video could not be confirmed unmodified since recording.'
       : ' $failedVideoCount videos could not be confirmed unmodified since '
             'recording.';
-  final line = rideIntegrityLine(ride);
-  final detail = '${line.endsWith('.') ? line : '$line.'}$videoNote';
-  if (ride.telemetryPath == null) {
+  final detail =
+      '${integrityLine.endsWith('.') ? integrityLine : '$integrityLine.'}'
+      '$videoNote';
+  if (!hasTelemetry) {
     return PlaybackIntegrityBadge(
-      PlaybackIntegrityKind.videoOnly,
-      'Video only',
+      failedVideoCount > 0
+          ? PlaybackIntegrityKind.checkFailed
+          : PlaybackIntegrityKind.videoOnly,
+      failedVideoCount > 0 ? 'Check failed' : 'Video only',
       'Video only: recovered without its ride data.$videoNote',
     );
   }
-  final status = ride.integrity.status;
   if (status == RideIntegrityStatus.modified || failedVideoCount > 0) {
     return PlaybackIntegrityBadge(
       PlaybackIntegrityKind.checkFailed,
@@ -186,7 +209,7 @@ PlaybackIntegrityBadge playbackIntegrityBadge({
           'checked.',
     );
   }
-  if (ride.mockLocationDetected) {
+  if (mockLocation) {
     return PlaybackIntegrityBadge(
       PlaybackIntegrityKind.simulatedGps,
       'Simulated GPS',
@@ -194,7 +217,7 @@ PlaybackIntegrityBadge playbackIntegrityBadge({
     );
   }
   if (status == RideIntegrityStatus.verified) {
-    return ride.integrity.signedBy == RideSignedBy.thisDevice
+    return signedBy == RideSignedBy.thisDevice
         ? PlaybackIntegrityBadge(
             PlaybackIntegrityKind.signedHere,
             'Signed on this phone',
