@@ -1,7 +1,10 @@
 // Landscape recording engine on the recording screen: the switch off
 // changes nothing; on, gravity pins the UI and the idle capture, and the
 // landscape recording layout fits a landscape phone; a ride keeps the pin
-// frozen from the START tap to the end of STOP.
+// frozen from the START tap to the end of STOP. The parked screens (Ride
+// History and Settings over the idle screen) follow the classifier with
+// the switch on; Settings during a ride stays frozen; the switch off pins
+// nothing anywhere.
 
 import 'dart:async';
 import 'dart:io';
@@ -17,8 +20,10 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:motocam/core/providers/app_settings_provider.dart';
 import 'package:motocam/features/camera/providers/camera_provider.dart';
+import 'package:motocam/features/history/rides_list_screen.dart';
 import 'package:motocam/features/recording/recording_screen.dart';
 import 'package:motocam/features/recording/widgets/recording_landscape.dart';
+import 'package:motocam/features/recording/widgets/recording_settings_page.dart';
 import 'package:motocam/features/telemetry/providers/telemetry_provider.dart';
 
 const _mockedChannels = [
@@ -41,8 +46,31 @@ class _IdleCameraProvider extends CameraProvider {
   final CameraController _fakeController;
   final List<DeviceOrientation> idleLocks = [];
 
+  /// A ride the provider reports as running from the start (no START).
+  bool recording = false;
+
+  @override
+  bool get isRecording => recording;
+
   @override
   bool get isInitialized => true;
+
+  // Ride History and the Settings page, without real storage or cameras.
+  @override
+  Future<List<FileSystemEntity>> getRecordings() async => const [];
+
+  @override
+  Future<void> releaseCameraIfIdle() async {}
+
+  @override
+  Future<List<int>> getSupportedFpsOptionsForPreset({
+    required ResolutionPreset preset,
+  }) async => const [30];
+
+  @override
+  Future<List<CameraDescription>> getAvailableCameras({
+    bool refresh = false,
+  }) async => const [];
 
   @override
   CameraController? get controller => _fakeController;
@@ -509,5 +537,104 @@ void main() {
     expect(camera.rideCaptureOrientation, DeviceOrientation.landscapeLeft);
     expect(tester.takeException(), isNull);
     await disposeTree(tester);
+  });
+
+  /// Taps the control the harness reads as [label] and lets the route
+  /// push.
+  Future<void> openFromLabel(WidgetTester tester, String label) async {
+    await tester.tap(find.bySemanticsLabel(label));
+    for (var i = 0; i < 6; i++) {
+      await tester.pump(const Duration(milliseconds: 200));
+    }
+  }
+
+  group('parked screens', () {
+    testWidgets('switch on: Ride History is not pinned to portrait and '
+        'follows the classifier, and the pin holds after it closes', (
+      tester,
+    ) async {
+      final camera = await pumpScreen(tester, landscapeRecording: true);
+      await openFromLabel(tester, 'HISTORY');
+      expect(find.byType(RidesListScreen), findsOneWidget);
+      // No portraitUp pin on the way in, and gravity still classified.
+      expect(uiPins, isEmpty);
+      expect(gravity.hasListener, isTrue);
+
+      await holdLandscapeLeft(tester, const Duration(seconds: 2));
+      expect(uiPins, [
+        ['DeviceOrientation.landscapeLeft'],
+      ]);
+      // The idle capture follows too (the camera is released; the next
+      // initialization takes it).
+      expect(camera.idleLocks, [DeviceOrientation.landscapeLeft]);
+
+      // Playback and the export dialog open over Ride History, so they
+      // keep following the same classifier: back on the recording screen
+      // nothing re-pins and the classifier still runs.
+      Navigator.of(tester.element(find.byType(RidesListScreen))).pop();
+      for (var i = 0; i < 6; i++) {
+        await tester.pump(const Duration(milliseconds: 200));
+      }
+      expect(find.byType(RidesListScreen), findsNothing);
+      expect(uiPins, hasLength(1));
+      expect(gravity.hasListener, isTrue);
+      await holdLandscapeRight(tester, const Duration(seconds: 2));
+      expect(uiPins.last, ['DeviceOrientation.landscapeRight']);
+      expect(tester.takeException(), isNull);
+      await disposeTree(tester);
+    });
+
+    testWidgets('switch on: Settings opened while idle follows the '
+        'classifier', (tester) async {
+      await pumpScreen(tester, landscapeRecording: true);
+      await openFromLabel(tester, 'Settings');
+      expect(find.byType(RecordingSettingsPage), findsOneWidget);
+      expect(gravity.hasListener, isTrue);
+
+      await holdLandscapeLeft(tester, const Duration(seconds: 2));
+      expect(uiPins, [
+        ['DeviceOrientation.landscapeLeft'],
+      ]);
+      expect(tester.takeException(), isNull);
+      await disposeTree(tester);
+    });
+
+    testWidgets('switch on: Settings opened during a ride stays frozen', (
+      tester,
+    ) async {
+      final camera = _IdleCameraProvider(controller)..recording = true;
+      await pumpScreen(tester, landscapeRecording: true, camera: camera);
+      expect(gravity.hasListener, isFalse);
+      // Parked, the details panel offers Settings (for the next START).
+      await openFromLabel(tester, 'Settings');
+      expect(find.byType(RecordingSettingsPage), findsOneWidget);
+
+      await holdLandscapeLeft(tester, const Duration(seconds: 2));
+      expect(uiPins, isEmpty);
+      expect(camera.idleLocks, isEmpty);
+      expect(gravity.hasListener, isFalse);
+      await disposeTree(tester);
+    });
+
+    testWidgets('switch off: Ride History and Settings pin nothing and open '
+        'no sensor', (tester) async {
+      await pumpScreen(tester, landscapeRecording: false);
+      await openFromLabel(tester, 'HISTORY');
+      expect(find.byType(RidesListScreen), findsOneWidget);
+      await holdLandscapeLeft(tester, const Duration(seconds: 2));
+      Navigator.of(tester.element(find.byType(RidesListScreen))).pop();
+      for (var i = 0; i < 6; i++) {
+        await tester.pump(const Duration(milliseconds: 200));
+      }
+
+      await openFromLabel(tester, 'Settings');
+      expect(find.byType(RecordingSettingsPage), findsOneWidget);
+      await holdLandscapeLeft(tester, const Duration(seconds: 2));
+
+      expect(uiPins, isEmpty);
+      expect(gravityOpened, isEmpty);
+      expect(gravity.hasListener, isFalse);
+      await disposeTree(tester);
+    });
   });
 }

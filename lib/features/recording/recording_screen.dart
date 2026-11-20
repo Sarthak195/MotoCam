@@ -157,10 +157,16 @@ class _RecordingScreenState extends State<RecordingScreen>
   }
 
   /// Landscape recording: classifies gravity (and so may re-pin the UI)
-  /// only while the screen is idle and visible: no ride starting, running
-  /// or stopping, in the foreground, not in PiP and not covered by Ride
-  /// History. Otherwise the pin stays where it is, which freezes a ride's
-  /// orientation from the START tap to the end of its stop.
+  /// only while no ride is starting, running or stopping, the app is in the
+  /// foreground and not in PiP. Otherwise the pin stays where it is, which
+  /// freezes a ride's orientation from the START tap to the end of its
+  /// stop.
+  ///
+  /// The parked screens (Ride History, playback and Settings, which cover
+  /// this screen) keep the classifier running while idle, so they follow
+  /// the phone's orientation as this screen does, by MotoCam's own gravity
+  /// classifier and never by Android auto-rotate (which riders may have
+  /// off). Settings opened during a ride stays frozen with the ride.
   void _syncOrientationPin() {
     if (!widget.landscapeRecording) {
       return;
@@ -177,7 +183,7 @@ class _RecordingScreenState extends State<RecordingScreen>
         _appLifecycleState == null ||
         _appLifecycleState == AppLifecycleState.resumed;
     _orientationPinner.setWatching(
-      mounted && !rideBusy && visible && !_isInPipMode && !_isNavigatingHistory,
+      mounted && !rideBusy && visible && !_isInPipMode,
     );
   }
 
@@ -1718,10 +1724,10 @@ class _RecordingScreenState extends State<RecordingScreen>
     }
 
     _isNavigatingHistory = true;
-    _syncOrientationPin();
     try {
-      // Ride History is portrait-only until the redesign.
-      await _orientationPinner.pinNow(DeviceOrientation.portraitUp);
+      // With the landscape switch on, Ride History and playback follow the
+      // orientation classifier (see _syncOrientationPin); a pin while the
+      // camera is released is taken by the initialization on return.
       await camera.releaseCameraIfIdle();
       if (!mounted) {
         return;
@@ -1741,7 +1747,6 @@ class _RecordingScreenState extends State<RecordingScreen>
       await _initializeCamera();
     } finally {
       _isNavigatingHistory = false;
-      _syncOrientationPin();
       // The preview hides the camera-unavailable state while history is
       // open; rebuild so a failed re-initialization shows Retry.
       if (mounted) {

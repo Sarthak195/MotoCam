@@ -215,12 +215,12 @@ class OrientationClassifier {
 typedef GravitySample = ({double x, double y, double z, DateTime at});
 
 /// Pins the UI to the orientation an [OrientationClassifier] reads from
-/// gravity while the recording screen is idle, and freezes it for a ride.
+/// gravity while no ride runs, and freezes it for a ride.
 ///
-/// The owner calls [setWatching] with `true` only while the recording
-/// screen is idle and in the foreground (no ride starting, running or
-/// stopping, not in PiP, not covered by another screen) and with `false`
-/// otherwise; while not watching, [pinned] never changes, so the
+/// The owner calls [setWatching] with `true` only while the app is idle
+/// and in the foreground (no ride starting, running or stopping, not in
+/// PiP; the parked screens over the recording screen follow the pin too)
+/// and with `false` otherwise; while not watching, [pinned] never changes, so the
 /// orientation pinned when START was tapped is the ride's until STOP.
 /// When [enabled] is false (the build switch is off) it never subscribes
 /// and never pins.
@@ -273,8 +273,8 @@ class RideOrientationPinner {
   }
 
   /// Pins [orientation] at once, without the classifier's hold (for
-  /// example portraitUp while a portrait-only screen covers the recording
-  /// screen). Ignored when [enabled] is false.
+  /// example portraitUp for a screen that cannot take landscape). Ignored
+  /// when [enabled] is false.
   Future<void> pinNow(DeviceOrientation orientation) async {
     if (!enabled || _disposed) {
       return;
