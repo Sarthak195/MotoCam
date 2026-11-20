@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:motocam/features/history/widgets/playback_legend.dart';
 import 'package:motocam/features/history/widgets/playback_position.dart';
+import 'package:motocam/features/history/widgets/playback_speed_graph.dart';
 import 'package:motocam/features/history/widgets/playback_timeline.dart';
 import 'package:motocam/features/history/widgets/ride_playback_body.dart';
 import 'package:motocam/features/history/widgets/route_map_panel.dart';
@@ -264,8 +265,8 @@ void main() {
       cursor,
       paints..circle(
         x: size.width / 2,
-        y: 56 - (30 / 600) * (56 - 8) - 4,
-        color: Colors.orangeAccent,
+        y: speedGraphHeight - (30 / 600) * (speedGraphHeight - 8) - 4,
+        color: speedGraphCursorColor,
       ),
     );
   });
@@ -331,7 +332,7 @@ void main() {
     await tester.tap(find.byTooltip('Forward 10 seconds'));
     await tester.tap(find.byTooltip('Play'));
     expect(harness.calls, ['seekBy -10', 'seekBy 10', 'togglePlay']);
-    expect(find.text('Segment 1/3'), findsOneWidget);
+    expect(find.text('Clip 1 of 3'), findsOneWidget);
 
     harness.calls.clear();
     await tester.drag(find.byType(Slider), const Offset(200, 0));

@@ -15,17 +15,20 @@ import '../map/map_source_config.dart';
 import 'models/ride_index.dart';
 import 'models/ride_record.dart';
 import 'models/segment_verifier.dart';
-import 'services/ride_export.dart';
 import 'widgets/playback_position.dart';
+import 'widgets/playback_ride_panel.dart';
 import 'widgets/playback_timeline.dart';
 import 'widgets/playback_video_area.dart';
 import 'widgets/ride_export_flow.dart';
+import 'widgets/ride_list_model.dart';
 import 'widgets/ride_playback_body.dart';
 
 /// Plays back a recorded ride: its video segments as one continuous timeline,
-/// with a telemetry overlay, a speed graph, a seekbar that marks missing
-/// footage, integrity-check failures, incidents and locked segments, and an
-/// optional online route map.
+/// with a telemetry overlay, a speed graph, a timeline that marks missing
+/// footage, integrity-check failures, clip edges, incidents and locked
+/// segments, an integrity strip, the ride actions and an optional online
+/// route map. The layout follows the window: portrait, or landscape when
+/// wider than tall (see [RidePlaybackBody]).
 ///
 /// A sample-less [ride] (from Ride History) is first loaded in full on a
 /// background isolate. Segment integrity is then checked in the background,
@@ -111,6 +114,7 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
   bool _isFullscreenPlayback = false;
   List<int> _lockMarkerMs = const <int>[];
   List<int> _incidentMarkerMs = const <int>[];
+  List<int> _clipEdgeMs = const <int>[];
   List<PlaybackRange> _missingSegmentRanges = const <PlaybackRange>[];
   List<PlaybackRange> _failedCheckRanges = const <PlaybackRange>[];
   List<PlaybackRange> _noVideoRanges = const <PlaybackRange>[];
@@ -135,58 +139,51 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
     }
   }
 
-  /// The app bar's ride actions (Android): "Export to folder" and "Share",
-  /// disabled while the ride loads or could not be read, or a spinner that
-  /// stops the export while this ride is being exported.
-  Widget _buildRideActions(ValueListenable<RideExportProgress?> progress) {
-    final key = _ride.telemetryPath ?? _ride.videoPath;
-    return ValueListenableBuilder<RideExportProgress?>(
-      valueListenable: progress,
-      builder: (context, export, _) {
-        if (export != null && export.rideKey == key) {
-          return IconButton(
-            tooltip: 'Stop export',
-            onPressed: () =>
-                unawaited(context.read<CameraProvider>().cancelRideExport()),
-            icon: SizedBox(
-              width: 18,
-              height: 18,
-              child: CircularProgressIndicator(
-                strokeWidth: 2,
-                value: export.fraction,
-              ),
-            ),
-          );
-        }
-        return PopupMenuButton<RideExportDestination>(
-          tooltip: 'Ride actions',
-          icon: const Icon(Icons.more_vert),
-          enabled: !_isLoading && !_rideReadFailed,
-          // The State's context: the app bar (and this builder's context)
-          // unmounts when the video goes fullscreen, the screen does not.
-          // A section starts around the playhead (ride time).
-          onSelected: (destination) => unawaited(
-            runRideExportFlow(
-              this.context,
-              _ride,
-              destination,
-              playheadMs: _positionNotifier.value.position.inMilliseconds,
-            ),
-          ),
-          itemBuilder: (_) => const [
-            PopupMenuItem<RideExportDestination>(
-              value: RideExportDestination.folder,
-              child: Text('Export to folder'),
-            ),
-            PopupMenuItem<RideExportDestination>(
-              value: RideExportDestination.share,
-              child: Text('Share'),
-            ),
-          ],
-        );
-      },
+  /// The ride actions (Android): Export and Share through the export flow
+  /// with the playhead, disabled while the ride loads or could not be read,
+  /// or a ring that stops the export while this ride is being exported.
+  Widget _buildRideActions(
+    ValueListenable<RideExportProgress?> progress, {
+    required bool landscape,
+  }) {
+    return PlaybackRideActions(
+      position: _positionNotifier,
+      exportProgress: progress,
+      rideKey: _ride.telemetryPath ?? _ride.videoPath,
+      enabled: !_isLoading && !_rideReadFailed,
+      height: landscape ? 52 : 56,
+      // The State's context: the panel unmounts when the video goes
+      // fullscreen, the screen does not. A section starts around the
+      // playhead (ride time).
+      onExport: (destination, playheadMs) => unawaited(
+        runRideExportFlow(context, _ride, destination, playheadMs: playheadMs),
+      ),
+      onStopExport: () =>
+          unawaited(context.read<CameraProvider>().cancelRideExport()),
     );
   }
+
+  /// The header: the ride's date and summary under a back button.
+  Widget _buildHeader({required bool landscape}) => PlaybackHeader(
+    title: rideDateLabel(_ride.createdAt, DateTime.now()),
+    subtitle: rideSummaryText(_ride, formatFileSize),
+    compact: landscape,
+    onBack: () => Navigator.of(context).maybePop(),
+  );
+
+  /// The integrity strip: the badge and "Check videos again" (only when the
+  /// ride has recorded video hashes; a spinner while the check runs).
+  Widget _buildIntegrity({required bool landscape}) => PlaybackIntegrityStrip(
+    badge: playbackIntegrityBadge(
+      ride: _ride,
+      failedVideoCount: _integrityFailedPaths.length,
+      rideReadFailed: _rideReadFailed,
+    ),
+    showCheck: _ride.expectedSegmentHashes.isNotEmpty,
+    isChecking: _isCheckingSegments,
+    onCheck: _isLoading ? null : _checkVideosAgain,
+    stacked: landscape,
+  );
 
   @override
   void initState() {
@@ -612,6 +609,10 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
     );
     _noVideoRanges = uncoveredRanges(timeline: timeline, totalMs: totalMs);
     _lastKnownGlobalPosition = Duration.zero;
+    _clipEdgeMs = clipEdgeOffsetsMs(
+      playlistOffsets: _segmentOffsets,
+      totalMs: totalMs,
+    );
     _lockMarkerMs = lockMarkerOffsetsMs(
       playlistPaths: _segmentPaths,
       playlistOffsets: _segmentOffsets,
@@ -1302,71 +1303,78 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
   Widget build(BuildContext context) {
     final controller = _controller;
     final playbackError = _playbackError;
+    final exportProgress = _exportProgress;
 
-    return Scaffold(
-      appBar: _isFullscreenPlayback
-          ? null
-          : AppBar(
-              title: const Text('Ride Playback'),
-              actions: [
-                if (_ride.expectedSegmentHashes.isNotEmpty)
-                  IconButton(
-                    tooltip: _isCheckingSegments
-                        ? 'Checking videos'
-                        : 'Check videos again',
-                    onPressed: _isLoading ? null : _checkVideosAgain,
-                    icon: _isCheckingSegments
-                        ? const SizedBox(
-                            width: 18,
-                            height: 18,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          )
-                        : const Icon(Icons.fact_check_outlined),
-                  ),
-                if (_exportProgress case final progress?)
-                  _buildRideActions(progress),
+    if (playbackError != null || _isLoading || controller == null) {
+      // Loading or nothing playable: the header keeps Back reachable, and
+      // the integrity strip keeps "Check videos again" where it was.
+      return Scaffold(
+        body: SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                _buildHeader(landscape: false),
+                const SizedBox(height: 6),
+                _buildIntegrity(landscape: false),
+                Expanded(
+                  child: playbackError != null
+                      ? PlaybackErrorView(
+                          message: playbackError,
+                          onBack: () => Navigator.of(context).maybePop(),
+                          onRetry: _retryPlayback,
+                        )
+                      : const Center(child: CircularProgressIndicator()),
+                ),
               ],
             ),
-      body: playbackError != null
-          ? PlaybackErrorView(
-              message: playbackError,
-              onBack: () => Navigator.of(context).maybePop(),
-              onRetry: _retryPlayback,
-            )
-          : _isLoading || controller == null
-          ? const Center(child: CircularProgressIndicator())
-          : RidePlaybackBody(
-              video: PlaybackVideoSurface(
-                controller: controller,
-                onTap: _toggleFullscreenPlayback,
-              ),
-              samples: _ride.samples,
-              maxSpeed: _maxSampleSpeed,
-              sampleAt: _ride.sampleForPosition,
-              position: _positionNotifier,
-              totalDuration: _totalDuration,
-              marks: PlaybackTimelineMarks(
-                missingRanges: _missingSegmentRanges,
-                failedCheckRanges: _failedCheckRanges,
-                noVideoRanges: _noVideoRanges,
-                incidentMarkerMs: _incidentMarkerMs,
-                lockMarkerMs: _lockMarkerMs,
-              ),
-              isFullscreen: _isFullscreenPlayback,
-              showRouteMap: _showRouteMap,
-              segmentNumber: _activeSegmentIndex + 1,
-              segmentCount: _segmentPaths.length,
-              onToggleFullscreen: _toggleFullscreenPlayback,
-              onToggleRouteMap: _toggleRouteMapVisibility,
-              onSeek: _seekFromGraph,
-              onSeekBy: _seekBy,
-              onTogglePlay: _togglePlay,
-              onScrubStart: () => unawaited(_beginScrub()),
-              onScrubUpdate: _updateScrubPreview,
-              onGraphScrubEnd: (target) => unawaited(_commitScrub(target)),
-              onSeekbarScrubEnd: (valueMs, width) =>
-                  unawaited(_commitSeekbarValue(valueMs, width)),
-            ),
+          ),
+        ),
+      );
+    }
+
+    return Scaffold(
+      body: RidePlaybackBody(
+        video: PlaybackVideoSurface(
+          controller: controller,
+          onTap: _toggleFullscreenPlayback,
+        ),
+        samples: _ride.samples,
+        maxSpeed: _maxSampleSpeed,
+        sampleAt: _ride.sampleForPosition,
+        position: _positionNotifier,
+        totalDuration: _totalDuration,
+        marks: PlaybackTimelineMarks(
+          missingRanges: _missingSegmentRanges,
+          failedCheckRanges: _failedCheckRanges,
+          noVideoRanges: _noVideoRanges,
+          incidentMarkerMs: _incidentMarkerMs,
+          lockMarkerMs: _lockMarkerMs,
+          clipEdgeMs: _clipEdgeMs,
+        ),
+        isFullscreen: _isFullscreenPlayback,
+        showRouteMap: _showRouteMap,
+        segmentNumber: _activeSegmentIndex + 1,
+        segmentCount: _segmentPaths.length,
+        header: (context, landscape) => _buildHeader(landscape: landscape),
+        integrity: (context, landscape) =>
+            _buildIntegrity(landscape: landscape),
+        actions: exportProgress == null
+            ? null
+            : (context, landscape) =>
+                  _buildRideActions(exportProgress, landscape: landscape),
+        onToggleFullscreen: _toggleFullscreenPlayback,
+        onToggleRouteMap: _toggleRouteMapVisibility,
+        onSeek: _seekFromGraph,
+        onSeekBy: _seekBy,
+        onTogglePlay: _togglePlay,
+        onScrubStart: () => unawaited(_beginScrub()),
+        onScrubUpdate: _updateScrubPreview,
+        onGraphScrubEnd: (target) => unawaited(_commitScrub(target)),
+        onSeekbarScrubEnd: (valueMs, width) =>
+            unawaited(_commitSeekbarValue(valueMs, width)),
+      ),
     );
   }
 

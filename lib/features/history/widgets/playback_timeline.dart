@@ -91,6 +91,7 @@ class PlaybackTimelineMarks {
     this.noVideoRanges = const <PlaybackRange>[],
     this.incidentMarkerMs = const <int>[],
     this.lockMarkerMs = const <int>[],
+    this.clipEdgeMs = const <int>[],
   });
 
   /// Segments that are missing or could not be played.
@@ -108,6 +109,10 @@ class PlaybackTimelineMarks {
   /// Locked-segment marker times.
   final List<int> lockMarkerMs;
 
+  /// Where one clip ends and the next starts (the start of every clip but
+  /// the first). Not counted by [isEmpty]: a clip edge is not a mark.
+  final List<int> clipEdgeMs;
+
   /// Whether nothing at all is marked.
   bool get isEmpty =>
       missingRanges.isEmpty &&
@@ -115,6 +120,24 @@ class PlaybackTimelineMarks {
       noVideoRanges.isEmpty &&
       incidentMarkerMs.isEmpty &&
       lockMarkerMs.isEmpty;
+}
+
+/// The clip edges of a playlist: the start of every clip after the first
+/// that falls inside a timeline [totalMs] long, in order and without
+/// repeats.
+List<int> clipEdgeOffsetsMs({
+  required List<Duration> playlistOffsets,
+  required int totalMs,
+}) {
+  if (totalMs <= 0) {
+    return const <int>[];
+  }
+  final edges = <int>{
+    for (final offset in playlistOffsets.skip(1))
+      if (offset.inMilliseconds > 0 && offset.inMilliseconds < totalMs)
+        offset.inMilliseconds,
+  }.toList()..sort();
+  return edges;
 }
 
 /// Where a global timeline position lands inside the playlist.

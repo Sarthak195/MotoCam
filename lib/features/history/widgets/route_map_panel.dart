@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../../telemetry/models/telemetry_data.dart';
+import '../../../core/theme/tokens.dart';
 import 'route_map_view.dart';
 
 /// Builds the route map shown while [RouteMapPanel] is expanded.
@@ -66,12 +67,11 @@ class RouteMapPanel extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      margin: const EdgeInsets.fromLTRB(12, 6, 12, 0),
-      padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
+      padding: const EdgeInsets.fromLTRB(10, 0, 10, 0),
       decoration: BoxDecoration(
-        color: Colors.white.withValues(alpha: 0.04),
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
+        color: MotoColors.surface,
+        borderRadius: BorderRadius.circular(MotoRadii.sm),
+        border: Border.all(color: MotoColors.hairline),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -91,23 +91,24 @@ class RouteMapPanel extends StatelessWidget {
                   children: [
                     const Icon(
                       Icons.map_outlined,
-                      size: 16,
-                      color: Colors.white70,
+                      size: 20,
+                      color: MotoColors.dim,
                     ),
-                    const SizedBox(width: 8),
-                    const Text(
-                      'Route Map',
-                      style: TextStyle(
-                        color: Colors.white,
-                        fontSize: 12,
-                        fontWeight: FontWeight.w700,
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        'Route Map',
+                        style: MotoFonts.bodyStyle(
+                          15,
+                          weight: FontWeight.w600,
+                          color: MotoColors.text,
+                        ),
                       ),
                     ),
-                    const Spacer(),
                     Icon(
                       expanded ? Icons.expand_less : Icons.expand_more,
-                      color: Colors.white70,
-                      size: 18,
+                      color: MotoColors.dim,
+                      size: 22,
                     ),
                   ],
                 ),
@@ -122,7 +123,7 @@ class RouteMapPanel extends StatelessWidget {
             alignment: Alignment.topCenter,
             child: expanded
                 ? Padding(
-                    padding: const EdgeInsets.only(top: 8),
+                    padding: const EdgeInsets.only(bottom: 10),
                     child: mapBuilder(
                       context,
                       samples,

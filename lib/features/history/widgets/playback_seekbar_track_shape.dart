@@ -1,22 +1,26 @@
 import 'package:flutter/material.dart';
 
+import '../../../core/theme/tokens.dart';
 import 'playback_timeline.dart';
 
 /// Colour of footage that is declared but missing or unreadable.
-const Color missingFootageColor = Colors.red;
+const Color missingFootageColor = MotoColors.rec;
 
 /// Colour of footage that failed the integrity check.
-const Color failedCheckColor = Colors.purpleAccent;
+const Color failedCheckColor = Color(0xFFC792FF);
 
 /// Colour of ride time that has no video at all (for example overwritten by
 /// loop recording).
 const Color noVideoColor = Color(0xFF78909C);
 
-/// Colour of incident markers.
-const Color incidentMarkerColor = Colors.redAccent;
+/// Colour of incident markers (an amber triangle above the track).
+const Color incidentMarkerColor = MotoColors.amber;
 
-/// Colour of locked-segment markers.
-const Color lockMarkerColor = Colors.orangeAccent;
+/// Colour of locked-segment markers (a blue diamond under the track).
+const Color lockMarkerColor = MotoColors.lock;
+
+/// Colour of the clip-edge ticks under the track.
+const Color clipEdgeColor = MotoColors.muted;
 
 /// Slider track for ride playback that also paints timeline ranges and event
 /// markers.
@@ -35,6 +39,7 @@ class PlaybackSeekbarTrackShape extends SliderTrackShape
     this.noVideoRanges = const <PlaybackRange>[],
     this.incidentMarkerMs = const <int>[],
     this.lockMarkerMs = const <int>[],
+    this.clipEdgeMs = const <int>[],
   });
 
   /// Length of the timeline in milliseconds.
@@ -50,11 +55,17 @@ class PlaybackSeekbarTrackShape extends SliderTrackShape
   /// Ride time without any video, drawn in [noVideoColor].
   final List<PlaybackRange> noVideoRanges;
 
-  /// Incident marker positions, drawn as [incidentMarkerColor] ticks.
+  /// Incident marker positions, drawn as [incidentMarkerColor] triangles
+  /// above the track.
   final List<int> incidentMarkerMs;
 
-  /// Locked-segment marker positions, drawn as [lockMarkerColor] ticks.
+  /// Locked-segment marker positions, drawn as [lockMarkerColor] diamonds
+  /// under the track.
   final List<int> lockMarkerMs;
+
+  /// Clip edges: a notch across the track and a [clipEdgeColor] tick under
+  /// it.
+  final List<int> clipEdgeMs;
 
   @override
   void paint(
@@ -158,27 +169,59 @@ class PlaybackSeekbarTrackShape extends SliderTrackShape
     canvas.restore();
 
     final centerY = trackRect.center.dy;
-    void drawMarkers(
-      List<int> markers,
-      Color color,
-      double top,
-      double bottom,
-    ) {
-      final paint = Paint()
-        ..color = color.withValues(alpha: 0.9)
-        ..strokeWidth = 2
-        ..strokeCap = StrokeCap.round;
-      for (final markerMs in markers) {
-        final x = xFor(markerMs);
-        canvas.drawLine(
-          Offset(x, centerY + top),
-          Offset(x, centerY + bottom),
-          paint,
-        );
-      }
+    final halfTrack = trackRect.height / 2;
+
+    // Clip edges: a background-coloured notch across the track, so the
+    // clips read as separate pieces, and a muted tick under it.
+    final notchPaint = Paint()
+      ..color = MotoColors.bg
+      ..strokeWidth = 3;
+    final tickPaint = Paint()
+      ..color = clipEdgeColor
+      ..strokeWidth = 1.5;
+    for (final edgeMs in clipEdgeMs) {
+      final x = xFor(edgeMs);
+      canvas.drawLine(
+        Offset(x, centerY - halfTrack - 2),
+        Offset(x, centerY + halfTrack + 2),
+        notchPaint,
+      );
+      canvas.drawLine(
+        Offset(x, centerY + halfTrack + 4),
+        Offset(x, centerY + halfTrack + 8),
+        tickPaint,
+      );
     }
 
-    drawMarkers(lockMarkerMs, lockMarkerColor, -10, 11);
-    drawMarkers(incidentMarkerMs, incidentMarkerColor, -13, 8);
+    // Locked clips: a diamond under the track.
+    final lockPaint = Paint()..color = lockMarkerColor;
+    for (final markerMs in lockMarkerMs) {
+      final x = xFor(markerMs);
+      final cy = centerY + halfTrack + 12;
+      canvas.drawPath(
+        Path()
+          ..moveTo(x, cy - 6)
+          ..lineTo(x + 6, cy)
+          ..lineTo(x, cy + 6)
+          ..lineTo(x - 6, cy)
+          ..close(),
+        lockPaint,
+      );
+    }
+
+    // Incidents: a triangle above the track, pointing down at it.
+    final incidentPaint = Paint()..color = incidentMarkerColor;
+    for (final markerMs in incidentMarkerMs) {
+      final x = xFor(markerMs);
+      final tip = centerY - halfTrack - 3;
+      canvas.drawPath(
+        Path()
+          ..moveTo(x, tip)
+          ..lineTo(x - 7, tip - 13)
+          ..lineTo(x + 7, tip - 13)
+          ..close(),
+        incidentPaint,
+      );
+    }
   }
 }

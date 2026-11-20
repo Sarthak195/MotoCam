@@ -1,19 +1,21 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
-import '../../../core/utils/format_utils.dart';
+import '../../../core/theme/tokens.dart';
 import 'playback_position.dart';
 import 'playback_seekbar_track_shape.dart';
 import 'playback_timeline.dart';
 
-/// The seekbar: a slider whose track marks [marks], with the elapsed and
-/// total time under it.
+/// The ride timeline: a slider whose track marks [marks] (missing,
+/// failed-check and no-video ranges, clip edges, incident triangles and
+/// lock diamonds) under a round playhead.
 ///
-/// The slider and the elapsed-time label listen to [position] on their own,
-/// so a position tick rebuilds nothing else. Scrub gestures go to the
-/// callbacks; this widget never touches the video controller.
+/// Only the slider listens to [position], so a position tick rebuilds
+/// nothing else. Scrub gestures go to the callbacks; this widget never
+/// touches the video controller. The elapsed and total time are shown by
+/// the transport row (see `PlaybackTimeLabel`).
 class PlaybackSeekBar extends StatelessWidget {
-  /// Creates the seekbar for a timeline [totalDuration] long.
+  /// Creates the timeline for a ride [totalDuration] long.
   const PlaybackSeekBar({
     super.key,
     required this.position,
@@ -22,12 +24,16 @@ class PlaybackSeekBar extends StatelessWidget {
     required this.onScrubStart,
     required this.onScrubUpdate,
     required this.onScrubEnd,
+    this.height = sliderHeight,
   });
 
-  /// Height, in logical pixels, of the slider row.
-  static const double sliderHeight = 34;
+  /// Height, in logical pixels, of the timeline in portrait.
+  static const double sliderHeight = 56;
 
-  /// The playback position the thumb and the elapsed-time label show.
+  /// Height, in logical pixels, of the timeline in landscape.
+  static const double compactHeight = 44;
+
+  /// The playback position the playhead shows.
   final ValueListenable<PlaybackPosition> position;
 
   /// Length of the ride timeline.
@@ -36,73 +42,79 @@ class PlaybackSeekBar extends StatelessWidget {
   /// The ranges and markers drawn on the track.
   final PlaybackTimelineMarks marks;
 
-  /// The rider pressed the thumb or the track.
+  /// The rider pressed the playhead or the track.
   final VoidCallback onScrubStart;
 
-  /// The thumb moved to the given position.
+  /// The playhead moved to the given position.
   final void Function(Duration target) onScrubUpdate;
 
   /// The rider let go at [valueMs] on a slider [sliderWidth] pixels wide.
   final void Function(double valueMs, double sliderWidth) onScrubEnd;
+
+  /// Height of the timeline: room for the triangles above the track and
+  /// the diamonds under it.
+  final double height;
 
   @override
   Widget build(BuildContext context) {
     final totalMs = totalDuration.inMilliseconds;
     final maxMs = totalMs > 0 ? totalMs : 1;
     final enabled = totalMs > 0;
-    return Column(
-      children: [
-        SizedBox(
-          height: sliderHeight,
-          child: LayoutBuilder(
-            builder: (context, constraints) {
-              return SliderTheme(
-                data: SliderTheme.of(context).copyWith(
-                  trackShape: PlaybackSeekbarTrackShape(
-                    totalDurationMs: totalMs,
-                    missingRanges: marks.missingRanges,
-                    failedCheckRanges: marks.failedCheckRanges,
-                    noVideoRanges: marks.noVideoRanges,
-                    incidentMarkerMs: marks.incidentMarkerMs,
-                    lockMarkerMs: marks.lockMarkerMs,
-                  ),
-                ),
-                child: ValueListenableBuilder<PlaybackPosition>(
-                  valueListenable: position,
-                  builder: (context, value, _) => Slider(
-                    min: 0,
-                    max: maxMs.toDouble(),
-                    value: value.position.inMilliseconds
-                        .clamp(0, maxMs)
-                        .toDouble(),
-                    onChangeStart: enabled ? (_) => onScrubStart() : null,
-                    onChanged: enabled
-                        ? (newValue) => onScrubUpdate(
-                            Duration(milliseconds: newValue.round()),
-                          )
-                        : null,
-                    onChangeEnd: enabled
-                        ? (newValue) =>
-                              onScrubEnd(newValue, constraints.maxWidth)
-                        : null,
-                  ),
-                ),
-              );
-            },
-          ),
-        ),
-        Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: [
-            ValueListenableBuilder<PlaybackPosition>(
-              valueListenable: position,
-              builder: (context, value, _) =>
-                  Text(formatElapsed(value.position)),
+    return SizedBox(
+      height: height,
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          return SliderTheme(
+            data: SliderTheme.of(context).copyWith(
+              trackHeight: 8,
+              activeTrackColor: MotoColors.text,
+              inactiveTrackColor: MotoColors.hairlineStrong,
+              disabledActiveTrackColor: MotoColors.disabled,
+              disabledInactiveTrackColor: MotoColors.hairlineStrong,
+              thumbColor: MotoColors.text,
+              disabledThumbColor: MotoColors.disabled,
+              overlayColor: MotoColors.text.withValues(alpha: 0.12),
+              thumbShape: const RoundSliderThumbShape(
+                enabledThumbRadius: 10,
+                elevation: 0,
+                pressedElevation: 0,
+              ),
+              overlayShape: const RoundSliderOverlayShape(overlayRadius: 22),
+              trackShape: PlaybackSeekbarTrackShape(
+                totalDurationMs: totalMs,
+                missingRanges: marks.missingRanges,
+                failedCheckRanges: marks.failedCheckRanges,
+                noVideoRanges: marks.noVideoRanges,
+                incidentMarkerMs: marks.incidentMarkerMs,
+                lockMarkerMs: marks.lockMarkerMs,
+                clipEdgeMs: marks.clipEdgeMs,
+              ),
             ),
-            Text(formatElapsed(totalDuration)),
-          ],
-        ),
-      ],
+            child: Semantics(
+              label: 'Ride timeline',
+              child: ValueListenableBuilder<PlaybackPosition>(
+                valueListenable: position,
+                builder: (context, value, _) => Slider(
+                  min: 0,
+                  max: maxMs.toDouble(),
+                  value: value.position.inMilliseconds
+                      .clamp(0, maxMs)
+                      .toDouble(),
+                  onChangeStart: enabled ? (_) => onScrubStart() : null,
+                  onChanged: enabled
+                      ? (newValue) => onScrubUpdate(
+                          Duration(milliseconds: newValue.round()),
+                        )
+                      : null,
+                  onChangeEnd: enabled
+                      ? (newValue) => onScrubEnd(newValue, constraints.maxWidth)
+                      : null,
+                ),
+              ),
+            ),
+          );
+        },
+      ),
     );
   }
 }

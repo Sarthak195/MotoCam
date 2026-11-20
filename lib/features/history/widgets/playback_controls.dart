@@ -1,33 +1,32 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
+import '../../../core/theme/tokens.dart';
+import '../../../core/utils/format_utils.dart';
 import 'playback_position.dart';
 
-/// The transport row under the seekbar (back 10 seconds, play or pause,
-/// forward 10 seconds) and the "Segment n/m" label.
+/// The transport row: back 10 seconds, the round play or pause button,
+/// forward 10 seconds, and the elapsed and total time.
 ///
-/// Only the play/pause button listens to [position], for whether the video
-/// is playing; the buttons report to the callbacks and never touch the video
+/// Only the play/pause button and the elapsed time listen to [position];
+/// the buttons report to the callbacks and never touch the video
 /// controller.
 class PlaybackControls extends StatelessWidget {
-  /// Creates the controls for segment [segmentNumber] of [segmentCount].
+  /// Creates the transport row for a ride [totalDuration] long.
   const PlaybackControls({
     super.key,
     required this.position,
-    required this.segmentNumber,
-    required this.segmentCount,
+    required this.totalDuration,
     required this.onSeekBy,
     required this.onTogglePlay,
+    this.playSize = 56,
   });
 
-  /// Source of whether the video is playing.
+  /// The playback position and whether the video is playing.
   final ValueListenable<PlaybackPosition> position;
 
-  /// One-based number of the segment being played.
-  final int segmentNumber;
-
-  /// Number of playable segments in the playlist.
-  final int segmentCount;
+  /// Length of the ride timeline.
+  final Duration totalDuration;
 
   /// Seek by the given offset from the current position (negative goes back).
   final void Function(Duration offset) onSeekBy;
@@ -35,42 +34,137 @@ class PlaybackControls extends StatelessWidget {
   /// Play when paused, pause when playing.
   final VoidCallback onTogglePlay;
 
+  /// Diameter of the play button (56 in portrait, 52 in landscape).
+  final double playSize;
+
   @override
   Widget build(BuildContext context) {
-    return Column(
+    return Row(
       children: [
-        Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            IconButton(
-              tooltip: 'Back 10 seconds',
-              onPressed: () => onSeekBy(const Duration(seconds: -10)),
-              icon: const Icon(Icons.replay_10),
-            ),
-            ValueListenableBuilder<PlaybackPosition>(
-              valueListenable: position,
-              builder: (context, value, _) => IconButton(
-                tooltip: value.isPlaying ? 'Pause' : 'Play',
-                onPressed: onTogglePlay,
-                icon: Icon(
-                  value.isPlaying ? Icons.pause_circle : Icons.play_circle,
-                  size: 36,
+        _SkipButton(
+          tooltip: 'Back 10 seconds',
+          icon: Icons.replay_10,
+          onPressed: () => onSeekBy(const Duration(seconds: -10)),
+        ),
+        const SizedBox(width: 4),
+        ValueListenableBuilder<PlaybackPosition>(
+          valueListenable: position,
+          builder: (context, value, _) => Tooltip(
+            message: value.isPlaying ? 'Pause' : 'Play',
+            child: Material(
+              color: MotoColors.text,
+              shape: const CircleBorder(),
+              child: InkWell(
+                customBorder: const CircleBorder(),
+                onTap: onTogglePlay,
+                child: SizedBox(
+                  width: playSize,
+                  height: playSize,
+                  child: Icon(
+                    value.isPlaying
+                        ? Icons.pause_rounded
+                        : Icons.play_arrow_rounded,
+                    size: playSize * 0.55,
+                    color: MotoColors.bg,
+                  ),
                 ),
               ),
             ),
-            IconButton(
-              tooltip: 'Forward 10 seconds',
-              onPressed: () => onSeekBy(const Duration(seconds: 10)),
-              icon: const Icon(Icons.forward_10),
-            ),
-          ],
+          ),
         ),
-        const SizedBox(height: 4),
-        Text(
-          'Segment $segmentNumber/$segmentCount',
-          style: const TextStyle(color: Colors.white70, fontSize: 12),
+        const SizedBox(width: 4),
+        _SkipButton(
+          tooltip: 'Forward 10 seconds',
+          icon: Icons.forward_10,
+          onPressed: () => onSeekBy(const Duration(seconds: 10)),
+        ),
+        const SizedBox(width: 10),
+        Expanded(
+          child: PlaybackTimeLabel(
+            position: position,
+            totalDuration: totalDuration,
+          ),
         ),
       ],
+    );
+  }
+}
+
+class _SkipButton extends StatelessWidget {
+  const _SkipButton({
+    required this.tooltip,
+    required this.icon,
+    required this.onPressed,
+  });
+
+  final String tooltip;
+  final IconData icon;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    return IconButton(
+      tooltip: tooltip,
+      onPressed: onPressed,
+      constraints: const BoxConstraints.tightFor(
+        width: MotoSize.minTarget,
+        height: MotoSize.minTarget,
+      ),
+      padding: EdgeInsets.zero,
+      icon: Icon(icon, color: MotoColors.text, size: 26),
+    );
+  }
+}
+
+/// "00:03:46 / 00:11:18": the elapsed time (it follows [position]) in the
+/// text colour and the total in muted grey, scaled down when the row is
+/// narrow.
+class PlaybackTimeLabel extends StatelessWidget {
+  /// Creates the label for a ride [totalDuration] long.
+  const PlaybackTimeLabel({
+    super.key,
+    required this.position,
+    required this.totalDuration,
+  });
+
+  /// The playback position.
+  final ValueListenable<PlaybackPosition> position;
+
+  /// Length of the ride timeline.
+  final Duration totalDuration;
+
+  @override
+  Widget build(BuildContext context) {
+    return FittedBox(
+      fit: BoxFit.scaleDown,
+      alignment: Alignment.centerLeft,
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          ValueListenableBuilder<PlaybackPosition>(
+            valueListenable: position,
+            builder: (context, value, _) => Text(
+              formatElapsed(value.position),
+              style: MotoFonts.condensedStyle(
+                26,
+                weight: FontWeight.w600,
+                color: MotoColors.text,
+                tabularFigures: true,
+              ),
+            ),
+          ),
+          const SizedBox(width: 6),
+          Text(
+            '/ ${formatElapsed(totalDuration)}',
+            style: MotoFonts.condensedStyle(
+              26,
+              weight: FontWeight.w600,
+              color: MotoColors.muted,
+              tabularFigures: true,
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

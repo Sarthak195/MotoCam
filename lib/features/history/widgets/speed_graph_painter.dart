@@ -2,6 +2,7 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 
+import '../../../core/theme/tokens.dart';
 import '../../telemetry/models/telemetry_data.dart';
 import 'playback_seekbar_track_shape.dart';
 import 'playback_timeline.dart';
@@ -117,15 +118,15 @@ class SpeedGraphPagePainter extends CustomPainter {
     canvas.drawPath(
       path,
       Paint()
-        ..color = Colors.cyanAccent.withValues(alpha: 0.9)
+        ..color = MotoColors.text
         ..style = PaintingStyle.stroke
-        ..strokeWidth = 1.8
+        ..strokeWidth = 2.2
         ..strokeJoin = StrokeJoin.round
         ..strokeCap = StrokeCap.round,
     );
 
     final dotPaint = Paint()
-      ..color = Colors.cyanAccent.withValues(alpha: 0.95)
+      ..color = MotoColors.text
       ..style = PaintingStyle.fill;
     for (final point in points) {
       canvas.drawCircle(point, 1.7, dotPaint);
@@ -144,7 +145,10 @@ class SpeedGraphPagePainter extends CustomPainter {
   }
 }
 
-/// Paints the orange dot that marks the sample nearest the playback
+/// Colour of the dot that marks the playhead on the speed graph.
+const Color speedGraphCursorColor = MotoColors.text;
+
+/// Paints the dot that marks the sample nearest the playback
 /// position, at the centre of the strip, on top of the (static) curve.
 class SpeedGraphCursorPainter extends CustomPainter {
   /// Creates the cursor for [positionMs].
@@ -190,9 +194,9 @@ class SpeedGraphCursorPainter extends CustomPainter {
     }
     canvas.drawCircle(
       Offset(x, speedGraphY(sample.speed, maxSpeed, size.height)),
-      2.8,
+      3.5,
       Paint()
-        ..color = Colors.orangeAccent
+        ..color = speedGraphCursorColor
         ..style = PaintingStyle.fill,
     );
   }

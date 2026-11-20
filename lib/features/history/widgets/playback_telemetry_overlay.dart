@@ -1,10 +1,12 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
+import '../../../core/theme/tokens.dart';
 import '../../telemetry/models/telemetry_data.dart';
 
 /// The stats strip over the bottom of the video: speed, distance, G-force
-/// and GPS position of the sample at the playback position.
+/// and GPS position of the sample at the playback position. The stats wrap
+/// onto a second line when the video is narrow.
 ///
 /// Only this widget rebuilds when [sample] changes. Returns a [Positioned],
 /// so it belongs directly in a [Stack].
@@ -18,20 +20,22 @@ class PlaybackTelemetryOverlay extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Positioned(
-      left: 12,
-      right: 12,
-      bottom: 84,
+      left: 10,
+      right: 10,
+      bottom: 10,
       child: RepaintBoundary(
         child: Container(
-          padding: const EdgeInsets.all(12),
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
           decoration: BoxDecoration(
-            color: Colors.black.withValues(alpha: 0.6),
-            borderRadius: BorderRadius.circular(10),
+            color: MotoColors.bg.withValues(alpha: 0.78),
+            borderRadius: BorderRadius.circular(MotoRadii.sm),
           ),
           child: ValueListenableBuilder<TelemetryData>(
             valueListenable: sample,
-            builder: (context, sample, _) => Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            builder: (context, sample, _) => Wrap(
+              alignment: WrapAlignment.spaceBetween,
+              spacing: 14,
+              runSpacing: 4,
               children: [
                 _Stat('Speed', '${sample.speed.toStringAsFixed(1)} km/h'),
                 _Stat('Dist', '${sample.distanceKm.toStringAsFixed(2)} km'),
@@ -62,16 +66,14 @@ class _Stat extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: [
-        Text(
-          label,
-          style: const TextStyle(color: Colors.white70, fontSize: 11),
-        ),
+        Text(label, style: MotoFonts.bodyStyle(11, color: MotoColors.dim)),
         Text(
           value,
-          style: const TextStyle(
-            color: Colors.white,
-            fontWeight: FontWeight.w600,
-            fontSize: 12,
+          style: MotoFonts.condensedStyle(
+            15,
+            weight: FontWeight.w600,
+            color: MotoColors.text,
+            tabularFigures: true,
           ),
         ),
       ],

@@ -1,5 +1,8 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:video_player/video_player.dart';
+
+import '../../../core/theme/tokens.dart';
 
 /// The video itself, centred at its aspect ratio; a tap calls [onTap].
 ///
@@ -34,9 +37,20 @@ class PlaybackVideoSurface extends StatelessWidget {
   }
 }
 
-/// The area above the seekbar: the [video], the optional telemetry [overlay]
-/// and [speedGraph] on top of it (both [Positioned] widgets), the fullscreen
-/// button and, in fullscreen, the hint to tap the video.
+/// Hides the status and navigation bars for fullscreen playback
+/// ([immersive] true, sticky: a swipe shows them for a moment) or shows
+/// both again. The playback body calls it when fullscreen changes and when
+/// it is disposed, so leaving the screen always restores the bars.
+Future<void> setPlaybackImmersive(bool immersive) => immersive
+    ? SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky)
+    : SystemChrome.setEnabledSystemUIMode(
+        SystemUiMode.manual,
+        overlays: SystemUiOverlay.values,
+      );
+
+/// The video box: the [video] on a dark rounded surface, the optional
+/// telemetry [overlay] (a [Positioned]), the "Clip 2 of 6" chip, the
+/// fullscreen button and, in fullscreen, the hint to tap the video.
 class PlaybackVideoArea extends StatelessWidget {
   /// Creates the video area.
   const PlaybackVideoArea({
@@ -45,7 +59,7 @@ class PlaybackVideoArea extends StatelessWidget {
     required this.isFullscreen,
     required this.onToggleFullscreen,
     this.overlay,
-    this.speedGraph,
+    this.clipLabel,
   });
 
   /// The video, usually a [PlaybackVideoSurface].
@@ -54,8 +68,8 @@ class PlaybackVideoArea extends StatelessWidget {
   /// The telemetry overlay (a [Positioned]), shown outside fullscreen.
   final Widget? overlay;
 
-  /// The speed graph (a [Positioned]), shown outside fullscreen.
-  final Widget? speedGraph;
+  /// "Clip 2 of 6", shown outside fullscreen; left out when null.
+  final String? clipLabel;
 
   /// Whether the screen is in fullscreen playback.
   final bool isFullscreen;
@@ -65,27 +79,27 @@ class PlaybackVideoArea extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Stack(
+    final clipLabel = this.clipLabel;
+    final stack = Stack(
       children: [
-        video,
+        Positioned.fill(child: video),
         ?overlay,
-        ?speedGraph,
+        if (clipLabel != null && !isFullscreen)
+          Positioned(left: 10, top: 10, child: _VideoChip(label: clipLabel)),
         Positioned(
-          top: 10,
-          right: 10,
-          child: Container(
-            decoration: BoxDecoration(
-              color: Colors.black.withValues(alpha: 0.45),
-              borderRadius: BorderRadius.circular(20),
+          top: 4,
+          right: 4,
+          child: IconButton(
+            onPressed: onToggleFullscreen,
+            style: IconButton.styleFrom(
+              backgroundColor: MotoColors.bg.withValues(alpha: 0.72),
+              minimumSize: const Size.square(MotoSize.minTarget),
             ),
-            child: IconButton(
-              onPressed: onToggleFullscreen,
-              icon: Icon(
-                isFullscreen ? Icons.fullscreen_exit : Icons.fullscreen,
-                color: Colors.white,
-              ),
-              tooltip: isFullscreen ? 'Exit fullscreen' : 'Fullscreen',
+            icon: Icon(
+              isFullscreen ? Icons.fullscreen_exit : Icons.fullscreen,
+              color: MotoColors.text,
             ),
+            tooltip: isFullscreen ? 'Exit fullscreen' : 'Fullscreen',
           ),
         ),
         if (isFullscreen)
@@ -100,21 +114,46 @@ class PlaybackVideoArea extends StatelessWidget {
                   vertical: 4,
                 ),
                 decoration: BoxDecoration(
-                  color: Colors.black.withValues(alpha: 0.45),
-                  borderRadius: BorderRadius.circular(12),
+                  color: MotoColors.bg.withValues(alpha: 0.72),
+                  borderRadius: BorderRadius.circular(MotoRadii.sm),
                 ),
-                child: const Text(
+                child: Text(
                   'Tap video to show controls',
-                  style: TextStyle(
-                    color: Colors.white70,
-                    fontSize: 11,
-                    fontWeight: FontWeight.w600,
+                  style: MotoFonts.bodyStyle(
+                    12,
+                    weight: FontWeight.w600,
+                    color: MotoColors.dim,
                   ),
                 ),
               ),
             ),
           ),
       ],
+    );
+    if (isFullscreen) {
+      return ColoredBox(color: Colors.black, child: stack);
+    }
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(MotoRadii.md),
+      child: ColoredBox(color: MotoColors.surface, child: stack),
+    );
+  }
+}
+
+class _VideoChip extends StatelessWidget {
+  const _VideoChip({required this.label});
+
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 3),
+      decoration: BoxDecoration(
+        color: MotoColors.bg,
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Text(label, style: MotoFonts.bodyStyle(13, color: MotoColors.dim)),
     );
   }
 }
@@ -141,20 +180,25 @@ class PlaybackErrorView extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Center(
-      child: Padding(
+      child: SingleChildScrollView(
         padding: const EdgeInsets.all(24),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Icon(Icons.videocam_off, size: 48, color: Colors.white54),
+            const Icon(Icons.videocam_off, size: 48, color: MotoColors.muted),
             const SizedBox(height: 12),
-            Text(message, textAlign: TextAlign.center),
+            Text(
+              message,
+              textAlign: TextAlign.center,
+              style: MotoFonts.bodyStyle(15, color: MotoColors.text),
+            ),
             const SizedBox(height: 16),
-            Row(
-              mainAxisSize: MainAxisSize.min,
+            Wrap(
+              alignment: WrapAlignment.center,
+              spacing: 12,
+              runSpacing: 8,
               children: [
                 OutlinedButton(onPressed: onBack, child: const Text('Back')),
-                const SizedBox(width: 12),
                 FilledButton(onPressed: onRetry, child: const Text('Retry')),
               ],
             ),
