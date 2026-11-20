@@ -1660,12 +1660,7 @@ class CameraProvider extends ChangeNotifier {
 
       // A controller lost meanwhile fails in the fallback below, as before.
       final rideController = _controller;
-      if (rideController != null &&
-          !await lockCaptureForRide(
-            rideController,
-            _rideCaptureOrientation,
-            log: _log,
-          )) {
+      if (rideController != null && !await lockRideCapture(rideController)) {
         _lastRecordingError = captureOrientationLockFailedMessage;
         _state = RecordingState.idle;
         return false;
@@ -1810,6 +1805,12 @@ class CameraProvider extends ChangeNotifier {
   static bool _isLandscapeCapture(DeviceOrientation orientation) =>
       orientation == DeviceOrientation.landscapeLeft ||
       orientation == DeviceOrientation.landscapeRight;
+
+  /// [lockCaptureForRide] for this ride's orientation, as START calls it;
+  /// a refusal's exception goes to the diagnostic log.
+  @visibleForTesting
+  Future<bool> lockRideCapture(CameraController controller) =>
+      lockCaptureForRide(controller, _rideCaptureOrientation, log: _logError);
 
   /// Locks [controller]'s capture to a ride's [orientation] before its first
   /// segment. Returns `false` when the ride must not start: a landscape
