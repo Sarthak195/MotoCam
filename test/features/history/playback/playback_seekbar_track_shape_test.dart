@@ -66,9 +66,10 @@ void main() {
     expect(
       slider,
       paints
+        // The notches go in under the range fills, the ticks after.
+        ..line(color: MotoColors.bg)
         ..line(color: MotoColors.bg)
         ..line(color: clipEdgeColor)
-        ..line(color: MotoColors.bg)
         ..line(color: clipEdgeColor),
     );
   });
@@ -97,13 +98,45 @@ void main() {
     expect(
       slider,
       paints
+        ..line(color: MotoColors.bg)
         ..rect(color: noVideoColor.withValues(alpha: 0.86))
         ..rect(color: missingFootageColor.withValues(alpha: 0.86))
         ..rect(color: failedCheckColor.withValues(alpha: 0.86))
-        ..line(color: MotoColors.bg)
         ..line(color: clipEdgeColor)
         ..path(color: lockMarkerColor)
         ..path(color: incidentMarkerColor),
+    );
+  });
+
+  testWidgets('a short failed-check range on a clip edge is painted over '
+      'the notch', (tester) async {
+    // A 30 s last clip on a 2 h ride: about 1.4 px on this track, starting
+    // exactly on the clip edge. The notch must not hide it.
+    await _pumpSeekbar(
+      tester,
+      const PlaybackSeekbarTrackShape(
+        totalDurationMs: 7200000,
+        failedCheckRanges: <PlaybackRange>[
+          PlaybackRange(startMs: 7170000, endMs: 7200000),
+        ],
+        clipEdgeMs: <int>[7170000],
+      ),
+    );
+
+    final slider = tester.renderObject(find.byType(Slider));
+    expect(
+      slider,
+      paints
+        ..line(color: MotoColors.bg)
+        ..rect(color: failedCheckColor.withValues(alpha: 0.86)),
+    );
+    expect(
+      slider,
+      isNot(
+        paints
+          ..rect(color: failedCheckColor.withValues(alpha: 0.86))
+          ..line(color: MotoColors.bg),
+      ),
     );
   });
 

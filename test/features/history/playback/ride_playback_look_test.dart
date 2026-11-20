@@ -316,10 +316,10 @@ void main() {
         expect(
           slider,
           paints
+            ..line(color: MotoColors.bg)
             ..rect(color: noVideoColor.withValues(alpha: 0.86))
             ..rect(color: missingFootageColor.withValues(alpha: 0.86))
             ..rect(color: failedCheckColor.withValues(alpha: 0.86))
-            ..line(color: MotoColors.bg)
             ..line(color: clipEdgeColor)
             ..path(color: lockMarkerColor)
             ..path(color: lockMarkerColor)
@@ -607,5 +607,53 @@ void main() {
       await tester.pump();
       expect(calls, isEmpty);
     });
+  });
+
+  group('loading and error', () {
+    for (final failed in <bool>[false, true]) {
+      testWidgets('the stop-export ring stays reachable while the ride '
+          '${failed ? 'shows a playback error' : 'loads'}', (tester) async {
+        tester.view
+          ..physicalSize = const Size(390, 844)
+          ..devicePixelRatio = 1;
+        addTearDown(tester.view.reset);
+        final harness = _Harness(exporting: true);
+        addTearDown(harness.dispose);
+        await tester.pumpWidget(
+          MaterialApp(
+            theme: buildAppTheme(),
+            home: Scaffold(
+              body: RidePlaybackStatusLayout(
+                header: PlaybackHeader(
+                  title: '13 Nov 2025, 13:21',
+                  subtitle: '1 h 52 min',
+                  compact: false,
+                  onBack: () => harness.calls.add('back'),
+                ),
+                integrity: const SizedBox.shrink(),
+                actions: PlaybackRideActions(
+                  position: harness.position,
+                  exportProgress: harness.progress,
+                  rideKey: _rideKey,
+                  enabled: !failed,
+                  height: 56,
+                  onExport: (destination, playheadMs) =>
+                      harness.calls.add('export'),
+                  onStopExport: () => harness.calls.add('stop'),
+                  onUnlock: () => harness.calls.add('unlock'),
+                ),
+                child: failed
+                    ? const Center(child: Text('Could not play this ride'))
+                    : const Center(child: CircularProgressIndicator()),
+              ),
+            ),
+          ),
+        );
+        await tester.pump();
+        expect(tester.takeException(), isNull);
+        await tester.tap(find.byTooltip('Stop export'));
+        expect(harness.calls, ['stop']);
+      });
+    }
   });
 }

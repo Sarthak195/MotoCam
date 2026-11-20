@@ -372,3 +372,38 @@ class _RidePlaybackBodyState extends State<RidePlaybackBody> {
     );
   }
 }
+
+/// Ride Playback while the ride loads or nothing is playable: the header
+/// keeps Back reachable, the integrity strip keeps "Check videos again"
+/// where it was, and the ride actions (when given) keep the stop-export
+/// ring reachable under the error or the spinner.
+class RidePlaybackStatusLayout extends StatelessWidget {
+  const RidePlaybackStatusLayout({
+    super.key,
+    required this.header,
+    required this.integrity,
+    required this.child,
+    this.actions,
+  });
+
+  final Widget header;
+  final Widget integrity;
+
+  /// The error view or the loading spinner.
+  final Widget child;
+  final Widget? actions;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        header,
+        const SizedBox(height: 6),
+        integrity,
+        Expanded(child: child),
+        ?actions,
+      ],
+    );
+  }
+}

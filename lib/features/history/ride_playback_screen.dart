@@ -1306,28 +1306,23 @@ class _RidePlaybackScreenState extends State<RidePlaybackScreen>
     final exportProgress = _exportProgress;
 
     if (playbackError != null || _isLoading || controller == null) {
-      // Loading or nothing playable: the header keeps Back reachable, and
-      // the integrity strip keeps "Check videos again" where it was.
       return Scaffold(
         body: SafeArea(
           child: Padding(
             padding: const EdgeInsets.all(16),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                _buildHeader(landscape: false),
-                const SizedBox(height: 6),
-                _buildIntegrity(landscape: false),
-                Expanded(
-                  child: playbackError != null
-                      ? PlaybackErrorView(
-                          message: playbackError,
-                          onBack: () => Navigator.of(context).maybePop(),
-                          onRetry: _retryPlayback,
-                        )
-                      : const Center(child: CircularProgressIndicator()),
-                ),
-              ],
+            child: RidePlaybackStatusLayout(
+              header: _buildHeader(landscape: false),
+              integrity: _buildIntegrity(landscape: false),
+              actions: exportProgress == null
+                  ? null
+                  : _buildRideActions(exportProgress, landscape: false),
+              child: playbackError != null
+                  ? PlaybackErrorView(
+                      message: playbackError,
+                      onBack: () => Navigator.of(context).maybePop(),
+                      onRetry: _retryPlayback,
+                    )
+                  : const Center(child: CircularProgressIndicator()),
             ),
           ),
         ),

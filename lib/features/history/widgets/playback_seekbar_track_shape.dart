@@ -146,8 +146,26 @@ class PlaybackSeekbarTrackShape extends SliderTrackShape
       return trackRect.left + (trackRect.width * normalized);
     }
 
+    final centerY = trackRect.center.dy;
+    final halfTrack = trackRect.height / 2;
+
     canvas.save();
     canvas.clipRRect(trackRRect);
+    // Clip edges: a background-coloured notch across the track, so the
+    // clips read as separate pieces. It goes under the range fills, so a
+    // short failed-check, missing or no-video range on an edge still shows.
+    final notchPaint = Paint()
+      ..color = MotoColors.bg
+      ..strokeWidth = 3;
+    for (final edgeMs in clipEdgeMs) {
+      final x = xFor(edgeMs);
+      canvas.drawLine(
+        Offset(x, trackRect.top),
+        Offset(x, trackRect.bottom),
+        notchPaint,
+      );
+    }
+
     void drawRanges(List<PlaybackRange> ranges, Color color) {
       final paint = Paint()..color = color.withValues(alpha: 0.86);
       for (final range in ranges) {
@@ -168,24 +186,12 @@ class PlaybackSeekbarTrackShape extends SliderTrackShape
     drawRanges(failedCheckRanges, failedCheckColor);
     canvas.restore();
 
-    final centerY = trackRect.center.dy;
-    final halfTrack = trackRect.height / 2;
-
-    // Clip edges: a background-coloured notch across the track, so the
-    // clips read as separate pieces, and a muted tick under it.
-    final notchPaint = Paint()
-      ..color = MotoColors.bg
-      ..strokeWidth = 3;
+    // Clip edges: a muted tick under the track.
     final tickPaint = Paint()
       ..color = clipEdgeColor
       ..strokeWidth = 1.5;
     for (final edgeMs in clipEdgeMs) {
       final x = xFor(edgeMs);
-      canvas.drawLine(
-        Offset(x, centerY - halfTrack - 2),
-        Offset(x, centerY + halfTrack + 2),
-        notchPaint,
-      );
       canvas.drawLine(
         Offset(x, centerY + halfTrack + 4),
         Offset(x, centerY + halfTrack + 8),
