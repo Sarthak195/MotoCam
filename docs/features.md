@@ -365,7 +365,7 @@ MotoCam keeps a log of app errors on the phone, so a tester can send it when som
 - **What it never holds.** No position, speed, route or anything about other people. Web addresses are cut to their host, so a map tile address does not reveal where the ride was, and the piece of file text a parse error quotes is removed. Error text can name app-private file names, such as a clip's date-stamped file name.
 - **Size.** About 1 MB, then it starts a new file and keeps the previous one: at most two files, about 2 MB.
 - **Share diagnostic log** asks first ("It holds app errors, crash and freeze reports, the app version and the phone model, and no location, speed or route.") and then opens the Android share sheet with the two text files. With no log yet it says `The diagnostic log is empty.`
-- **Clear diagnostic log** asks first, then deletes the log and any copy staged for sharing.
+- **Clear diagnostic log** asks first, then deletes the log and any copy staged for sharing, and starts the new log with this start's header (app version, build, phone), so a log shared later still names the build.
 
 ## Permissions
 
