@@ -258,8 +258,8 @@ const String diagnosticShareFolder = 'diagnostics';
 
 /// What the share confirmation tells the rider.
 const String diagnosticShareConfirmText =
-    'The diagnostic log holds app errors, crash and freeze reports, the app '
-    'version and the phone model. It holds no location, speed or route.';
+    'It holds app errors, crash and freeze reports, the app version and the '
+    'phone model, and no location, speed or route.';
 
 /// Copies the log files into `<cacheDirectory>/ride_export/diagnostics`
 /// (cleared first) and returns their paths, oldest first; empty when there
