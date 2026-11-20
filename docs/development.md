@@ -147,7 +147,7 @@ flutter test --plain-name "incident"                                 # by name s
 flutter test --coverage                                              # writes coverage/lcov.info
 ```
 
-At the last full count there were 760 tests in 54 files, and all passed (a full `flutter test` run on the `feat/ride-export` branch, 2026-11-20). The diagnostic log added two test files with 28 tests (`test/core/diagnostics/`) and 3 widget tests in `recording_settings_sheet_test.dart`; they are not yet in the table below. Ride export added four test files with 89 tests (8 in `ride_export_channel_test.dart`, 61 in `ride_export_test.dart`, 5 in `ride_export_gate_test.dart` and 15 in `ride_export_flow_test.dart`; the exact-seconds sections are covered in the planning, run, manifest and README tests and in the dialog tests), which are counted in the Services, Camera, History services and History widgets rows below. The table groups the tests by area.
+At the last full count there were 761 tests in 54 files, and all passed (a full `flutter test` run on the `feat/ride-export` branch, 2026-11-20). The diagnostic log added two test files with 29 tests (`test/core/diagnostics/`) and 3 widget tests in `recording_settings_sheet_test.dart`; they are not yet in the table below. Ride export added four test files with 89 tests (8 in `ride_export_channel_test.dart`, 61 in `ride_export_test.dart`, 5 in `ride_export_gate_test.dart` and 15 in `ride_export_flow_test.dart`; the exact-seconds sections are covered in the planning, run, manifest and README tests and in the dialog tests), which are counted in the Services, Camera, History services and History widgets rows below. The table groups the tests by area.
 
 | Area | Files | Tests | What it covers |
 |---|---|---|---|

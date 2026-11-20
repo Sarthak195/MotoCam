@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -69,6 +70,28 @@ void main() {
       expect(line, contains('https://docs.flutter.dev/...'));
       expect(line, contains('http://example.com'));
     });
+  });
+
+  test('the source excerpt of a FormatException is removed', () {
+    Object? caught;
+    try {
+      jsonDecode('{"lat": 48.85661, "lon": 2.35222, "speedKmh": 31.5');
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught, isA<FormatException>());
+    expect('$caught', contains('48.85661'));
+    final line = DiagnosticLog.formatLine(
+      DateTime.utc(2026),
+      DiagnosticLogLevel.error,
+      'telemetry',
+      'Ride load failed: $caught | $caught | Stack: #0 main',
+    );
+    expect(line, isNot(contains('48.85661')));
+    expect(line, isNot(contains('31.5')));
+    expect(line, contains('FormatException: Unexpected end of input'));
+    expect(line, contains('[source text removed]'));
+    expect(line, contains('Stack: #0 main'));
   });
 
   test('errors reach the file with their stack, info lines after the '

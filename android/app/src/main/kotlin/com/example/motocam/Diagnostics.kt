@@ -282,10 +282,10 @@ object Diagnostics {
         ApplicationExitInfo.REASON_USER_STOPPED -> "USER_STOPPED"
         ApplicationExitInfo.REASON_DEPENDENCY_DIED -> "DEPENDENCY_DIED"
         ApplicationExitInfo.REASON_OTHER -> "OTHER"
-        // Added in API 33 and 34; the values are fixed.
-        14 -> "FREEZER"
-        15 -> "PACKAGE_STATE_CHANGE"
-        16 -> "PACKAGE_UPDATED"
+        // Added in API 33 and 34; constants, so safe to compare on older ones.
+        ApplicationExitInfo.REASON_FREEZER -> "FREEZER"
+        ApplicationExitInfo.REASON_PACKAGE_STATE_CHANGE -> "PACKAGE_STATE_CHANGE"
+        ApplicationExitInfo.REASON_PACKAGE_UPDATED -> "PACKAGE_UPDATED"
         else -> "REASON_$reason"
     }
 }

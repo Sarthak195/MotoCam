@@ -239,11 +239,20 @@ class _RecordingSettingsSheetState extends State<RecordingSettingsSheet> {
     return confirmed ?? false;
   }
 
-  void _showDiagnosticMessage(String message) {
-    ScaffoldMessenger.maybeOf(
-      context,
-    )?.showSnackBar(SnackBar(content: Text(message)));
-  }
+  // A dialog, not a SnackBar: the sheet would cover a SnackBar shown on the
+  // screen under it.
+  Future<void> _showDiagnosticMessage(String message) => showDialog<void>(
+    context: context,
+    builder: (dialogContext) => AlertDialog(
+      content: Text(message),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(dialogContext).pop(),
+          child: const Text('OK'),
+        ),
+      ],
+    ),
+  );
 
   Future<void> _shareDiagnosticLog() async {
     if (!await _confirm(
@@ -267,9 +276,9 @@ class _RecordingSettingsSheetState extends State<RecordingSettingsSheet> {
       case DiagnosticShareResult.shared:
         break;
       case DiagnosticShareResult.empty:
-        _showDiagnosticMessage('The diagnostic log is empty.');
+        await _showDiagnosticMessage('The diagnostic log is empty.');
       case DiagnosticShareResult.failed:
-        _showDiagnosticMessage('Could not share the diagnostic log.');
+        await _showDiagnosticMessage('Could not share the diagnostic log.');
     }
   }
 
@@ -291,7 +300,7 @@ class _RecordingSettingsSheetState extends State<RecordingSettingsSheet> {
     if (!mounted) {
       return;
     }
-    _showDiagnosticMessage(
+    await _showDiagnosticMessage(
       cleared
           ? 'Diagnostic log cleared.'
           : 'Could not clear the diagnostic log.',

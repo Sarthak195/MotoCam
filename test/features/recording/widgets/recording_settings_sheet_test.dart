@@ -131,8 +131,11 @@ void main() {
       );
       await tapEntry(tester, 'Share diagnostic log');
       await tester.tap(find.text('SHARE'));
-      await tester.pump();
+      await tester.pumpAndSettle();
       expect(find.text('The diagnostic log is empty.'), findsOneWidget);
+      await tester.tap(find.text('OK'));
+      await tester.pumpAndSettle();
+      expect(find.text('The diagnostic log is empty.'), findsNothing);
     });
 
     testWidgets('clear asks first and reports the result', (tester) async {
@@ -148,7 +151,7 @@ void main() {
       await tapEntry(tester, 'Clear diagnostic log');
       expect(find.text('Clear diagnostic log?'), findsOneWidget);
       await tester.tap(find.text('CLEAR'));
-      await tester.pump();
+      await tester.pumpAndSettle();
       expect(clears, 1);
       expect(find.text('Diagnostic log cleared.'), findsOneWidget);
     });

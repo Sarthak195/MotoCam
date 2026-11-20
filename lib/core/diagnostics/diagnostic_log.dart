@@ -115,13 +115,26 @@ class DiagnosticLog {
     caseSensitive: false,
   );
 
+  // The source excerpt a FormatException prints on the lines after its
+  // message (and the caret under it), which can be a ride file's text.
+  static final RegExp _formatSource = RegExp(
+    r'(FormatException[^\n]*)\n[^\n]*(?:\n *\^)?',
+  );
+
   /// [text] with every web address cut to its scheme and host
-  /// (`https://host/...`): a path or query can hold a map tile position.
-  static String redact(String text) => text.replaceAllMapped(_webAddress, (m) {
-    final whole = m.group(0)!;
-    final origin = '${m.group(1)}://${m.group(2)}';
-    return whole.length > origin.length ? '$origin/...' : origin;
-  });
+  /// (`https://host/...`), as a path or query can hold a map tile position,
+  /// and the source excerpt of a `FormatException` removed, as it can hold
+  /// a slice of a ride file (positions and speeds).
+  static String redact(String text) => text
+      .replaceAllMapped(
+        _formatSource,
+        (m) => '${m.group(1)} [source text removed]',
+      )
+      .replaceAllMapped(_webAddress, (m) {
+        final whole = m.group(0)!;
+        final origin = '${m.group(1)}://${m.group(2)}';
+        return whole.length > origin.length ? '$origin/...' : origin;
+      });
 
   /// Formats one line: `<UTC time> <LEVEL> [<source>] <message>`, with line
   /// breaks written as `\n`, web addresses cut to their host (see
